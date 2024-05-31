@@ -151,6 +151,7 @@ members = [
     "peer-monitoring-service/server",
     "peer-monitoring-service/types",
     "protos/rust",
+    "raikou",
     "sdk",
     "secure/net",
     "secure/storage",
@@ -451,6 +452,7 @@ aptos-vm-validator = { path = "vm-validator" }
 aptos-warp-webserver = { path = "crates/aptos-warp-webserver" }
 aptos-writeset-generator = { path = "aptos-move/writeset-transaction-generator" }
 aptos-cargo-cli = { path = "devtools/aptos-cargo-cli" }
+raikou = { path = "raikou" }
 
 # External crate dependencies.
 # Please do not add any test features here: they should be declared by the individual crate.
@@ -682,6 +684,7 @@ quick_cache = "0.5.1"
 quote = "1.0.18"
 rand = "0.7.3"
 rand_core = "0.5.1"
+rand_distr = "0.2.2"
 random_word = "0.3.0"
 rayon = "1.5.2"
 redis = { version = "0.22.3", features = [

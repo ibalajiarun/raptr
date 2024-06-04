@@ -107,8 +107,9 @@ where
         self.inner.lock().await.acs.extend(new_acs);
     }
 
-    async fn check_stored(&self, batch: &BatchHash) -> bool {
-        self.inner.lock().await.batches.contains_key(batch)
+    async fn check_stored_all(&self, batches: &Vec<BatchHash>) -> bool {
+        let inner = self.inner.lock().await;
+        batches.into_iter().all(|batch| inner.batches.contains_key(&batch))
     }
 
     async fn notify_commit(&self, payloads: Vec<Payload>) {

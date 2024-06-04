@@ -294,7 +294,7 @@ pub struct Config<S> {
     /// The time validator waits after receiving a block before voting for a QC for it
     /// if it doesn't have all the batches yet.
     pub extra_wait_before_qc_vote: Duration,
-    
+
     pub end_of_run: Instant,
 }
 
@@ -455,7 +455,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         while self.stored_prefix_cache.1 < block.n_batches()
             && self
                 .dissemination
-                .check_stored(&block.batch(self.stored_prefix_cache.1).digest)
+                .check_stored_all(&vec![block.batch(self.stored_prefix_cache.1).digest])
                 .await
         {
             self.stored_prefix_cache.1 += 1;
@@ -648,7 +648,7 @@ where
                 self.advance_r_ready(round, reason, ctx).await;
 
                 ctx.set_timer(self.config.extra_wait_before_qc_vote, TimerEvent::QcVote(round));
-                
+
                 // store the ACs
                 self.dissemination.prefetch_payload_data(payload).await;
             }

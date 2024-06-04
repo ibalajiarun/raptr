@@ -10,7 +10,7 @@ pub trait DisseminationLayer: Send + Sync + 'static {
 
     fn prefetch_payload_data(&self, payload: Payload) -> impl Future<Output = ()> + Send;
 
-    fn check_stored(&self, batch: &BatchHash) -> impl Future<Output = bool> + Send;
+    fn check_stored_all(&self, batch: &Vec<BatchHash>) -> impl Future<Output = bool> + Send;
 
     fn notify_commit(&self, payloads: Vec<Payload>) -> impl Future<Output = ()> + Send;
 }

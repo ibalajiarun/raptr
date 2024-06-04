@@ -4,7 +4,13 @@ use crate::framework::NodeId;
 use bitvec::prelude::BitVec;
 use std::sync::Arc;
 
+// Unsafe crypto, for simulation and testing purposes only.
 pub type HashValue = u64;
+
+// TODO: add signatures to the protocol
+// pub struct Signature(NodeId, HashValue);
+// pub struct SignatureShare(NodeId, HashValue);
+// pub struct MultiSignature(BitVec, HashValue);
 
 pub type BatchId = i64;
 

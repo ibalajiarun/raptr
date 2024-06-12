@@ -1,71 +1,88 @@
 use crate::{
     framework::NodeId,
     raikou::{
-        types::{BatchId, Round, *},
-        Block, Config,
+        types::{Round, *},
     },
 };
-use bitvec::prelude::BitVec;
-use defaultmap::DefaultBTreeMap;
 use itertools::Itertools;
-use log::warn;
 use std::{
     cmp::{max, min},
     collections::{BTreeMap, BTreeSet},
     time::Duration,
 };
+use log::warn;
 use tokio::time::Instant;
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-/// Penalty tracker report entry for the optimistic batches from a single node.
+pub trait Millis {
+    fn as_millis_f32(&self) -> f32;
+
+    fn from_millis_f32(millis: f32) -> Self;
+}
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+/// Penalty tracker report for the optimistically proposed batches from a single node for
+/// a single node. See the description of `PenaltyTrackerReport` for details.
 pub enum PenaltyTrackerReportEntry {
-    // TODO: it should be probably compressed to a single i8 or i16 or f32.
-    //       We don't need a lot of precision here.
-    /// `Advantage(x)` means that the sender of the report had all the optimistically proposed
-    /// batches issued by the node `x` time units before the sender of the report received
-    /// the block from the leader.
-    Advantage(Duration),
-    /// `Missing(sn)` means that the sender of the report was missing the batch with
-    /// sequence number `sn` from the node. Of all such batches, the highest-ranked one
-    /// (i.e., the first in the block) is reported.
-    Missing(BatchId),
-    /// `None` means that there were no batches from this node proposed.
+    Delay(usize, f32),
+
+    Missing(usize, f32),
+
     None,
 }
 
 /// Type alias for readability.
 type NodeIdMap<T> = Vec<T>;
 
-pub struct PenaltyTracker<S> {
-    config: Config<S>,
+/// `Delay(k, x)` on position `i` in the report means that the sender of the report had all the
+/// optimistically proposed batches issued by node `i` `x` milliseconds after (if `x` is positive)
+/// or `-x` milliseconds before (if `x` is negative) the sender of the report received the block
+/// from the leader and the batch that was on the `k`th position in the block was received last
+/// among all optimistically proposed batches issued by node `i`.
+///
+/// `Missing(k, x)` on position `i` in the report means that the sender of the report was missing
+/// the batch that was on `k`th position in the block issued by node `i` has not been yet received
+/// when the report was prepared, `x` seconds after the sender of the report received the block
+/// from the leader. Of all such batches, the smallest `k` is reported as it was supposedly
+/// received the earliest by the leader.
+///
+/// `None` on position `i` in the report  means that there were no optimistically proposed batches
+/// issued by node `i` in the block.
+pub type PenaltyTrackerReports = NodeIdMap<PenaltyTrackerReportEntry>;
 
-    batch_receive_time: BTreeMap<BatchInfo, Instant>,
+#[derive(Clone)]
+pub struct Config {
+    pub n_nodes: usize,
+    pub f: usize,
+    pub enable: bool,
+}
+
+pub struct PenaltyTracker {
+    config: Config,
+
+    batch_receive_time: BTreeMap<BatchHash, Instant>,
+    penalties: NodeIdMap<Duration>,
 
     // The variables below are relative to the last round this node was leader.
     last_round_this_node_was_leader: Round,
-    proposed_batches: Vec<BatchInfo>,
     block_issue_time: Instant,
-    received_reports: BTreeSet<NodeId>,
-    // The following
-    advantage_votes: NodeIdMap<Vec<Duration>>,
-    batch_missing_votes: NodeIdMap<Vec<Duration>>,
-    penalty: NodeIdMap<Duration>,
+    proposed_batches: Vec<BatchInfo>,
+    batch_authors: BTreeSet<NodeId>,
+    reports: BTreeMap<NodeId, BTreeMap<NodeId, f32>>,
 }
 
-impl<S> PenaltyTracker<S> {
-    pub fn new(config: Config<S>) -> Self {
+impl PenaltyTracker {
+    pub fn new(config: Config) -> Self {
         let n_nodes = config.n_nodes;
 
         Self {
             config,
             batch_receive_time: Default::default(),
-            last_round_this_node_was_leader: 0,
+            penalties: vec![Duration::ZERO; n_nodes],
+            last_round_this_node_was_leader: -1,
             proposed_batches: vec![],
+            batch_authors: Default::default(),
             block_issue_time: Instant::now(),
-            received_reports: BTreeSet::new(),
-            advantage_votes: vec![vec![]; n_nodes],
-            batch_missing_votes: vec![vec![]; n_nodes],
-            penalty: vec![Duration::ZERO; n_nodes],
+            reports: Default::default(),
         }
     }
 
@@ -73,33 +90,45 @@ impl<S> PenaltyTracker<S> {
         &self,
         batches: &Vec<BatchInfo>,
         block_receive_time: Instant,
-    ) -> Vec<PenaltyTrackerReportEntry> {
-        assert!(self.config.enable_penalty_system);
+    ) -> PenaltyTrackerReports {
+        assert!(self.config.enable);
 
-        let mut advantages = vec![Duration::MAX; self.config.n_nodes];
+        let now = Instant::now();
+        assert!(now >= block_receive_time);
+
+        let mut delays = vec![(0, f32::MIN); self.config.n_nodes];
         let mut missing = vec![None; self.config.n_nodes];
-        for batch_ref in batches.iter().copied() {
-            if let Some(batch_receive_time) = self.batch_receive_time.get(&batch_ref).copied() {
-                advantages[batch_ref.node] = min(
-                    advantages[batch_ref.node],
-                    block_receive_time - batch_receive_time,
-                );
-            } else if missing[batch_ref.node].is_none() {
-                missing[batch_ref.node] = Some(batch_ref.sn);
+        let mut has_batches = vec![false; self.config.n_nodes];
+
+        for (batch_num, batch_info) in batches.iter().enumerate() {
+            has_batches[batch_info.author] = true;
+
+            if let Some(batch_receive_time) = self.batch_receive_time.get(&batch_info.digest).copied() {
+
+                let batch_delay = if batch_receive_time > block_receive_time {
+                    (batch_receive_time - block_receive_time).as_secs_f32()
+                } else {
+                    -(block_receive_time - batch_receive_time).as_secs_f32()
+                };
+
+                if batch_delay > delays[batch_info.author].1 {
+                    delays[batch_info.author] = (batch_num, batch_delay);
+                }
+            } else if missing[batch_info.author].is_none() {
+                missing[batch_info.author] = Some(batch_num);
             }
         }
 
-        advantages
-            .into_iter()
-            .zip(missing)
-            .map(|(advantage, missing_sn)| {
-                match (advantage, missing_sn) {
-                    // No batches from the node.
-                    (Duration::MAX, None) => PenaltyTrackerReportEntry::None,
-                    // There was a missing batch.
-                    (_advantage, Some(sn)) => PenaltyTrackerReportEntry::Missing(sn),
-                    // All batches were received `advantage` time units before the block.
-                    (advantage, None) => PenaltyTrackerReportEntry::Advantage(advantage),
+        (0..self.config.n_nodes)
+            .map(|node_id| {
+                if !has_batches[node_id] {
+                    PenaltyTrackerReportEntry::None
+                } else if let Some(batch_num) = missing[node_id] {
+                    PenaltyTrackerReportEntry::Missing(batch_num, (now - block_receive_time).as_secs_f32())
+                } else {
+                    let (batch_num, delay) = delays[node_id];
+                    assert_ne!(delay, f32::MIN);
+                    PenaltyTrackerReportEntry::Delay(batch_num, delay)
                 }
             })
             .collect()
@@ -108,104 +137,142 @@ impl<S> PenaltyTracker<S> {
     pub fn register_reports(
         &mut self,
         round: Round,
-        reporting_node: NodeId,
-        reports: Vec<PenaltyTrackerReportEntry>,
+        reporter: NodeId,
+        reports: PenaltyTrackerReports,
     ) {
-        assert!(self.config.enable_penalty_system);
+        assert!(self.config.enable);
 
-        if round == self.last_round_this_node_was_leader
-            && !self.received_reports.contains(&reporting_node)
-        {
-            self.received_reports.insert(reporting_node);
-            for (node_id, report) in reports.into_iter().enumerate() {
-                match report {
-                    PenaltyTrackerReportEntry::Advantage(advantage) => {
-                        self.advantage_votes[node_id].push(advantage);
-                    },
-                    PenaltyTrackerReportEntry::Missing(sn) => {
-                        let batch_ref = BatchInfo { node: node_id, sn };
-                        if !self.batch_receive_time.contains_key(&batch_ref) {
-                            warn!(
-                                "Received a report about an unknown missing batch {:?} \
-                                  from node {reporting_node}. Either node {} is Byzantine or \
-                                  there is a bug in the code.",
-                                batch_ref, reporting_node
-                            );
-                            continue;
-                        }
+        if round != self.last_round_this_node_was_leader || self.reports.contains_key(&reporter) {
+            return;
+        }
 
-                        let batch_propose_delay = self.batch_propose_delay(batch_ref);
-                        self.batch_missing_votes[node_id].push(batch_propose_delay);
-                    },
-                    PenaltyTrackerReportEntry::None => {
-                        // No action.
-                    },
-                }
+        let mut processed_reports = BTreeMap::new();
+
+        for (node_id, report) in reports.into_iter().enumerate() {
+            match report {
+                PenaltyTrackerReportEntry::Delay(batch_num, delay) => {
+                    if self.proposed_batches[batch_num].author != node_id {
+                        warn!("Received invalid penalty tracker report from node {}", reporter);
+                        return;
+                    }
+
+                    let adjusted_delay = delay + self.batch_propose_delay(&self.proposed_batches[batch_num]).as_secs_f32();
+                    processed_reports.insert(node_id, adjusted_delay);
+                },
+                PenaltyTrackerReportEntry::Missing(batch_num, delay) => {
+                    if self.proposed_batches[batch_num].author != node_id {
+                        warn!("Received invalid penalty tracker report from node {}", reporter);
+                        return;
+                    }
+
+                    // For now, missing votes are treated the same as Delay votes.
+                    let adjusted_delay = delay + self.batch_propose_delay(&self.proposed_batches[batch_num]).as_secs_f32();
+                    processed_reports.insert(node_id, adjusted_delay);
+                },
+                PenaltyTrackerReportEntry::None => {
+                    if self.batch_authors.contains(&node_id) {
+                        warn!("Received invalid penalty tracker report from node {}", reporter);
+                        return
+                    }
+                },
             }
         }
+
+        self.reports.insert(reporter, processed_reports);
     }
 
-    fn batch_propose_delay(&self, batch_ref: BatchInfo) -> Duration {
-        self.block_issue_time - self.batch_receive_time[&batch_ref]
+    fn batch_propose_delay(&self, batch_info: &BatchInfo) -> Duration {
+        self.block_issue_time - self.batch_receive_time[&batch_info.digest]
     }
 
     fn compute_new_penalties(&self) -> Vec<Duration> {
-        assert!(self.config.enable_penalty_system);
+        assert!(self.config.enable);
+
+        // TODO: check for missing votes to ban Byzantine nodes.
+
+        // For each node that sent a report, compute the sum of reported delays.
+        let mut delay_sums = self
+            .reports
+            .iter()
+            .map(|(reporter, reports)| {
+                let delay_sum = reports
+                    .iter()
+                    .map(|(_, delay)| *delay as f64)
+                    .sum::<f64>();
+
+                (*reporter, delay_sum)
+            })
+            .collect_vec();
+
+        // Sort by the sum of reported delays in the ascending order.
+        delay_sums.sort_by(|(_, x), (_, y)| x.partial_cmp(y).unwrap());
+
+        // Select a quorum of nodes whose reports we will consider.
+        let quorum = delay_sums
+            .into_iter()
+            // Keep the n-f reports with the smallest sum of delays.
+            .take(self.config.n_nodes - self.config.f)
+            // Get the IDs of the reporting nodes.
+            .map(|(node_id, _)| node_id)
+            .collect_vec();
+
+        if quorum.len() < self.config.n_nodes - self.config.f {
+            // If there are not enough reports, the network must be in an asynchronous period.
+            // Do not change the penalties.
+            // TODO: What's the best strategy fo this case?
+            warn!("Not enough reports to compute new penalties. Either the network is \
+                   asynchronous or the penalty tracker is misconfigured.");
+            return self.penalties.clone();
+        }
+
+        // Compute the new penalties.
+        // The new penalties are computed in such a way that, if the next time this node is
+        // the leader all the message delays stay the same, the nodes in `quorum` will have
+        // all the batches optimistically proposed by the leader.
 
         let mut updated_penalties = vec![Duration::ZERO; self.config.n_nodes];
 
         for node_id in 0..self.config.n_nodes {
-            if self.batch_missing_votes[node_id].len() >= self.config.f + 1 {
-                // If the node had missing batches reported by >f nodes, increase its penalty
-                // so that, if all message delays stay the same, only f nodes will be missing
-                // batches in the next round.
-
-                let delay = self.batch_missing_votes[node_id]
+            if self.batch_authors.contains(&node_id) {
+                let max_reported_delay_in_a_quorum = quorum
                     .iter()
-                    .sorted_by_key(|x| std::cmp::Reverse(*x))
-                    // Skip f largest (potentially malicious) delays and take the (f+1)-st largest.
-                    .nth(self.config.f)
                     .copied()
+                    .map(|reporter| self.reports[&reporter][&node_id])
+                    .max_by(|x, y| x.partial_cmp(y).unwrap())
                     .unwrap();
 
-                assert!(delay >= self.penalty[node_id]);
-                // Always at least double the penalty when increasing it.
-                // Also, to speed up convergence, start from at least
-                // `self.config.extra_wait_before_qc_vote`.
-                updated_penalties[node_id] = max(
-                    max(
-                        self.config.extra_wait_before_qc_vote,
-                        self.penalty[node_id] * 2,
-                    ),
-                    delay + self.config.batch_interval,
-                );
-            } else if self.advantage_votes[node_id].len() >= self.config.n_nodes - self.config.f {
-                // If the node had no missing batches reported by >f nodes, decrease its penalty
-                // so that, if all message delays stay the same, at least n-f nodes will still
-                // not be missing any batches in the next round.
-
-                let mut advantage = self.advantage_votes[node_id]
-                    .iter()
-                    .sorted_by_key(|x| std::cmp::Reverse(*x))
-                    // Take the (n-f)-th largest advantage.
-                    .nth(self.config.n_nodes - self.config.f - 1)
-                    .copied()
-                    .unwrap();
-
-                advantage -= min(advantage, self.config.batch_interval);
-                let current_penalty = self.penalty[node_id];
-
-                // Always at most halve the penalty when decreasing it.
-                updated_penalties[node_id] = current_penalty - min(advantage, current_penalty / 2);
+                if max_reported_delay_in_a_quorum > 0. {
+                    // Increase penalty.
+                    // Always at least double the penalty when increasing it.
+                    updated_penalties[node_id] = self.penalties[node_id] + max(
+                        self.penalties[node_id],
+                        Duration::from_secs_f32(max_reported_delay_in_a_quorum),
+                    );
+                } else {
+                    // Decrease penalty.
+                    // Always at most halve the penalty when decreasing it.
+                    updated_penalties[node_id] = self.penalties[node_id] - min(
+                        self.penalties[node_id] / 2,
+                        Duration::from_secs_f32(-max_reported_delay_in_a_quorum),
+                    );
+                }
+            } else {
+                // TODO: What to do with nodes that have no optimistically proposed batches?
+                //       Most likely, it happens because they already have too large penalty
+                //       and their transactions go through the slow path.
+                //       At some point we should give them a chance to rehabilitate themselves.
+                // TODO: Idea: include their batch hashes in the block, but do not actually
+                //       commit them, just to collect reports.
+                updated_penalties[node_id] = self.penalties[node_id];
             }
         }
 
         updated_penalties
     }
 
-    pub fn on_new_batch(&mut self, batch_ref: BatchInfo) {
+    pub fn on_new_batch(&mut self, digest: BatchHash) {
         // This should be executed even when the penalty system is turned off.
-        self.batch_receive_time.insert(batch_ref, Instant::now());
+        self.batch_receive_time.insert(digest, Instant::now());
     }
 
     pub fn prepare_new_block(
@@ -213,11 +280,11 @@ impl<S> PenaltyTracker<S> {
         round: Round,
         batches: &BTreeSet<BatchInfo>,
     ) -> Vec<BatchInfo> {
-        if !self.config.enable_penalty_system {
+        if !self.config.enable {
             return batches
                 .iter()
-                .copied()
-                .sorted_by_key(|batch_ref| self.batch_receive_time[batch_ref])
+                .cloned()
+                .sorted_by_key(|batch_info| self.batch_receive_time[&batch_info.digest])
                 .collect();
         }
 
@@ -228,28 +295,24 @@ impl<S> PenaltyTracker<S> {
 
         let batches_to_propose: Vec<BatchInfo> = batches
             .into_iter()
-            .copied()
-            .map(|batch_ref| {
-                let receive_time = self.batch_receive_time[&batch_ref];
-                let safe_propose_time = receive_time + new_penalties[batch_ref.node];
-                (safe_propose_time, batch_ref)
+            .map(|batch_info| {
+                let receive_time = self.batch_receive_time[&batch_info.digest];
+                let safe_propose_time = receive_time + new_penalties[batch_info.author];
+                (safe_propose_time, batch_info)
             })
-            .sorted()
-            .filter(|&(safe_propose_time, _)| safe_propose_time <= now)
-            .map(|(_, batch_ref)| batch_ref)
-            .collect();
+            .sorted_by_key(|(safe_propose_time, _)| safe_propose_time)
+            .take_while(|&(safe_propose_time, _)| safe_propose_time <= now)
+            .map(|(_, batch_info)| batch_info)
+            .cloned()
+            .collect_vec();
+
+        self.penalties = new_penalties;
 
         self.last_round_this_node_was_leader = round;
-        self.proposed_batches = batches_to_propose.clone();
         self.block_issue_time = now;
-        self.received_reports.clear();
-        for votes in &mut self.advantage_votes {
-            votes.clear();
-        }
-        for votes in &mut self.batch_missing_votes {
-            votes.clear();
-        }
-        self.penalty = new_penalties;
+        self.proposed_batches = batches_to_propose.clone();
+        self.batch_authors.clear();
+        self.reports.clear();
 
         batches_to_propose
     }

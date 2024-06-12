@@ -1,17 +1,21 @@
-use crate::{
-    framework::{network::NetworkService, timer::TimerService, NodeId, Protocol},
-    protocol,
-    raikou::{dissemination::DisseminationLayer, types::*},
-};
-use bitvec::prelude::BitVec;
-use defaultmap::DefaultBTreeMap;
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     future::Future,
     sync::Arc,
     time::Duration,
 };
+
+use bitvec::prelude::BitVec;
+use defaultmap::DefaultBTreeMap;
 use tokio::time::Instant;
+
+use crate::{
+    framework::{network::NetworkService, NodeId, Protocol, timer::TimerService},
+    protocol,
+    raikou::{dissemination::DisseminationLayer, types::*},
+};
+use crate::raikou::penalty_tracker;
+use crate::raikou::penalty_tracker::PenaltyTracker;
 
 #[derive(Clone)]
 pub struct Batch {
@@ -46,13 +50,16 @@ pub enum TimerEvent {
 
 pub struct Config {
     pub n_nodes: usize,
+    pub f: usize,
     pub ac_quorum: usize,
     pub batch_interval: Duration,
+    pub enable_penalty_tracker: bool,
+    pub penalty_tracker_report_delay: Duration,
 }
 
 #[derive(Clone)]
 pub struct FakeDisseminationLayer<TI> {
-    inner: Arc<tokio::sync::Mutex<FakeDisseminationLayerInner<TI>>>,
+    inner: Arc<tokio::sync::Mutex<FakeDisseminationLayerProtocol<TI>>>,
 }
 
 impl<TI> FakeDisseminationLayer<TI>
@@ -61,7 +68,7 @@ where
 {
     pub fn new(node_id: NodeId, config: Config, txns_iter: TI) -> Self {
         Self {
-            inner: Arc::new(tokio::sync::Mutex::new(FakeDisseminationLayerInner::new(
+            inner: Arc::new(tokio::sync::Mutex::new(FakeDisseminationLayerProtocol::new(
                 node_id, config, txns_iter,
             ))),
         }
@@ -139,11 +146,13 @@ where
     }
 }
 
-pub struct FakeDisseminationLayerInner<TI> {
+pub struct FakeDisseminationLayerProtocol<TI> {
     txns_iter: TI,
     config: Config,
     node_id: NodeId,
 
+    penalty_tracker: PenaltyTracker,
+    
     // Storage for all received batches and the time when they were.
     batches: BTreeMap<BatchHash, Batch>,
     my_batches: BTreeMap<BatchId, BatchHash>,
@@ -162,17 +171,23 @@ pub struct FakeDisseminationLayerInner<TI> {
     batch_created_time: DefaultBTreeMap<BatchId, Instant>,
 }
 
-impl<TI> FakeDisseminationLayerInner<TI>
+impl<TI> FakeDisseminationLayerProtocol<TI>
 where
     TI: Iterator<Item = Vec<Txn>> + Send + Sync,
 {
     pub fn new(node_id: NodeId, config: Config, txns_iter: TI) -> Self {
         let n_nodes = config.n_nodes;
+        let penalty_tracker_config = penalty_tracker::Config {
+            n_nodes: config.n_nodes,
+            f: config.f,
+            enable: config.enable_penalty_tracker,
+        };
 
         Self {
             txns_iter,
             config,
             node_id,
+            penalty_tracker: PenaltyTracker::new(penalty_tracker_config),
             batches: BTreeMap::new(),
             my_batches: Default::default(),
             acs: BTreeMap::new(),
@@ -185,7 +200,7 @@ where
     }
 }
 
-impl<TI> Protocol for FakeDisseminationLayerInner<TI>
+impl<TI> Protocol for FakeDisseminationLayerProtocol<TI>
 where
     TI: Iterator<Item = Vec<Txn>> + Send + Sync,
 {
@@ -233,8 +248,7 @@ where
             if !self.batches.contains_key(&digest) {
                 self.batches.insert(digest, batch);
 
-                // TODO
-                // self.penalty_tracker.on_new_batch(batch_ref);
+                self.penalty_tracker.on_new_batch(digest);
 
                 ctx.unicast(Message::BatchStored(batch_id), p).await;
 

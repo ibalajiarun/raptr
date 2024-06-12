@@ -342,7 +342,7 @@ impl NetworkSender {
     }
 
     /// Tries to send msg to given recipients.
-    async fn send(&self, msg: ConsensusMsg, recipients: Vec<Author>) {
+    pub async fn send(&self, msg: ConsensusMsg, recipients: Vec<Author>) {
         fail_point!("consensus::send::any", |_| ());
         let network_sender = self.consensus_network_client.clone();
         let mut self_sender = self.self_sender.clone();

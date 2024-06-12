@@ -69,6 +69,7 @@ move-core-types = { workspace = true }
 num-derive = { workspace = true }
 num-traits = { workspace = true }
 once_cell = { workspace = true }
+raikou = { workspace = true }
 rand = { workspace = true }
 rayon = { workspace = true }
 scopeguard = { workspace = true }

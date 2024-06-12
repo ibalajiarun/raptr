@@ -8,6 +8,7 @@ use crate::{
     dag::DAGNetworkMessage,
     pipeline,
     quorum_store::types::{Batch, BatchMsg, BatchRequest, BatchResponse},
+    raikou_manager::RaikouNetworkMessage,
     rand::rand_gen::network_messages::RandGenMessage,
 };
 use aptos_config::network_id::{NetworkId, PeerNetworkId};
@@ -80,6 +81,7 @@ pub enum ConsensusMsg {
     /// OrderVoteMsg is the struct that is broadcasted by a validator on receiving quorum certificate
     /// on a block.
     OrderVoteMsg(Box<OrderVoteMsg>),
+    RaikouMessage(RaikouNetworkMessage),
 }
 
 /// Network type for consensus
@@ -107,6 +109,7 @@ impl ConsensusMsg {
             ConsensusMsg::CommitMessage(_) => "CommitMessage",
             ConsensusMsg::RandGenMessage(_) => "RandGenMessage",
             ConsensusMsg::BatchResponseV2(_) => "BatchResponseV2",
+            ConsensusMsg::RaikouMessage(_) => "RaikouMessage",
         }
     }
 }

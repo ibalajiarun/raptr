@@ -45,6 +45,7 @@ use crate::{
         quorum_store_coordinator::CoordinatorCommand,
         quorum_store_db::QuorumStoreStorage,
     },
+    raikou_manager::{RaikouManager, RaikouNetworkMessage},
     rand::rand_gen::{
         storage::interface::RandStorage,
         types::{AugmentedData, RandConfig},
@@ -177,6 +178,10 @@ pub struct EpochManager<P: OnChainConfigProvider> {
     proof_cache: ProofCache,
     consensus_publisher: Option<Arc<ConsensusPublisher>>,
     pending_blocks: Arc<Mutex<PendingBlocks>>,
+    raikou_message_tx:
+        Option<aptos_channel::Sender<AccountAddress, (Author, RaikouNetworkMessage)>>,
+    diss_tx: Option<aptos_channel::Sender<AccountAddress, (Author, RaikouNetworkMessage)>>,
+    raikou_shutdown_tx: Option<oneshot::Sender<oneshot::Sender<()>>>,
 }
 
 impl<P: OnChainConfigProvider> EpochManager<P> {
@@ -246,6 +251,9 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
                 .build(),
             consensus_publisher,
             pending_blocks: Arc::new(Mutex::new(PendingBlocks::new())),
+            raikou_message_tx: None,
+            raikou_shutdown_tx: None,
+            diss_tx: None,
         }
     }
 
@@ -1172,7 +1180,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             )
             .await
         } else {
-            self.start_new_epoch_with_joltean(
+            self.start_new_epoch_with_raikou(
                 epoch_state,
                 consensus_config,
                 execution_config,
@@ -1213,6 +1221,96 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             Arc::new(mixed_payload_client),
             payload_manager,
         )
+    }
+
+    async fn start_new_epoch_with_raikou(
+        &mut self,
+        epoch_state: Arc<EpochState>,
+        onchain_consensus_config: OnChainConsensusConfig,
+        on_chain_execution_config: OnChainExecutionConfig,
+        onchain_randomness_config: OnChainRandomnessConfig,
+        jwk_consensus_config: OnChainJWKConsensusConfig,
+        network_sender: NetworkSender,
+        payload_client: Arc<dyn PayloadClient>,
+        payload_manager: Arc<PayloadManager>,
+        rand_config: Option<RandConfig>,
+        fast_rand_config: Option<RandConfig>,
+        rand_msg_rx: aptos_channel::Receiver<AccountAddress, IncomingRandGenRequest>,
+    ) {
+        let epoch = epoch_state.epoch;
+        let consensus_key = new_consensus_key_from_storage(&self.config.safety_rules.backend)
+            .expect("unable to get private key");
+        let signer = Arc::new(ValidatorSigner::new(self.author, consensus_key));
+        let commit_signer = Arc::new(DagCommitSigner::new(signer.clone()));
+
+        assert!(
+            onchain_consensus_config.decoupled_execution(),
+            "decoupled execution must be enabled"
+        );
+        let highest_committed_round = self
+            .storage
+            .aptos_db()
+            .get_latest_ledger_info()
+            .unwrap()
+            .commit_info()
+            .round();
+
+        self.execution_client
+            .start_epoch(
+                epoch_state.clone(),
+                commit_signer,
+                payload_manager.clone(),
+                &onchain_consensus_config,
+                &on_chain_execution_config,
+                &onchain_randomness_config,
+                rand_config,
+                fast_rand_config,
+                rand_msg_rx,
+                highest_committed_round,
+            )
+            .await;
+
+        let onchain_dag_consensus_config = onchain_consensus_config.unwrap_dag_config_v1();
+        let epoch_to_validators = self.extract_epoch_proposers(
+            &epoch_state,
+            onchain_dag_consensus_config.dag_ordering_causal_history_window as u32,
+            epoch_state.verifier.get_ordered_account_addresses(),
+            onchain_dag_consensus_config.dag_ordering_causal_history_window as u64,
+        );
+        let dag_storage = Arc::new(StorageAdapter::new(
+            epoch,
+            epoch_to_validators,
+            self.storage.consensus_db(),
+            self.storage.aptos_db(),
+        ));
+
+        let network_sender_arc = Arc::new(network_sender);
+
+        let bootstrapper = RaikouManager::new();
+
+        let (raikoux_message_tx, raikou_message_rx) =
+            aptos_channel::new(QueueStyle::FIFO, 10, None);
+        self.raikou_message_tx = Some(raikoux_message_tx);
+        let (diss_tx, diss_rx) = aptos_channel::new(QueueStyle::FIFO, 10, None);
+        self.diss_tx = Some(diss_tx);
+        let (raikou_shutdown_tx, raikou_shutdown_rx) = oneshot::channel();
+        self.raikou_shutdown_tx = Some(raikou_shutdown_tx);
+
+        let delta = 2.;
+        let total_duration_in_delta = 300;
+        let enable_optimistic_dissemination = true;
+
+        tokio::spawn(bootstrapper.run(
+            self.author,
+            epoch_state,
+            network_sender_arc,
+            delta,
+            total_duration_in_delta,
+            enable_optimistic_dissemination,
+            raikou_message_rx,
+            diss_rx,
+            raikou_shutdown_rx,
+        ));
     }
 
     async fn start_new_epoch_with_joltean(

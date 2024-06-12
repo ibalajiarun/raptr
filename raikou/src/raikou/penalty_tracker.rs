@@ -10,9 +10,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     time::Duration,
 };
+use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
 /// Penalty tracker report for the optimistically proposed batches from a single node for
 /// a single node. See the description of `PenaltyTrackerReport` for details.
 pub enum PenaltyTrackerReportEntry {

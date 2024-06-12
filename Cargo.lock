@@ -897,6 +897,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "proptest",
+ "raikou",
  "rand 0.7.3",
  "rayon",
  "scopeguard",
@@ -5351,6 +5352,7 @@ checksum = "1bc2832c24239b0141d5674bb9174f9d68a8b5b3f2753311927c172ca46f7e9c"
 dependencies = [
  "funty 2.0.0",
  "radium 0.7.0",
+ "serde",
  "tap",
  "wyz 0.5.1",
 ]
@@ -13188,7 +13190,6 @@ checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 name = "raikou"
 version = "0.1.0"
 dependencies = [
- "aptos-consensus",
  "aptos-consensus-types",
  "aptos-crypto",
  "bitvec 1.0.1",
@@ -13199,6 +13200,7 @@ dependencies = [
  "log",
  "rand 0.7.3",
  "rand_distr",
+ "serde",
  "thread_local",
  "tokio",
 ]

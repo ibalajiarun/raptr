@@ -3,6 +3,7 @@ use crate::{
     raikou::types::{BatchHash, Round},
 };
 use bitvec::prelude::BitVec;
+use serde::{Deserialize, Serialize};
 use std::{
     fmt::{Debug, Formatter},
     hash::{Hash, Hasher},
@@ -21,7 +22,7 @@ pub type HashValue = u64;
 
 pub type BatchId = i64;
 
-#[derive(Clone, Hash)]
+#[derive(Clone, Hash, Serialize, Deserialize)]
 pub struct BatchInfo {
     pub author: NodeId,
     pub batch_id: BatchId,
@@ -44,14 +45,14 @@ impl Debug for crate::raikou::types::BatchInfo {
     }
 }
 
-#[derive(Clone, Hash)]
+#[derive(Clone, Hash, Serialize, Deserialize)]
 pub struct AC {
     // In practice, this would be a hash pointer.
     pub batch: BatchInfo,
     pub signers: BitVec,
 }
 
-#[derive(Clone, Hash)]
+#[derive(Clone, Hash, Serialize, Deserialize)]
 pub struct Payload {
     round: Round,
     leader: NodeId,
@@ -60,7 +61,7 @@ pub struct Payload {
     sub_blocks: Range<Prefix>,
 }
 
-#[derive(Hash)]
+#[derive(Hash, Serialize, Deserialize)]
 struct PayloadData {
     acs: Vec<AC>,
     batches: Vec<Vec<BatchInfo>>,

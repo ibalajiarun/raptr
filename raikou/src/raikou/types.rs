@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use crate::raikou::sim_types;
 
 // To avoid having numerous generic parameters while still maintaining some flexibility,
@@ -6,7 +7,7 @@ use crate::raikou::sim_types;
 // Common types:
 
 /// Type-safe wrapper for a batch hash value.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BatchHash(pub HashValue);
 
 impl std::fmt::LowerHex for BatchHash {
@@ -24,7 +25,7 @@ impl std::fmt::UpperHex for BatchHash {
 }
 
 /// Type-safe wrapper for a block hash value.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BlockHash(pub HashValue);
 
 impl BlockHash {

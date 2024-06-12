@@ -14,6 +14,7 @@ use crate::{
 };
 use bitvec::prelude::BitVec;
 use defaultmap::DefaultBTreeMap;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     future::Future,
@@ -22,7 +23,7 @@ use std::{
 };
 use tokio::time::Instant;
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Batch {
     author: NodeId,
     batch_id: BatchId,
@@ -40,7 +41,7 @@ impl Batch {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum Message {
     Batch(Batch),
     BatchStored(BatchId),

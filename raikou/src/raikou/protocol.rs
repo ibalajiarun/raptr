@@ -15,6 +15,7 @@ use bitvec::vec::BitVec;
 use defaultmap::DefaultBTreeMap;
 use itertools::Itertools;
 use log::warn;
+use serde::{Deserialize, Serialize};
 use std::{
     cmp::{max, max_by, max_by_key, min, Ordering},
     collections::{BTreeMap, BTreeSet, HashSet},
@@ -24,7 +25,7 @@ use std::{
 };
 use tokio::time::Instant;
 
-#[derive(Clone, Hash)]
+#[derive(Clone, Hash, Serialize, Deserialize)]
 pub struct Block {
     pub round: Round,
     pub payload: Payload,
@@ -97,7 +98,7 @@ impl Block {
     }
 }
 
-#[derive(Clone, Hash)]
+#[derive(Clone, Hash, Serialize, Deserialize)]
 pub struct QC {
     round: Round,
     prefix: Prefix,
@@ -105,7 +106,7 @@ pub struct QC {
     block_digest: BlockHash,
 }
 
-#[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+#[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Serialize, Deserialize)]
 pub struct SubBlockId {
     round: Round,
     prefix: Prefix,
@@ -171,7 +172,7 @@ impl Ord for QC {
     }
 }
 
-#[derive(Clone, Hash)]
+#[derive(Clone, Hash, Serialize, Deserialize)]
 pub struct CC {
     round: Round,
     min_prefix: Prefix,
@@ -207,7 +208,7 @@ impl CC {
     }
 }
 
-#[derive(Clone, Hash)]
+#[derive(Clone, Hash, Serialize, Deserialize)]
 pub struct TC {
     round: Round,
     max_vote: SubBlockId,
@@ -236,7 +237,7 @@ impl TC {
     }
 }
 
-#[derive(Clone, Hash)]
+#[derive(Clone, Hash, Serialize, Deserialize)]
 pub enum RoundEnterReason {
     /// Special case for the genesis block.
     Genesis,
@@ -259,7 +260,7 @@ impl Debug for RoundEnterReason {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum Message {
     // Consensus
     Propose(Block),

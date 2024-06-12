@@ -1,28 +1,13 @@
-use crate::{
-    delays::{heterogeneous_symmetric_delay, DelayFunction},
-    framework::{
-        module_network::ModuleNetwork,
-        network::{InjectedLocalNetwork, Network, NetworkInjection},
-        timer::{clock_skew_injection, InjectedTimerService},
-        NodeId, Protocol,
-    },
-    leader_schedule::round_robin,
-    multichain::{Config, MultiChainBft},
-    raikou::{dissemination, dissemination::fake::FakeDisseminationLayer},
-};
+use raikou::{delays::{heterogeneous_symmetric_delay, DelayFunction}, framework::{
+    module_network::ModuleNetwork,
+    network::{InjectedLocalNetwork, Network, NetworkInjection},
+    timer::{clock_skew_injection, InjectedTimerService},
+    NodeId, Protocol,
+}, leader_schedule::round_robin, metrics, multichain::{Config, MultiChainBft}, raikou::{dissemination, dissemination::fake::FakeDisseminationLayer}};
 use rand::{seq::SliceRandom, thread_rng, Rng};
 use std::{collections::BTreeMap, iter, sync::Arc, time::Duration};
 use tokio::{spawn, sync::mpsc, time, time::Instant};
-
-pub mod delays;
-pub mod framework;
-pub mod jolteon;
-pub mod jolteon_fast_qs;
-pub mod leader_schedule;
-pub mod metrics;
-pub mod multichain;
-pub mod raikou;
-pub mod utils;
+use raikou::raikou::RaikouNode;
 
 type Slot = i64;
 
@@ -639,7 +624,7 @@ async fn test_raikou(
 
     let f = (n_nodes - 1) / 3;
 
-    let config = raikou::Config {
+    let config = raikou::raikou::Config {
         n_nodes,
         f,
         storage_requirement: f + (f / 2 + 1),
@@ -740,13 +725,13 @@ async fn test_raikou(
             );
 
             // println!("Spawning node {node_id}");
-            let node = Arc::new(tokio::sync::Mutex::new(raikou::RaikouNode::new(
+            let node = Arc::new(tokio::sync::Mutex::new(RaikouNode::new(
                 node_id,
                 config,
                 dissemination.clone(),
                 start_time,
                 node_id == monitored_node,
-                raikou::Metrics {
+                raikou::raikou::Metrics {
                     block_consensus_latency: block_consensus_latency_sender,
                     batch_consensus_latency: batch_consensus_latency_sender,
                     // propose_time: propose_time_sender,

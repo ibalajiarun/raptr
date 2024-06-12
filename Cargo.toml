@@ -492,7 +492,7 @@ better_any = "0.1.1"
 bellman = { version = "0.13.1", default-features = false }
 bigdecimal = { version = "0.4.0", features = ["serde"] }
 version-compare = "0.1.1"
-bitvec = "1.0.1"
+bitvec = { version = "1.0.1", features = ["serde"] }
 blake2 = "0.10.4"
 blake2-rfc = "0.2.18"
 blst = "0.3.11"

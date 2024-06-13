@@ -1,9 +1,12 @@
-use crate::framework::context::{Context, Event, SimpleContext};
 use std::{future::Future, sync::Arc};
+
+use crate::framework::context::{Context, Event, SimpleContext};
+use crate::framework::module_network::{ModuleEvent, ModuleNetworkService};
 
 pub mod context;
 pub mod network;
 pub mod timer;
+pub mod module_network;
 
 pub type NodeId = usize;
 
@@ -37,6 +40,15 @@ pub trait Protocol: Send + Sync {
     where
         Ctx: ContextFor<Self>;
 
+    fn module_event_handler<Ctx>(
+        &mut self,
+        ctx: &mut Ctx,
+        module: module_network::ModuleId,
+        event: ModuleEvent,
+    ) -> impl Future<Output = ()> + Send
+        where
+            Ctx: ContextFor<Self>;
+
     fn timer_event_handler<Ctx>(
         &mut self,
         ctx: &mut Ctx,
@@ -57,25 +69,38 @@ pub trait Protocol: Send + Sync {
         Ctx: ContextFor<Self>,
     {
         async move {
-            protocol.lock().await.start_handler(ctx).await;
+            {
+                // Run the start handler and then the condition handlers
+                // under the same lock so that nothing can happen in between.
+                let mut lock = protocol.lock().await;
+                lock.start_handler(ctx).await;
+                lock.condition_handler(ctx).await;
+            }
 
             while !ctx.halted() {
-                // Run the condition handlers
-                protocol.lock().await.condition_handler(ctx).await;
-
-                // Listen for incoming events
-                match ctx.next_event().await {
+                // Listen for incoming events.
+                // While waiting for an event, the lock is not held.
+                let mut lock = match ctx.next_event().await {
                     Event::Message(from, message) => {
-                        protocol
-                            .lock()
-                            .await
-                            .message_handler(ctx, from, message)
-                            .await;
+                        let mut lock = protocol.lock().await;
+                        lock.message_handler(ctx, from, message).await;
+                        lock
                     },
                     Event::Timer(event) => {
-                        protocol.lock().await.timer_event_handler(ctx, event).await;
+                        let mut lock = protocol.lock().await;
+                        lock.timer_event_handler(ctx, event).await;
+                        lock
                     },
-                }
+                    Event::ModuleEvent(module, event) => {
+                        let mut lock = protocol.lock().await;
+                        lock.module_event_handler(ctx, module, event).await;
+                        lock
+                    },
+                };
+
+                // Run the event handler and then the condition handlers
+                // under the same lock so that nothing can happen in between.
+                lock.condition_handler(ctx).await;
             }
         }
     }
@@ -84,6 +109,7 @@ pub trait Protocol: Send + Sync {
         protocol: Arc<tokio::sync::Mutex<Self>>,
         node_id: NodeId,
         network_service: NS,
+        module_network: ModuleNetworkService,
         timer: TS,
     ) -> impl Future<Output = ()> + Send
     where
@@ -91,7 +117,7 @@ pub trait Protocol: Send + Sync {
         TS: timer::TimerService<Event = Self::TimerEvent>,
     {
         async move {
-            let mut context = SimpleContext::new(node_id, network_service, timer);
+            let mut context = SimpleContext::new(node_id, network_service, module_network, timer);
             Protocol::run_ctx(protocol, &mut context).await;
         }
     }
@@ -153,6 +179,10 @@ macro_rules! protocol {
             $(upon start $($start_label:lifetime:)? $start_handler:block)?
             // Handlers for messages received from other nodes.
             $(upon receive [$msg_pat:pat] from $(node)? [$from_pat:pat] $(if [$msg_cond:expr])? $($msg_label:lifetime:)? $msg_handler:block)?
+            // Handlers for events received from other modules on the same node.
+            $(upon $(module)? event of type [$module_event_type:ty] from $(module)? [$module_pat:pat] {
+                $(upon [$module_event_pat:pat]  $(if [$module_event_cond:expr])? $($module_event_label:lifetime:)? $module_event_handler:block;)*
+            })?
             // Handlers for timer events.
             $(upon timer $(event)? [$timer_pat:pat] $(if [$timer_cond:expr])?  $($timer_label:lifetime:)? $timer_handler:block)?
             // Conditional handlers are executed in a loop until the condition is false
@@ -194,11 +224,54 @@ macro_rules! protocol {
             }
         }
 
+        async fn module_event_handler<Ctx>(
+            &mut $self,
+            $ctx: &mut Ctx,
+            module: crate::framework::module_network::ModuleId,
+            event: crate::framework::module_network::ModuleEvent,
+        )
+        where
+            Ctx: crate::framework::ContextFor<Self>
+        {
+            let _ = $ctx;  // suppress unused variable warning
+            let _ = &module;  // suppress unused variable warning
+
+            let event: Box<dyn std::any::Any> = event;
+
+            $(
+                $(
+                    let event = match module {
+                        $module_pat => {
+                            match event.downcast::<$module_event_type>() {
+                                Ok(event) => {
+                                    match *event {
+                                        $(
+                                            $module_event_pat $(if $module_event_cond)? => $($module_event_label:)? {
+                                                $module_event_handler;
+                                            },
+                                        )*
+                                    }
+
+                                    return;
+                                },
+                                Err(event) => {
+                                    event
+                                }
+                            }
+                        },
+                    };
+                )?
+            )*
+
+            let _ = &event;  // suppress unused variable warning
+        }
+
         async fn timer_event_handler<Ctx>(&mut $self, $ctx: &mut Ctx, event: Self::TimerEvent)
         where
             Ctx: crate::framework::ContextFor<Self>
         {
             let _ = $ctx;  // suppress unused variable warning
+
             match event {
                 $(
                     $(
@@ -215,6 +288,7 @@ macro_rules! protocol {
             Ctx: crate::framework::ContextFor<Self>
         {
             let _ = $ctx;  // suppress unused variable warning
+
             let mut n_hits: u64 = 0;
             let mut was_hit = true;
 

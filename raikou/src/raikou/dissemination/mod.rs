@@ -1,12 +1,32 @@
-use crate::raikou::types::*;
 use std::{collections::HashSet, future::Future};
-use tokio::time::Instant;
+
+use crate::framework::module_network::ModuleId;
+use crate::framework::NodeId;
+use crate::raikou::types::*;
 
 pub mod fake;
 
+pub struct BlockReceived {
+    pub leader: NodeId,
+    pub round: Round,
+    pub payload: Payload,
+}
+
+impl BlockReceived {
+    pub fn new(leader: NodeId, round: Round, payload: Payload) -> Self {
+        Self {
+            leader,
+            round,
+            payload,
+        }
+    }
+}
+
 pub trait DisseminationLayer: Send + Sync + 'static {
+    fn module_id(&self) -> ModuleId;
+
     // TODO: accept exclude by ref?
-    fn prepare_block(&self, exclude: HashSet<BatchHash>) -> impl Future<Output = Payload> + Send;
+    fn prepare_block(&self, round: Round, exclude: HashSet<BatchHash>) -> impl Future<Output = Payload> + Send;
 
     fn prefetch_payload_data(&self, payload: Payload) -> impl Future<Output = ()> + Send;
 

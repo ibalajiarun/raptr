@@ -10,7 +10,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     time::Duration,
 };
-use log::warn;
+use log::{info, warn};
 use tokio::time::Instant;
 
 pub trait Millis {
@@ -188,6 +188,11 @@ impl PenaltyTracker {
     fn compute_new_penalties(&self) -> Vec<Duration> {
         assert!(self.config.enable);
 
+        if self.last_round_this_node_was_leader == -1 {
+            // This node has not been a leader yet. No information to compute penalties.
+            return self.penalties.clone();
+        }
+
         // TODO: check for missing votes to ban Byzantine nodes.
 
         // For each node that sent a report, compute the sum of reported delays.
@@ -220,8 +225,10 @@ impl PenaltyTracker {
             // If there are not enough reports, the network must be in an asynchronous period.
             // Do not change the penalties.
             // TODO: What's the best strategy fo this case?
-            warn!("Not enough reports to compute new penalties. Either the network is \
-                   asynchronous or the penalty tracker is misconfigured.");
+            warn!("Not enough reports to compute new penalties ({} / {}). Either the network is \
+                   asynchronous or the penalty tracker is misconfigured.",
+            quorum.len(),
+            self.config.n_nodes - self.config.f);
             return self.penalties.clone();
         }
 
@@ -278,18 +285,21 @@ impl PenaltyTracker {
     pub fn prepare_new_block(
         &mut self,
         round: Round,
-        batches: &BTreeSet<BatchInfo>,
+        batches: Vec<BatchInfo>,
     ) -> Vec<BatchInfo> {
         if !self.config.enable {
             return batches
-                .iter()
-                .cloned()
+                .into_iter()
                 .sorted_by_key(|batch_info| self.batch_receive_time[&batch_info.digest])
                 .collect();
         }
 
         // `compute_new_penalties` must be called before any parts of the state are updated.
         let new_penalties = self.compute_new_penalties();
+
+        if round % self.config.n_nodes as i64 == 3 {
+            info!("New penalties: {:?}", new_penalties);
+        }
 
         let now = Instant::now();
 
@@ -300,10 +310,9 @@ impl PenaltyTracker {
                 let safe_propose_time = receive_time + new_penalties[batch_info.author];
                 (safe_propose_time, batch_info)
             })
-            .sorted_by_key(|(safe_propose_time, _)| safe_propose_time)
+            .sorted_by_key(|(safe_propose_time, _)| *safe_propose_time)
             .take_while(|&(safe_propose_time, _)| safe_propose_time <= now)
             .map(|(_, batch_info)| batch_info)
-            .cloned()
             .collect_vec();
 
         self.penalties = new_penalties;
@@ -311,7 +320,7 @@ impl PenaltyTracker {
         self.last_round_this_node_was_leader = round;
         self.block_issue_time = now;
         self.proposed_batches = batches_to_propose.clone();
-        self.batch_authors.clear();
+        self.batch_authors = batches_to_propose.iter().map(|batch_info| batch_info.author).collect();
         self.reports.clear();
 
         batches_to_propose

@@ -1,11 +1,16 @@
-use crate::framework::{network::NetworkService, timer::TimerService, NodeId};
-use std::{future::Future, marker::PhantomData, time::Duration};
+use std::future::Future;
+
 use tokio::select;
+
+use crate::framework::{network::NetworkService, NodeId, timer::TimerService};
+use crate::framework::module_network::{ModuleEvent, ModuleId, ModuleNetworkService};
 
 pub enum Event<M, TE> {
     Message(NodeId, M),
     Timer(TE),
+    ModuleEvent(ModuleId, ModuleEvent),
 }
+
 pub trait Context: Send + Sync {
     type Message: Clone + Send + Sync;
     type TimerEvent;
@@ -25,6 +30,15 @@ pub trait Context: Send + Sync {
             }
         }
     }
+
+    fn notify<E>(&self, module: ModuleId, event: E) -> impl Future<Output = ()> + Send
+    where
+        E: Send + 'static,
+    {
+        self.notify_boxed(module, Box::new(event))
+    }
+
+    fn notify_boxed(&self, module: ModuleId, event: ModuleEvent) -> impl Future<Output = ()> + Send;
 
     fn set_timer(&mut self, duration: std::time::Duration, event: Self::TimerEvent);
 
@@ -61,18 +75,21 @@ pub trait Context: Send + Sync {
 //     }
 // }
 
+
 pub struct SimpleContext<NS, TS> {
     id: NodeId,
     network: NS,
+    module_network: ModuleNetworkService,
     timer: TS,
     halted: bool,
 }
 
 impl<NS: NetworkService, TS: TimerService> SimpleContext<NS, TS> {
-    pub fn new(id: NodeId, network: NS, timer: TS) -> Self {
+    pub fn new(id: NodeId, network: NS, module_network: ModuleNetworkService, timer: TS) -> Self {
         SimpleContext {
             id,
             network,
+            module_network,
             timer,
             halted: false,
         }
@@ -95,6 +112,10 @@ impl<NS: NetworkService, TS: TimerService> Context for SimpleContext<NS, TS> {
         self.network.send(target, message).await;
     }
 
+    async fn notify_boxed(&self, module: ModuleId, event: ModuleEvent) {
+        self.module_network.send(module, event).await;
+    }
+
     fn set_timer(&mut self, duration: std::time::Duration, event: Self::TimerEvent) {
         self.timer.schedule(duration, event);
     }
@@ -114,82 +135,10 @@ impl<NS: NetworkService, TS: TimerService> Context for SimpleContext<NS, TS> {
             },
             timer_event = self.timer.tick() => {
                 Event::Timer(timer_event)
+            },
+            (module, notification) = self.module_network.recv() => {
+                Event::ModuleEvent(module, notification)
             }
         }
-    }
-}
-
-/// A hacky way to wrap a context for basic sub-protocol functionality.
-/// Passing the events from the outer protocol to the inner ones needs to be done manually.
-pub struct WrappedContext<'a, Ctx, M, TE, WM, WTE> {
-    inner: &'a mut Ctx,
-    wrap_message: WM,
-    wrap_timer_event: WTE,
-
-    _phantom: PhantomData<(M, TE)>,
-}
-
-impl<'a, Ctx, M, TE, WM, WTE> WrappedContext<'a, Ctx, M, TE, WM, WTE>
-where
-    Ctx: Context,
-    M: Clone + Send + Sync,
-    TE: Clone + Send + Sync,
-    WM: Fn(M) -> Ctx::Message + Clone + Send + Sync,
-    WTE: Fn(TE) -> Ctx::TimerEvent + Clone + Send + Sync,
-{
-    pub fn new(inner: &'a mut Ctx, wrap_message: WM, wrap_timer_event: WTE) -> Self {
-        WrappedContext {
-            inner,
-            wrap_message,
-            wrap_timer_event,
-            _phantom: PhantomData,
-        }
-    }
-}
-
-impl<'a, Ctx, M, TE, WM, WTE> Context for WrappedContext<'a, Ctx, M, TE, WM, WTE>
-where
-    Ctx: Context,
-    M: Clone + Send + Sync,
-    TE: Clone + Send + Sync,
-    WM: Fn(M) -> Ctx::Message + Clone + Send + Sync,
-    WTE: Fn(TE) -> Ctx::TimerEvent + Clone + Send + Sync,
-{
-    type Message = M;
-    type TimerEvent = TE;
-
-    fn node_id(&self) -> NodeId {
-        self.inner.node_id()
-    }
-
-    fn n_nodes(&self) -> usize {
-        self.inner.n_nodes()
-    }
-
-    async fn unicast(&self, message: Self::Message, target: NodeId) {
-        self.inner
-            .unicast((self.wrap_message)(message), target)
-            .await;
-    }
-
-    async fn multicast(&self, message: Self::Message) {
-        self.inner.multicast((self.wrap_message)(message)).await;
-    }
-
-    fn set_timer(&mut self, duration: Duration, event: Self::TimerEvent) {
-        self.inner
-            .set_timer(duration, (self.wrap_timer_event)(event));
-    }
-
-    fn halt(&mut self) {
-        self.inner.halt();
-    }
-
-    fn halted(&self) -> bool {
-        self.inner.halted()
-    }
-
-    async fn next_event(&mut self) -> Event<Self::Message, Self::TimerEvent> {
-        unimplemented!();
     }
 }

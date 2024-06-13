@@ -1,3 +1,16 @@
+use std::{
+    cmp::{max, max_by, max_by_key, min, Ordering},
+    collections::{BTreeMap, BTreeSet, HashSet},
+    fmt::{Debug, Formatter},
+    sync::Arc,
+    time::Duration,
+};
+
+use bitvec::vec::BitVec;
+use defaultmap::DefaultBTreeMap;
+use itertools::Itertools;
+use tokio::time::Instant;
+
 use crate::{
     framework::{ContextFor, NodeId, Protocol},
     leader_schedule::LeaderSchedule,
@@ -10,17 +23,7 @@ use crate::{
     },
     utils::kth_max_set::KthMaxSet,
 };
-use bitvec::vec::BitVec;
-use defaultmap::DefaultBTreeMap;
-use itertools::Itertools;
-use std::{
-    cmp::{max, max_by, max_by_key, min, Ordering},
-    collections::{BTreeMap, BTreeSet, HashSet},
-    fmt::{Debug, Formatter},
-    sync::Arc,
-    time::Duration,
-};
-use tokio::time::Instant;
+use crate::raikou::dissemination::BlockReceived;
 
 #[derive(Clone)]
 pub struct Block {
@@ -294,6 +297,7 @@ pub struct Config<S> {
     /// The time validator waits after receiving a block before voting for a QC for it
     /// if it doesn't have all the batches yet.
     pub extra_wait_before_qc_vote: Duration,
+    pub extra_wait_before_commit_vote: Duration,
 
     pub end_of_run: Instant,
 }
@@ -402,7 +406,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         // round numbers, i.e., B'.r = B.r + 1, the replica commits B and all its ancestors.
         if let Some(parent_qc) = new_qc.block.parent_qc.as_ref() {
             if new_qc.round == parent_qc.round + 1 {
-                self.commit_qc(parent_qc, CommitReason::TwoChainRule);
+                self.commit_qc(parent_qc, CommitReason::TwoChainRule).await;
             }
         }
 
@@ -612,7 +616,7 @@ where
                 let block = Block {
                     round,
                     // TODO: implement deduplication.
-                    payload: self.dissemination.prepare_block(HashSet::new()).await,
+                    payload: self.dissemination.prepare_block(round, HashSet::new()).await,
                     parent_qc: Some(self.qc_high.clone()),
                     reason: self.enter_reason.clone(),
                 };
@@ -650,7 +654,10 @@ where
                 ctx.set_timer(self.config.extra_wait_before_qc_vote, TimerEvent::QcVote(round));
 
                 // store the ACs
-                self.dissemination.prefetch_payload_data(payload).await;
+                ctx.notify(
+                    self.dissemination.module_id(),
+                    BlockReceived::new(leader, round, payload),
+                ).await;
             }
         };
 

@@ -14,8 +14,10 @@ use crate::{
     protocol,
     raikou::{dissemination::DisseminationLayer, types::*},
 };
+use crate::framework::module_network::ModuleId;
+use crate::raikou::dissemination::BlockReceived;
 use crate::raikou::penalty_tracker;
-use crate::raikou::penalty_tracker::PenaltyTracker;
+use crate::raikou::penalty_tracker::{PenaltyTracker, PenaltyTrackerReports};
 
 #[derive(Clone)]
 pub struct Batch {
@@ -41,14 +43,18 @@ pub enum Message {
     BatchStored(BatchId),
     AvailabilityCert(AC),
     // Fetch(BatchHash),
+    PenaltyTrackerReport(Round, PenaltyTrackerReports),
 }
 
 #[derive(Clone)]
 pub enum TimerEvent {
     NewBatch(BatchId),
+    PenaltyTrackerReport(NodeId, Round, Instant, Vec<BatchInfo>),
 }
 
+#[derive(Clone)]
 pub struct Config {
+    pub module_id: ModuleId,
     pub n_nodes: usize,
     pub f: usize,
     pub ac_quorum: usize,
@@ -59,6 +65,7 @@ pub struct Config {
 
 #[derive(Clone)]
 pub struct FakeDisseminationLayer<TI> {
+    config: Config,
     inner: Arc<tokio::sync::Mutex<FakeDisseminationLayerProtocol<TI>>>,
 }
 
@@ -68,6 +75,7 @@ where
 {
     pub fn new(node_id: NodeId, config: Config, txns_iter: TI) -> Self {
         Self {
+            config: config.clone(),
             inner: Arc::new(tokio::sync::Mutex::new(FakeDisseminationLayerProtocol::new(
                 node_id, config, txns_iter,
             ))),
@@ -85,8 +93,12 @@ impl<TI> DisseminationLayer for FakeDisseminationLayer<TI>
 where
     TI: Iterator<Item = Vec<Txn>> + Send + Sync + 'static,
 {
-    async fn prepare_block(&self, exclude: HashSet<BatchHash>) -> Payload {
-        let inner = self.inner.lock().await;
+    fn module_id(&self) -> ModuleId {
+        self.config.module_id
+    }
+
+    async fn prepare_block(&self, round: Round, exclude: HashSet<BatchHash>) -> Payload {
+        let mut inner = self.inner.lock().await;
 
         let acs = inner
             .new_acs
@@ -101,6 +113,10 @@ where
             .filter(|&batch_hash| !exclude.contains(batch_hash))
             .map(|batch_hash| inner.batches[batch_hash].get_info())  // WARNING: potentially expensive clone
             .collect();
+
+        let batches = inner
+            .penalty_tracker
+            .prepare_new_block(round, batches);
 
         Payload::new(acs, batches)
     }
@@ -219,6 +235,8 @@ where
             ctx.set_timer(Duration::ZERO, TimerEvent::NewBatch(1));
         };
 
+        // Creating and certifying batches
+
         upon timer [TimerEvent::NewBatch(sn)] {
             let txns = self.txns_iter.next();
             let digest = hash((self.node_id, sn, &txns));
@@ -282,6 +300,26 @@ where
             }
 
             self.acs.insert(ac.batch.digest, ac.clone());
+        };
+
+        // Penalty tracking
+
+        upon event of type [BlockReceived] from [_any_module] {
+            upon [BlockReceived { leader, round, payload }] {
+                ctx.set_timer(
+                    self.config.penalty_tracker_report_delay,
+                    TimerEvent::PenaltyTrackerReport(leader, round, Instant::now(), payload.batches().clone())
+                );
+            };
+        };
+
+        upon timer event [TimerEvent::PenaltyTrackerReport(leader, round, block_receive_time, batches)] {
+            let reports = self.penalty_tracker.prepare_reports(&batches, block_receive_time);
+            ctx.unicast(Message::PenaltyTrackerReport(round, reports), leader).await;
+        };
+
+        upon receive [Message::PenaltyTrackerReport(round, reports)] from node [p] {
+            self.penalty_tracker.register_reports(round, p, reports);
         };
 
         // upon receive [Message::Fetch(digest)] from node [p] {

@@ -1,6 +1,7 @@
 use crate::{
     delays::{heterogeneous_symmetric_delay, DelayFunction},
     framework::{
+        module_network::ModuleNetwork,
         network::{InjectedLocalNetwork, Network, NetworkInjection},
         timer::{clock_skew_injection, InjectedTimerService},
         NodeId, Protocol,
@@ -12,7 +13,6 @@ use crate::{
 use rand::{seq::SliceRandom, thread_rng, Rng};
 use std::{collections::BTreeMap, iter, sync::Arc, time::Duration};
 use tokio::{spawn, sync::mpsc, time, time::Instant};
-use crate::framework::module_network::ModuleNetwork;
 
 pub mod delays;
 pub mod framework;
@@ -43,7 +43,6 @@ fn network_injection<M: Send>(
         }
     }
 }
-
 
 // fn multichain_network_injection(
 //     delay_function: impl DelayFunction,
@@ -720,6 +719,8 @@ async fn test_raikou(
                     penalty_tracker_report_delay: Duration::from_secs_f64(delta * 5.),
                 },
                 txns_iter,
+                start_time,
+                node_id == monitored_node,
             );
 
             // println!("Spawning node {node_id}");
@@ -737,6 +738,8 @@ async fn test_raikou(
                 },
             )));
 
+            semaphore.add_permits(1);
+
             spawn(Protocol::run(
                 dissemination.protocol(),
                 node_id,
@@ -744,9 +747,8 @@ async fn test_raikou(
                 diss_module_network,
                 diss_timer,
             ));
-            spawn(Protocol::run(node, node_id, network_service, cons_module_network, timer));
 
-            semaphore.add_permits(1);
+            Protocol::run(node, node_id, network_service, cons_module_network, timer).await;
         }));
     }
 
@@ -781,18 +783,18 @@ async fn test_raikou(
     // enter_time.show_histogram(n_slots as usize / 5, 10);
     // println!();
 
-    let batch_commit_time = batch_commit_time
-        .build()
-        .await
-        .filter(|&(time, _)| {
-            time >= start_time + Duration::from_secs_f64(delta) * warmup_period_in_delta
-        })
-        .map(|(_, time)| time)
-        .sort();
-    println!("Batch commit time:");
-    batch_commit_time.print_stats();
-    batch_commit_time.show_histogram(30, 10);
-    println!();
+    // let batch_commit_time = batch_commit_time
+    //     .build()
+    //     .await
+    //     .filter(|&(time, _)| {
+    //         time >= start_time + Duration::from_secs_f64(delta) * warmup_period_in_delta
+    //     })
+    //     .map(|(_, time)| time)
+    //     .sort();
+    // println!("Batch commit time:");
+    // batch_commit_time.print_stats();
+    // batch_commit_time.show_histogram(30, 10);
+    // println!();
 
     // println!("Indirectly Committed Slots:");
     // let indirectly_committed_slots = indirectly_committed_slots

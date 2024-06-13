@@ -45,6 +45,7 @@ pub fn heterogeneous_symmetric_delay(
 
         let mul_noise = thread_rng().sample(mul_noise_distr);
         let add_noise = thread_rng().sample(add_noise_distr);
+
         base * mul_noise + add_noise
     }
 }

@@ -1,7 +1,7 @@
-use std::collections::btree_map::Entry;
-use std::collections::BTreeMap;
-use std::sync::Arc;
-
+use std::{
+    collections::{btree_map::Entry, BTreeMap},
+    sync::Arc,
+};
 use tokio::sync::{mpsc, RwLock};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -52,7 +52,7 @@ impl ModuleNetwork {
                     send: self.send.clone(),
                     receive: recv,
                 }
-            }
+            },
         }
     }
 }
@@ -69,7 +69,10 @@ impl ModuleNetworkService {
     }
 
     pub async fn send(&self, module: ModuleId, event: ModuleEvent) {
-        self.send.read().await[&module].send((self.module_id, event)).await.unwrap();
+        self.send.read().await[&module]
+            .send((self.module_id, event))
+            .await
+            .unwrap();
     }
 
     pub async fn recv(&mut self) -> (ModuleId, ModuleEvent) {

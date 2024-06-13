@@ -10,14 +10,17 @@ use defaultmap::DefaultBTreeMap;
 use tokio::time::Instant;
 
 use crate::{
-    framework::{network::NetworkService, NodeId, Protocol, timer::TimerService},
+    framework::{
+        module_network::ModuleId, network::NetworkService, NodeId, Protocol, timer::TimerService,
+    },
     protocol,
-    raikou::{dissemination::DisseminationLayer, types::*},
+    raikou::{
+        dissemination::{BlockReceived, DisseminationLayer},
+        penalty_tracker,
+        penalty_tracker::{PenaltyTracker, PenaltyTrackerReports},
+        types::*,
+    },
 };
-use crate::framework::module_network::ModuleId;
-use crate::raikou::dissemination::BlockReceived;
-use crate::raikou::penalty_tracker;
-use crate::raikou::penalty_tracker::{PenaltyTracker, PenaltyTrackerReports};
 
 #[derive(Clone)]
 pub struct Batch {
@@ -73,12 +76,12 @@ impl<TI> FakeDisseminationLayer<TI>
 where
     TI: Iterator<Item = Vec<Txn>> + Send + Sync,
 {
-    pub fn new(node_id: NodeId, config: Config, txns_iter: TI) -> Self {
+    pub fn new(node_id: NodeId, config: Config, txns_iter: TI, start_time: Instant, detailed_logging: bool) -> Self {
         Self {
             config: config.clone(),
-            inner: Arc::new(tokio::sync::Mutex::new(FakeDisseminationLayerProtocol::new(
-                node_id, config, txns_iter,
-            ))),
+            inner: Arc::new(tokio::sync::Mutex::new(
+                FakeDisseminationLayerProtocol::new(node_id, config, txns_iter, start_time, detailed_logging),
+            )),
         }
     }
 
@@ -104,19 +107,17 @@ where
             .new_acs
             .iter()
             .filter(|&batch_hash| !exclude.contains(batch_hash))
-            .map(|batch_hash| inner.acs[batch_hash].clone())  // WARNING: potentially expensive clone
+            .map(|batch_hash| inner.acs[batch_hash].clone()) // WARNING: potentially expensive clone
             .collect();
 
         let batches = inner
             .new_batches
             .iter()
             .filter(|&batch_hash| !exclude.contains(batch_hash))
-            .map(|batch_hash| inner.batches[batch_hash].get_info())  // WARNING: potentially expensive clone
+            .map(|batch_hash| inner.batches[batch_hash].get_info()) // WARNING: potentially expensive clone
             .collect();
 
-        let batches = inner
-            .penalty_tracker
-            .prepare_new_block(round, batches);
+        let batches = inner.penalty_tracker.prepare_new_block(round, batches);
 
         Payload::new(acs, batches)
     }
@@ -132,7 +133,9 @@ where
 
     async fn check_stored_all(&self, batches: &Vec<BatchHash>) -> bool {
         let inner = self.inner.lock().await;
-        batches.into_iter().all(|batch| inner.batches.contains_key(&batch))
+        batches
+            .into_iter()
+            .all(|batch| inner.batches.contains_key(&batch))
     }
 
     async fn notify_commit(&self, payloads: Vec<Payload>) {
@@ -168,7 +171,7 @@ pub struct FakeDisseminationLayerProtocol<TI> {
     node_id: NodeId,
 
     penalty_tracker: PenaltyTracker,
-    
+
     // Storage for all received batches and the time when they were.
     batches: BTreeMap<BatchHash, Batch>,
     my_batches: BTreeMap<BatchId, BatchHash>,
@@ -185,13 +188,18 @@ pub struct FakeDisseminationLayerProtocol<TI> {
     batch_stored_votes: DefaultBTreeMap<BatchId, BitVec>,
 
     batch_created_time: DefaultBTreeMap<BatchId, Instant>,
+
+    // Logging and metrics
+
+    detailed_logging: bool,
+    start_time: Instant,
 }
 
 impl<TI> FakeDisseminationLayerProtocol<TI>
 where
     TI: Iterator<Item = Vec<Txn>> + Send + Sync,
 {
-    pub fn new(node_id: NodeId, config: Config, txns_iter: TI) -> Self {
+    pub fn new(node_id: NodeId, config: Config, txns_iter: TI, start_time: Instant, detailed_logging: bool) -> Self {
         let n_nodes = config.n_nodes;
         let penalty_tracker_config = penalty_tracker::Config {
             n_nodes: config.n_nodes,
@@ -203,7 +211,7 @@ where
             txns_iter,
             config,
             node_id,
-            penalty_tracker: PenaltyTracker::new(penalty_tracker_config),
+            penalty_tracker: PenaltyTracker::new(node_id, penalty_tracker_config, detailed_logging),
             batches: BTreeMap::new(),
             my_batches: Default::default(),
             acs: BTreeMap::new(),
@@ -212,6 +220,22 @@ where
             new_batches: BTreeSet::new(),
             batch_stored_votes: DefaultBTreeMap::new(BitVec::repeat(false, n_nodes)),
             batch_created_time: DefaultBTreeMap::new(Instant::now()),
+            detailed_logging,
+            start_time,
+        }
+    }
+
+    fn log_info(&self, msg: String) {
+        log::info!(
+            "Node {}: Dissemination Layer: {}",
+            self.node_id,
+            msg,
+        );
+    }
+
+    fn log_detail(&self, msg: String) {
+        if self.detailed_logging {
+            self.log_info(msg);
         }
     }
 }
@@ -264,9 +288,9 @@ where
             let batch_id = batch.batch_id;
 
             if !self.batches.contains_key(&digest) {
-                self.batches.insert(digest, batch);
-
                 self.penalty_tracker.on_new_batch(digest);
+
+                self.batches.insert(digest, batch);
 
                 ctx.unicast(Message::BatchStored(batch_id), p).await;
 
@@ -306,6 +330,7 @@ where
 
         upon event of type [BlockReceived] from [_any_module] {
             upon [BlockReceived { leader, round, payload }] {
+                // self.log_detail(format!("Received BlockReceived event at time {:?}", Instant::now()));
                 ctx.set_timer(
                     self.config.penalty_tracker_report_delay,
                     TimerEvent::PenaltyTrackerReport(leader, round, Instant::now(), payload.batches().clone())

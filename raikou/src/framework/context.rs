@@ -1,9 +1,11 @@
+use crate::framework::{
+    module_network::{ModuleEvent, ModuleId, ModuleNetworkService},
+    network::NetworkService,
+    timer::TimerService,
+    NodeId,
+};
 use std::future::Future;
-
 use tokio::select;
-
-use crate::framework::{network::NetworkService, NodeId, timer::TimerService};
-use crate::framework::module_network::{ModuleEvent, ModuleId, ModuleNetworkService};
 
 pub enum Event<M, TE> {
     Message(NodeId, M),
@@ -38,7 +40,8 @@ pub trait Context: Send + Sync {
         self.notify_boxed(module, Box::new(event))
     }
 
-    fn notify_boxed(&self, module: ModuleId, event: ModuleEvent) -> impl Future<Output = ()> + Send;
+    fn notify_boxed(&self, module: ModuleId, event: ModuleEvent)
+        -> impl Future<Output = ()> + Send;
 
     fn set_timer(&mut self, duration: std::time::Duration, event: Self::TimerEvent);
 
@@ -74,7 +77,6 @@ pub trait Context: Send + Sync {
 //         (**self).next_event().await
 //     }
 // }
-
 
 pub struct SimpleContext<NS, TS> {
     id: NodeId,

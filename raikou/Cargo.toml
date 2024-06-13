@@ -21,7 +21,7 @@ env_logger = { workspace = true }
 futures = { workspace = true }
 itertools = { workspace = true }
 log = { workspace = true }
-rand = { workspace = true, features = ["small_rng"] }
+rand = { workspace = true, features = ["small_rng", "alloc"] }
 rand_distr = { workspace = true }
 thread_local = { workspace = true }
 tokio = { workspace = true }

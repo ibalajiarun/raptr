@@ -1,12 +1,13 @@
+use crate::framework::{
+    context::{Context, Event, SimpleContext},
+    module_network::{ModuleEvent, ModuleNetworkService},
+};
 use std::{future::Future, sync::Arc};
 
-use crate::framework::context::{Context, Event, SimpleContext};
-use crate::framework::module_network::{ModuleEvent, ModuleNetworkService};
-
 pub mod context;
+pub mod module_network;
 pub mod network;
 pub mod timer;
-pub mod module_network;
 
 pub type NodeId = usize;
 
@@ -46,8 +47,8 @@ pub trait Protocol: Send + Sync {
         module: module_network::ModuleId,
         event: ModuleEvent,
     ) -> impl Future<Output = ()> + Send
-        where
-            Ctx: ContextFor<Self>;
+    where
+        Ctx: ContextFor<Self>;
 
     fn timer_event_handler<Ctx>(
         &mut self,

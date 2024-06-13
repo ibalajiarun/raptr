@@ -1,8 +1,10 @@
-use std::fmt::{Debug, Formatter};
-use std::hash::{Hash, Hasher};
 use crate::framework::NodeId;
 use bitvec::prelude::BitVec;
-use std::sync::Arc;
+use std::{
+    fmt::{Debug, Formatter},
+    hash::{Hash, Hasher},
+    sync::Arc,
+};
 
 // Unsafe crypto, for simulation and testing purposes only.
 pub type HashValue = u64;
@@ -29,7 +31,11 @@ pub fn hash(x: impl Hash) -> HashValue {
 
 impl Debug for crate::raikou::types::BatchInfo {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{{ node: {}, sn: {}, hash: {:#x} }}", self.author, self.batch_id, self.digest)
+        write!(
+            f,
+            "{{ node: {}, sn: {}, hash: {:#x} }}",
+            self.author, self.batch_id, self.digest
+        )
     }
 }
 

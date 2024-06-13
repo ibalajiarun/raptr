@@ -1,8 +1,8 @@
+use crate::{
+    framework::{module_network::ModuleId, NodeId},
+    raikou::types::*,
+};
 use std::{collections::HashSet, future::Future};
-
-use crate::framework::module_network::ModuleId;
-use crate::framework::NodeId;
-use crate::raikou::types::*;
 
 pub mod fake;
 
@@ -26,7 +26,11 @@ pub trait DisseminationLayer: Send + Sync + 'static {
     fn module_id(&self) -> ModuleId;
 
     // TODO: accept exclude by ref?
-    fn prepare_block(&self, round: Round, exclude: HashSet<BatchHash>) -> impl Future<Output = Payload> + Send;
+    fn prepare_block(
+        &self,
+        round: Round,
+        exclude: HashSet<BatchHash>,
+    ) -> impl Future<Output = Payload> + Send;
 
     fn prefetch_payload_data(&self, payload: Payload) -> impl Future<Output = ()> + Send;
 

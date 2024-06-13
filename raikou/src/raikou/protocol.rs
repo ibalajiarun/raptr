@@ -1,16 +1,3 @@
-use std::{
-    cmp::{max, max_by, max_by_key, min, Ordering},
-    collections::{BTreeMap, BTreeSet, HashSet},
-    fmt::{Debug, Formatter},
-    sync::Arc,
-    time::Duration,
-};
-
-use bitvec::vec::BitVec;
-use defaultmap::DefaultBTreeMap;
-use itertools::Itertools;
-use tokio::time::Instant;
-
 use crate::{
     framework::{ContextFor, NodeId, Protocol},
     leader_schedule::LeaderSchedule,
@@ -18,12 +5,22 @@ use crate::{
     metrics::Sender,
     protocol,
     raikou::{
-        dissemination::DisseminationLayer,
+        dissemination::{BlockReceived, DisseminationLayer},
         types::*,
     },
     utils::kth_max_set::KthMaxSet,
 };
-use crate::raikou::dissemination::BlockReceived;
+use bitvec::vec::BitVec;
+use defaultmap::DefaultBTreeMap;
+use itertools::Itertools;
+use std::{
+    cmp::{max, max_by, max_by_key, min, Ordering},
+    collections::{BTreeMap, BTreeSet, HashSet},
+    fmt::{Debug, Formatter},
+    sync::Arc,
+    time::Duration,
+};
+use tokio::time::Instant;
 
 #[derive(Clone)]
 pub struct Block {
@@ -337,8 +334,6 @@ pub struct RaikouNode<S, DL> {
     last_qc_vote: SubBlockId,
     last_commit_vote: SubBlockId,
     qc_high: QC,
-    cc_high: CC,
-    tc_high: TC,
     committed_qc: QC,
 
     // For multichain integration
@@ -380,8 +375,6 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             last_commit_vote: (0, 0).into(),
             r_timeout: 0,
             qc_high: QC::genesis(),
-            cc_high: CC::genesis(),
-            tc_high: TC::genesis(),
             committed_qc: QC::genesis(),
             blocks: Default::default(),
             stored_prefix_cache: (0, 0),
@@ -658,6 +651,7 @@ where
                     self.dissemination.module_id(),
                     BlockReceived::new(leader, round, payload),
                 ).await;
+                // self.log_detail(format!("Sending BlockReceived event at time {:?}", Instant::now()));
             }
         };
 

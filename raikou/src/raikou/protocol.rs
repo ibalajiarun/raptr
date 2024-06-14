@@ -5,6 +5,7 @@ use crate::{
     metrics::Sender,
     protocol,
     raikou::{
+        dissemination,
         dissemination::{BlockReceived, DisseminationLayer},
         types::*,
     },
@@ -312,7 +313,7 @@ impl<S: LeaderSchedule> Config<S> {
 }
 
 pub struct Metrics {
-    pub batch_commit_time: Option<metrics::UnorderedSender<(Instant, f64)>>,
+    // TODO
 }
 
 pub struct RaikouNode<S, DL> {
@@ -559,7 +560,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
 
     fn log_info(&self, msg: String) {
         log::info!(
-            "Node {} at {:.2}Δ: {}",
+            "Node {} at {:.2}Δ: Raikou: {}",
             self.node_id,
             self.time_in_delta(),
             msg
@@ -783,6 +784,8 @@ where
         };
 
         upon timer [TimerEvent::EndOfRun] {
+            self.log_detail("Halting".to_string());
+            ctx.notify(self.dissemination.module_id(), dissemination::Kill()).await;
             ctx.halt();
         };
     }

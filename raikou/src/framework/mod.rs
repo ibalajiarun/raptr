@@ -2,7 +2,7 @@ use crate::framework::{
     context::{Context, Event, SimpleContext},
     module_network::{ModuleEvent, ModuleNetworkService},
 };
-use std::{future::Future, sync::Arc};
+use std::{any::Any, future::Future, sync::Arc};
 
 pub mod context;
 pub mod module_network;
@@ -22,6 +22,10 @@ where
     P: Protocol + ?Sized,
     Ctx: Context<Message = P::Message, TimerEvent = P::TimerEvent>,
 {
+}
+
+pub trait NamedAny: Any {
+    fn type_name(&self) -> &'static str;
 }
 
 pub trait Protocol: Send + Sync {
@@ -239,32 +243,26 @@ macro_rules! protocol {
 
             let event: Box<dyn std::any::Any> = event;
 
-            $(
+            match (module, event.type_id()) {
                 $(
-                    let event = match module {
-                        $module_pat => {
-                            match event.downcast::<$module_event_type>() {
-                                Ok(event) => {
-                                    match *event {
-                                        $(
-                                            $module_event_pat $(if $module_event_cond)? => $($module_event_label:)? {
-                                                $module_event_handler;
-                                            },
-                                        )*
-                                    }
+                    $(
+                        ($module_pat, id) if id == std::any::TypeId::of::<$module_event_type>() => {
+                            let event = event.downcast::<$module_event_type>().ok().unwrap();
 
-                                    return;
-                                },
-                                Err(event) => {
-                                    event
-                                }
+                            match *event {
+                                $(
+                                    $module_event_pat $(if $module_event_cond)? => $($module_event_label:)? {
+                                        $module_event_handler;
+                                    },
+                                )*
                             }
                         },
-                    };
-                )?
-            )*
-
-            let _ = &event;  // suppress unused variable warning
+                    )?
+                )*
+                _ => {
+                    panic!("Unhandled module event with type id: {:?}", event.type_id());
+                }
+            }
         }
 
         async fn timer_event_handler<Ctx>(&mut $self, $ctx: &mut Ctx, event: Self::TimerEvent)

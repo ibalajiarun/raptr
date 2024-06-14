@@ -1,26 +1,26 @@
+use crate::{
+    framework::{
+        module_network::ModuleId, network::NetworkService, timer::TimerService, NodeId, Protocol,
+    },
+    metrics,
+    metrics::Sender,
+    protocol,
+    raikou::{
+        dissemination::{BlockReceived, DisseminationLayer, Kill},
+        penalty_tracker,
+        penalty_tracker::{PenaltyTracker, PenaltyTrackerReports},
+        types::*,
+    },
+};
+use bitvec::prelude::BitVec;
+use defaultmap::DefaultBTreeMap;
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     future::Future,
     sync::Arc,
     time::Duration,
 };
-
-use bitvec::prelude::BitVec;
-use defaultmap::DefaultBTreeMap;
 use tokio::time::Instant;
-
-use crate::{
-    framework::{
-        module_network::ModuleId, network::NetworkService, NodeId, Protocol, timer::TimerService,
-    },
-    protocol,
-    raikou::{
-        dissemination::{BlockReceived, DisseminationLayer},
-        penalty_tracker,
-        penalty_tracker::{PenaltyTracker, PenaltyTrackerReports},
-        types::*,
-    },
-};
 
 #[derive(Clone)]
 pub struct Batch {
@@ -61,9 +61,14 @@ pub struct Config {
     pub n_nodes: usize,
     pub f: usize,
     pub ac_quorum: usize,
+    pub delta: Duration,
     pub batch_interval: Duration,
     pub enable_penalty_tracker: bool,
     pub penalty_tracker_report_delay: Duration,
+}
+
+pub struct Metrics {
+    pub batch_commit_time: Option<metrics::UnorderedSender<(Instant, f64)>>,
 }
 
 #[derive(Clone)]
@@ -76,11 +81,25 @@ impl<TI> FakeDisseminationLayer<TI>
 where
     TI: Iterator<Item = Vec<Txn>> + Send + Sync,
 {
-    pub fn new(node_id: NodeId, config: Config, txns_iter: TI, start_time: Instant, detailed_logging: bool) -> Self {
+    pub fn new(
+        node_id: NodeId,
+        config: Config,
+        txns_iter: TI,
+        start_time: Instant,
+        detailed_logging: bool,
+        metrics: Metrics,
+    ) -> Self {
         Self {
             config: config.clone(),
             inner: Arc::new(tokio::sync::Mutex::new(
-                FakeDisseminationLayerProtocol::new(node_id, config, txns_iter, start_time, detailed_logging),
+                FakeDisseminationLayerProtocol::new(
+                    node_id,
+                    config,
+                    txns_iter,
+                    start_time,
+                    detailed_logging,
+                    metrics,
+                ),
             )),
         }
     }
@@ -140,6 +159,7 @@ where
 
     async fn notify_commit(&self, payloads: Vec<Payload>) {
         let mut inner = self.inner.lock().await;
+        let now = Instant::now();
 
         // TODO: replace if with an assert once deduplication is implemented.
         for payload in payloads {
@@ -148,20 +168,16 @@ where
                     inner.committed_batches.insert(batch.digest);
                     inner.new_acs.remove(&batch.digest);
                     inner.new_batches.remove(&batch.digest);
+
+                    if batch.author == inner.node_id {
+                        let commit_time =
+                            inner.batch_send_time[&batch.digest].elapsed().as_secs_f64()
+                                / inner.config.delta.as_secs_f64();
+                        inner.metrics.batch_commit_time.push((now, commit_time));
+                    }
                 }
             }
         }
-
-        // TODO: add commit time metric?
-        // if batch_ref.node == self.node_id {
-        //     let commit_time = self.batch_created_time[batch_ref.sn]
-        //         .elapsed()
-        //         .as_secs_f64()
-        //         / self.config.delta.as_secs_f64();
-        //     self.metrics
-        //         .batch_commit_time
-        //         .push((self.batch_created_time[batch_ref.sn], commit_time));
-        // }
     }
 }
 
@@ -190,16 +206,24 @@ pub struct FakeDisseminationLayerProtocol<TI> {
     batch_created_time: DefaultBTreeMap<BatchId, Instant>,
 
     // Logging and metrics
-
     detailed_logging: bool,
     start_time: Instant,
+    metrics: Metrics,
+    batch_send_time: BTreeMap<BatchHash, Instant>,
 }
 
 impl<TI> FakeDisseminationLayerProtocol<TI>
 where
     TI: Iterator<Item = Vec<Txn>> + Send + Sync,
 {
-    pub fn new(node_id: NodeId, config: Config, txns_iter: TI, start_time: Instant, detailed_logging: bool) -> Self {
+    pub fn new(
+        node_id: NodeId,
+        config: Config,
+        txns_iter: TI,
+        start_time: Instant,
+        detailed_logging: bool,
+        metrics: Metrics,
+    ) -> Self {
         let n_nodes = config.n_nodes;
         let penalty_tracker_config = penalty_tracker::Config {
             n_nodes: config.n_nodes,
@@ -222,15 +246,13 @@ where
             batch_created_time: DefaultBTreeMap::new(Instant::now()),
             detailed_logging,
             start_time,
+            metrics,
+            batch_send_time: Default::default(),
         }
     }
 
     fn log_info(&self, msg: String) {
-        log::info!(
-            "Node {}: Dissemination Layer: {}",
-            self.node_id,
-            msg,
-        );
+        log::info!("Node {}: Dissemination Layer: {}", self.node_id, msg,);
     }
 
     fn log_detail(&self, msg: String) {
@@ -278,6 +300,8 @@ where
 
             // Reset the timer.
             ctx.set_timer(self.config.batch_interval, TimerEvent::NewBatch(sn + 1));
+
+            self.batch_send_time.insert(digest, Instant::now());
         };
 
         // Upon receiving a batch, store it, reply with a BatchStored message,
@@ -355,5 +379,14 @@ where
         //         ctx.unicast(Message::Batch(batch.clone()), p).await;
         //     }
         // };
+
+        // Halting
+
+        upon event of type [Kill] from [_any_module] {
+            upon [Kill()] {
+                self.log_detail("Halting".to_string());
+                ctx.halt();
+            };
+        };
     }
 }

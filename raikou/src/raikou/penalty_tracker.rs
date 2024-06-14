@@ -165,7 +165,7 @@ impl PenaltyTracker {
 
                     let propose_delay = self.batch_propose_delay(&self.proposed_batches[batch_num]);
                     assert!(propose_delay >= self.penalties[node_id]);
-                    
+
                     let extra_delay = propose_delay - self.penalties[node_id];
                     let adjusted_delay = delay + extra_delay.as_secs_f32();
                     processed_reports.insert(node_id, adjusted_delay);
@@ -340,17 +340,9 @@ impl PenaltyTracker {
             .min_by_key(|(penalties, _, _)| penalties.iter().sum::<Duration>())
             .unwrap();
 
-        // FIXME: for debugging only:
-        self.log_detail(format!(
-            "Reported delays for node 2 after round {}: {:?}",
-            self.last_round_this_node_was_leader,
-            self.reports.values().map(|reports| reports[&2]).collect_vec()),
-        );
-
         self.log_detail(format!(
             "Selected quorum after round {}: {}",
-            self.last_round_this_node_was_leader,
-            quorum_name,
+            self.last_round_this_node_was_leader, quorum_name,
         ));
 
         self.last_selected_quorum = quorum;

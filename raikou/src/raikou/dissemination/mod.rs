@@ -1,15 +1,31 @@
 use crate::{
-    framework::{module_network::ModuleId, NodeId},
+    framework::{module_network::ModuleId, NamedAny, NodeId},
     raikou::types::*,
 };
 use std::{collections::HashSet, future::Future};
 
 pub mod fake;
 
+/// Event sent by the consensus module to the dissemination layer to notify of a new block.
 pub struct BlockReceived {
     pub leader: NodeId,
     pub round: Round,
     pub payload: Payload,
+}
+
+impl NamedAny for BlockReceived {
+    fn type_name(&self) -> &'static str {
+        "dissemination::BlockReceived"
+    }
+}
+
+/// Event sent by the consensus module to the dissemination layer to notify that it should stop.
+pub struct Kill();
+
+impl NamedAny for Kill {
+    fn type_name(&self) -> &'static str {
+        "dissemination::Kill"
+    }
 }
 
 impl BlockReceived {

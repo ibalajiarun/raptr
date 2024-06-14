@@ -714,6 +714,7 @@ async fn test_raikou(
                     n_nodes,
                     f,
                     ac_quorum: 2 * f + 1,
+                    delta: Duration::from_secs_f64(delta),
                     batch_interval: Duration::from_secs_f64(delta * 0.1),
                     enable_penalty_tracker: true,
                     penalty_tracker_report_delay: Duration::from_secs_f64(delta * 5.),
@@ -721,6 +722,9 @@ async fn test_raikou(
                 txns_iter,
                 start_time,
                 node_id == monitored_node,
+                dissemination::fake::Metrics {
+                    batch_commit_time: batch_commit_time_sender,
+                },
             );
 
             // println!("Spawning node {node_id}");
@@ -733,7 +737,6 @@ async fn test_raikou(
                 raikou::Metrics {
                     // propose_time: propose_time_sender,
                     // enter_time: enter_time_sender,
-                    batch_commit_time: batch_commit_time_sender,
                     // indirectly_committed_slots: indirectly_committed_slots_sender,
                 },
             )));
@@ -749,6 +752,7 @@ async fn test_raikou(
             ));
 
             Protocol::run(node, node_id, network_service, cons_module_network, timer).await;
+            println!("Node {} finished", node_id);
         }));
     }
 
@@ -758,6 +762,7 @@ async fn test_raikou(
     for join_handle in join_handles {
         join_handle.await.unwrap();
     }
+    println!("All nodes finished");
 
     // let propose_time = propose_time
     //     .build()
@@ -783,18 +788,18 @@ async fn test_raikou(
     // enter_time.show_histogram(n_slots as usize / 5, 10);
     // println!();
 
-    // let batch_commit_time = batch_commit_time
-    //     .build()
-    //     .await
-    //     .filter(|&(time, _)| {
-    //         time >= start_time + Duration::from_secs_f64(delta) * warmup_period_in_delta
-    //     })
-    //     .map(|(_, time)| time)
-    //     .sort();
-    // println!("Batch commit time:");
-    // batch_commit_time.print_stats();
-    // batch_commit_time.show_histogram(30, 10);
-    // println!();
+    let batch_commit_time = batch_commit_time
+        .build()
+        .await
+        .filter(|&(time, _)| {
+            time >= start_time + Duration::from_secs_f64(delta) * warmup_period_in_delta
+        })
+        .map(|(_, time)| time)
+        .sort();
+    println!("Batch commit time:");
+    batch_commit_time.print_stats();
+    batch_commit_time.show_histogram(30, 10);
+    println!();
 
     // println!("Indirectly Committed Slots:");
     // let indirectly_committed_slots = indirectly_committed_slots

@@ -313,7 +313,7 @@ impl<S: LeaderSchedule> Config<S> {
 }
 
 pub struct Metrics {
-    // TODO
+    pub consensus_latency: Option<metrics::UnorderedSender<(Instant, f64)>>,
 }
 
 pub struct RaikouNode<S, DL> {
@@ -325,6 +325,7 @@ pub struct RaikouNode<S, DL> {
     start_time: Instant,
     detailed_logging: bool,
     metrics: Metrics,
+    block_create_time: BTreeMap<Round, Instant>,
 
     // Protocol state for the pseudocode
     r_ready: Round,                 // The highest round the node is ready to enter.
@@ -368,6 +369,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             start_time,
             detailed_logging,
             metrics,
+            block_create_time: Default::default(),
             r_ready: 0,
             r_allowed: 0,
             enter_reason: RoundEnterReason::Genesis,
@@ -505,6 +507,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
 
         if qc.round == self.committed_qc.round {
             assert!(qc.prefix > self.committed_qc.prefix);
+
             self.log_detail(format!(
                 "Extending the prefix of committed block {}: {} -> {} / {}{} ({:?})",
                 qc.round,
@@ -518,6 +521,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                 },
                 commit_reason,
             ));
+
             let new_batches: Vec<BatchInfo> = qc
                 .block
                 .batches()
@@ -526,6 +530,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                 .skip(self.committed_qc.prefix)
                 .cloned()
                 .collect();
+
             res.push(Payload::new(vec![], new_batches));
         } else {
             self.log_detail(format!(
@@ -542,6 +547,13 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                 commit_reason,
             ));
 
+            if self.config.leader(qc.round) == self.node_id {
+                self.metrics.consensus_latency.push((
+                    Instant::now(),
+                    self.to_deltas(Instant::now() - self.block_create_time[&qc.round]),
+                ));
+            }
+
             res.push(qc.block.payload.clone());
         }
 
@@ -554,8 +566,12 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         self.config.quorum()
     }
 
+    fn to_deltas(&self, duration: Duration) -> f64 {
+        duration.as_secs_f64() / self.config.delta.as_secs_f64()
+    }
+
     fn time_in_delta(&self) -> f64 {
-        (Instant::now() - self.start_time).as_secs_f64() / self.config.delta.as_secs_f64()
+        self.to_deltas(Instant::now() - self.start_time)
     }
 
     fn log_info(&self, msg: String) {
@@ -616,6 +632,7 @@ where
                 };
                 self.blocks.insert(round, block.clone());
 
+                self.block_create_time.insert(round, Instant::now());
                 ctx.multicast(Message::Block(block)).await;
             }
 

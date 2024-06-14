@@ -662,6 +662,7 @@ async fn test_raikou(
     // let mut propose_time = metrics::UnorderedBuilder::new();
     // let mut enter_time = metrics::UnorderedBuilder::new();
     let mut batch_commit_time = metrics::UnorderedBuilder::new();
+    let mut consensus_latency = metrics::UnorderedBuilder::new();
     // let mut indirectly_committed_slots = metrics::UnorderedBuilder::new();
 
     let start_time = Instant::now();
@@ -683,6 +684,7 @@ async fn test_raikou(
         //     None
         // };
         let batch_commit_time_sender = Some(batch_commit_time.new_sender());
+        let consensus_latency_sender = Some(consensus_latency.new_sender());
         // let indirectly_committed_slots_sender = if node_id == monitored_node {
         //     Some(indirectly_committed_slots.new_sender())
         // } else {
@@ -716,7 +718,7 @@ async fn test_raikou(
                     ac_quorum: 2 * f + 1,
                     delta: Duration::from_secs_f64(delta),
                     batch_interval: Duration::from_secs_f64(delta * 0.1),
-                    enable_penalty_tracker: false,
+                    enable_penalty_tracker: true,
                     penalty_tracker_report_delay: Duration::from_secs_f64(delta * 5.),
                 },
                 txns_iter,
@@ -735,6 +737,7 @@ async fn test_raikou(
                 start_time,
                 node_id == monitored_node,
                 raikou::Metrics {
+                    consensus_latency: consensus_latency_sender,
                     // propose_time: propose_time_sender,
                     // enter_time: enter_time_sender,
                     // indirectly_committed_slots: indirectly_committed_slots_sender,
@@ -791,14 +794,27 @@ async fn test_raikou(
     let batch_commit_time = batch_commit_time
         .build()
         .await
-        .filter(|&(time, _)| {
-            time >= start_time + Duration::from_secs_f64(delta) * warmup_period_in_delta
+        .filter(|&(timestamp, _)| {
+            timestamp >= start_time + Duration::from_secs_f64(delta) * warmup_period_in_delta
         })
-        .map(|(_, time)| time)
+        .map(|(_, commit_time)| commit_time)
         .sort();
     println!("Batch commit time:");
     batch_commit_time.print_stats();
     batch_commit_time.show_histogram(30, 10);
+    println!();
+
+    let consensus_latency = consensus_latency
+        .build()
+        .await
+        .filter(|&(timestamp, _)| {
+            timestamp >= start_time + Duration::from_secs_f64(delta) * warmup_period_in_delta
+        })
+        .map(|(_, latency)| latency)
+        .sort();
+    println!("Consensus latency:");
+    consensus_latency.print_stats();
+    consensus_latency.show_histogram(30, 10);
     println!();
 
     // println!("Indirectly Committed Slots:");
@@ -868,8 +884,8 @@ async fn main() {
 
     test_raikou(
         heterogeneous_symmetric_delay(
-            // the mean delay between a pair of nodes is uniformly sampled between 0 and 0.5 delta.
-            rand_distr::Uniform::new(0., 0.5 * delta),
+            // the mean delay between a pair of nodes is uniformly sampled between 0 and 0.9 delta.
+            rand_distr::Uniform::new(0., 0.9 * delta),
             // 2% standard deviation from the mean in all delays.
             rand_distr::Normal::new(1., 0.02).unwrap(),
             // Fixed additive noise of 0.01 delta to make sure there are no 0-delay messages.

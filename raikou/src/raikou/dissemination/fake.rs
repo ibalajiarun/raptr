@@ -69,6 +69,11 @@ pub struct Config {
 
 pub struct Metrics {
     pub batch_commit_time: Option<metrics::UnorderedSender<(Instant, f64)>>,
+    // pub total_committed_batches: Option<metrics::UnorderedSender<(Instant, usize)>>,
+    // pub two_chain_commit_batches: Option<metrics::UnorderedSender<(Instant, usize)>>,
+    // pub order_vote_committed_batches: Option<metrics::UnorderedSender<(Instant, usize)>>,
+    // pub committed_acs: Option<metrics::UnorderedSender<(Instant, usize)>>,
+    // pub optimistically_committed_batches: Option<metrics::UnorderedSender<(Instant, usize)>>,
 }
 
 #[derive(Clone)]
@@ -170,10 +175,8 @@ where
                     inner.new_batches.remove(&batch.digest);
 
                     if batch.author == inner.node_id {
-                        let commit_time =
-                            inner.batch_send_time[&batch.digest].elapsed().as_secs_f64()
-                                / inner.config.delta.as_secs_f64();
-                        inner.metrics.batch_commit_time.push((now, commit_time));
+                        let commit_time = inner.to_deltas(inner.batch_send_time[&batch.digest].elapsed());
+                        inner.metrics.batch_commit_time.push((now, commit_time, ));
                     }
                 }
             }
@@ -249,6 +252,10 @@ where
             metrics,
             batch_send_time: Default::default(),
         }
+    }
+
+    fn to_deltas(&self, duration: Duration) -> f64 {
+        duration.as_secs_f64() / self.config.delta.as_secs_f64()
     }
 
     fn log_info(&self, msg: String) {

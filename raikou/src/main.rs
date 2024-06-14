@@ -716,7 +716,7 @@ async fn test_raikou(
                     ac_quorum: 2 * f + 1,
                     delta: Duration::from_secs_f64(delta),
                     batch_interval: Duration::from_secs_f64(delta * 0.1),
-                    enable_penalty_tracker: true,
+                    enable_penalty_tracker: false,
                     penalty_tracker_report_delay: Duration::from_secs_f64(delta * 5.),
                 },
                 txns_iter,
@@ -829,8 +829,8 @@ async fn main() {
     let n_nodes = 31;
     let delta = 2.;
     let spawn_period_in_delta = 10;
-    let warmup_period_in_delta = 100;
-    let total_duration_in_delta = 300;
+    let warmup_period_in_delta = 70;
+    let total_duration_in_delta = 150;
     let monitored_node = 3;
 
     // run the test

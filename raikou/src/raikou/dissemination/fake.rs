@@ -354,11 +354,12 @@ where
 
         upon event of type [BlockReceived] from [_any_module] {
             upon [BlockReceived { leader, round, payload }] {
-                // self.log_detail(format!("Received BlockReceived event at time {:?}", Instant::now()));
-                ctx.set_timer(
-                    self.config.penalty_tracker_report_delay,
-                    TimerEvent::PenaltyTrackerReport(leader, round, Instant::now(), payload.batches().clone())
-                );
+                if self.config.enable_penalty_tracker {
+                    ctx.set_timer(
+                        self.config.penalty_tracker_report_delay,
+                        TimerEvent::PenaltyTrackerReport(leader, round, Instant::now(), payload.batches().clone())
+                    );
+                }
             };
         };
 
@@ -368,7 +369,9 @@ where
         };
 
         upon receive [Message::PenaltyTrackerReport(round, reports)] from node [p] {
-            self.penalty_tracker.register_reports(round, p, reports);
+            if self.config.enable_penalty_tracker {
+                self.penalty_tracker.register_reports(round, p, reports);
+            }
         };
 
         // upon receive [Message::Fetch(digest)] from node [p] {

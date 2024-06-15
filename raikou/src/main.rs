@@ -662,6 +662,8 @@ async fn test_raikou(
     // let mut propose_time = metrics::UnorderedBuilder::new();
     // let mut enter_time = metrics::UnorderedBuilder::new();
     let mut batch_commit_time = metrics::UnorderedBuilder::new();
+    let mut queueing_time = metrics::UnorderedBuilder::new();
+    let mut penalty_wait_time = metrics::UnorderedBuilder::new();
     let mut consensus_latency = metrics::UnorderedBuilder::new();
     // let mut indirectly_committed_slots = metrics::UnorderedBuilder::new();
 
@@ -684,6 +686,8 @@ async fn test_raikou(
         //     None
         // };
         let batch_commit_time_sender = Some(batch_commit_time.new_sender());
+        let queueing_time_sender = Some(queueing_time.new_sender());
+        let penalty_wait_time_sender = Some(penalty_wait_time.new_sender());
         let consensus_latency_sender = Some(consensus_latency.new_sender());
         // let indirectly_committed_slots_sender = if node_id == monitored_node {
         //     Some(indirectly_committed_slots.new_sender())
@@ -726,6 +730,8 @@ async fn test_raikou(
                 node_id == monitored_node,
                 dissemination::fake::Metrics {
                     batch_commit_time: batch_commit_time_sender,
+                    queueing_time: queueing_time_sender,
+                    penalty_wait_time: penalty_wait_time_sender,
                 },
             );
 
@@ -804,6 +810,32 @@ async fn test_raikou(
     batch_commit_time.show_histogram(30, 10);
     println!();
 
+    let queueing_time = queueing_time
+        .build()
+        .await
+        .filter(|&(timestamp, _)| {
+            timestamp >= start_time + Duration::from_secs_f64(delta) * warmup_period_in_delta
+        })
+        .map(|(_, queueing_time)| queueing_time)
+        .sort();
+    println!("Batch commit time:");
+    queueing_time.print_stats();
+    queueing_time.show_histogram(30, 10);
+    println!();
+
+    let penalty_wait_time = penalty_wait_time
+        .build()
+        .await
+        .filter(|&(timestamp, _)| {
+            timestamp >= start_time + Duration::from_secs_f64(delta) * warmup_period_in_delta
+        })
+        .map(|(_, penalty_wait_time)| penalty_wait_time)
+        .sort();
+    println!("Batch commit time:");
+    penalty_wait_time.print_stats();
+    penalty_wait_time.show_histogram(30, 10);
+    println!();
+
     let consensus_latency = consensus_latency
         .build()
         .await
@@ -843,7 +875,7 @@ async fn main() {
         .init();
 
     let n_nodes = 31;
-    let delta = 2.;
+    let delta = 1.;
     let spawn_period_in_delta = 10;
     let warmup_period_in_delta = 70;
     let total_duration_in_delta = 150;

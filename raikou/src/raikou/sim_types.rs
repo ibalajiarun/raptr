@@ -1,4 +1,4 @@
-use crate::framework::NodeId;
+use crate::{framework::NodeId, raikou::types::Round};
 use bitvec::prelude::BitVec;
 use std::{
     fmt::{Debug, Formatter},
@@ -48,38 +48,50 @@ pub struct AC {
 
 #[derive(Clone)]
 pub struct Payload {
-    inner: Arc<BlockPayloadInner>,
+    round: Round,
+    leader: NodeId,
+    data: Arc<PayloadData>,
 }
 
-struct BlockPayloadInner {
+struct PayloadData {
     acs: Vec<AC>,
     batches: Vec<BatchInfo>,
 }
 
 impl Payload {
-    pub fn new(acs: Vec<AC>, batches: Vec<BatchInfo>) -> Self {
+    pub fn new(round: Round, leader: NodeId, acs: Vec<AC>, batches: Vec<BatchInfo>) -> Self {
         Self {
-            inner: Arc::new(BlockPayloadInner { acs, batches }),
+            round,
+            leader,
+            data: Arc::new(PayloadData { acs, batches }),
         }
     }
 
-    pub fn empty() -> Self {
-        Self::new(vec![], vec![])
+    pub fn empty(round: Round, leader: NodeId) -> Self {
+        Self::new(round, leader, vec![], vec![])
+    }
+
+    pub fn round(&self) -> Round {
+        self.round
+    }
+
+    pub fn leader(&self) -> NodeId {
+        self.leader
     }
 
     pub fn acs(&self) -> &Vec<AC> {
-        &self.inner.acs
+        &self.data.acs
     }
 
     pub fn batches(&self) -> &Vec<BatchInfo> {
-        &self.inner.batches
+        &self.data.batches
     }
 
     pub fn all(&self) -> impl Iterator<Item = &BatchInfo> {
-        self.inner
+        self.data
             .acs
             .iter()
             .map(|ac| &ac.batch)
-            .chain(self.inner.batches.iter())
+            .chain(self.data.batches.iter())
     }
 }

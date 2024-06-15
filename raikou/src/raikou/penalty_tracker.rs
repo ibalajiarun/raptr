@@ -65,6 +65,10 @@ pub struct PenaltyTracker {
     reports: BTreeMap<NodeId, BTreeMap<NodeId, f32>>,
 
     last_selected_quorum: Vec<NodeId>,
+
+    // For metrics
+    block_prepare_time: BTreeMap<Round, Instant>,
+    block_prepare_penalties: BTreeMap<Round, NodeIdMap<Duration>>,
 }
 
 impl PenaltyTracker {
@@ -83,7 +87,25 @@ impl PenaltyTracker {
             block_issue_time: Instant::now(),
             reports: Default::default(),
             last_selected_quorum: vec![],
+            block_prepare_time: Default::default(),
+            block_prepare_penalties: Default::default(),
         }
+    }
+
+    pub fn block_prepare_time(&self, round: Round) -> Instant {
+        self.block_prepare_time[&round]
+    }
+
+    pub fn block_prepare_penalty(&self, round: Round, node_id: NodeId) -> Duration {
+        if self.config.enable {
+            self.block_prepare_penalties[&round][node_id]
+        } else {
+            Duration::ZERO
+        }
+    }
+
+    pub fn batch_receive_time(&self, digest: BatchHash) -> Instant {
+        self.batch_receive_time[&digest]
     }
 
     pub fn prepare_reports(
@@ -356,6 +378,7 @@ impl PenaltyTracker {
 
     pub fn prepare_new_block(&mut self, round: Round, batches: Vec<BatchInfo>) -> Vec<BatchInfo> {
         if !self.config.enable {
+            self.block_prepare_time.insert(round, Instant::now());
             return batches
                 .into_iter()
                 .sorted_by_key(|batch_info| self.batch_receive_time[&batch_info.digest])
@@ -373,7 +396,10 @@ impl PenaltyTracker {
         }
 
         let now = Instant::now();
+        self.block_prepare_time.insert(round, now);
 
+        self.block_prepare_penalties
+            .insert(round, new_penalties.clone());
         let batches_to_propose: Vec<BatchInfo> = batches
             .into_iter()
             .map(|batch_info| {

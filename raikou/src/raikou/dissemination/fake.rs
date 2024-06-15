@@ -69,6 +69,9 @@ pub struct Config {
 
 pub struct Metrics {
     pub batch_commit_time: Option<metrics::UnorderedSender<(Instant, f64)>>,
+    pub queueing_time: Option<metrics::UnorderedSender<(Instant, f64)>>,
+    pub penalty_wait_time: Option<metrics::UnorderedSender<(Instant, f64)>>,
+    // pub average_penalty: Option<metrics::UnorderedSender<(Instant, f64)>>,
     // pub total_committed_batches: Option<metrics::UnorderedSender<(Instant, usize)>>,
     // pub two_chain_commit_batches: Option<metrics::UnorderedSender<(Instant, usize)>>,
     // pub order_vote_committed_batches: Option<metrics::UnorderedSender<(Instant, usize)>>,
@@ -143,7 +146,7 @@ where
 
         let batches = inner.penalty_tracker.prepare_new_block(round, batches);
 
-        Payload::new(acs, batches)
+        Payload::new(round, inner.node_id, acs, batches)
     }
 
     async fn prefetch_payload_data(&self, payload: Payload) {
@@ -178,6 +181,31 @@ where
                     let commit_time =
                         inner.to_deltas(inner.batch_send_time[&batch.digest].elapsed());
                     inner.metrics.batch_commit_time.push((now, commit_time));
+                }
+
+                // Metrics:
+                // Only track queueing time and penalties for the committed batches.
+                if payload.leader() == inner.node_id {
+                    let block_prepare_time =
+                        inner.penalty_tracker.block_prepare_time(payload.round());
+                    let batch_receive_time = inner.penalty_tracker.batch_receive_time(batch.digest);
+                    let penalty = inner
+                        .penalty_tracker
+                        .block_prepare_penalty(payload.round(), batch.author);
+                    let batch_propose_delay = block_prepare_time - batch_receive_time;
+
+                    assert!(batch_propose_delay >= penalty);
+                    let queueing_time_in_deltas = inner.to_deltas(batch_propose_delay - penalty);
+                    inner
+                        .metrics
+                        .queueing_time
+                        .push((now, queueing_time_in_deltas));
+
+                    let penalty_in_deltas = inner.to_deltas(penalty);
+                    inner
+                        .metrics
+                        .penalty_wait_time
+                        .push((now, penalty_in_deltas));
                 }
             }
         }

@@ -35,7 +35,7 @@ impl Block {
     pub fn genesis() -> Self {
         Block {
             round: 0,
-            payload: Payload::empty(),
+            payload: Payload::empty(-1, 999999999),
             parent_qc: None,
             reason: RoundEnterReason::Genesis,
         }
@@ -533,7 +533,12 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                 .cloned()
                 .collect();
 
-            res.push(Payload::new(vec![], new_batches));
+            res.push(Payload::new(
+                qc.round,
+                self.config.leader(qc.round),
+                vec![],
+                new_batches,
+            ));
         } else {
             // Committing a new block.
 
@@ -559,6 +564,8 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             }
 
             res.push(Payload::new(
+                qc.round,
+                self.config.leader(qc.round),
                 qc.block.payload.acs().clone(),
                 qc.block
                     .payload

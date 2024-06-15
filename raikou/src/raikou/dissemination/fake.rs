@@ -166,18 +166,18 @@ where
         let mut inner = self.inner.lock().await;
         let now = Instant::now();
 
-        // TODO: replace if with an assert once deduplication is implemented.
         for payload in payloads {
             for batch in payload.all() {
-                if !inner.committed_batches.contains(&batch.digest) {
-                    inner.committed_batches.insert(batch.digest);
-                    inner.new_acs.remove(&batch.digest);
-                    inner.new_batches.remove(&batch.digest);
+                assert!(!inner.committed_batches.contains(&batch.digest));
 
-                    if batch.author == inner.node_id {
-                        let commit_time = inner.to_deltas(inner.batch_send_time[&batch.digest].elapsed());
-                        inner.metrics.batch_commit_time.push((now, commit_time, ));
-                    }
+                inner.committed_batches.insert(batch.digest);
+                inner.new_acs.remove(&batch.digest);
+                inner.new_batches.remove(&batch.digest);
+
+                if batch.author == inner.node_id {
+                    let commit_time =
+                        inner.to_deltas(inner.batch_send_time[&batch.digest].elapsed());
+                    inner.metrics.batch_commit_time.push((now, commit_time));
                 }
             }
         }

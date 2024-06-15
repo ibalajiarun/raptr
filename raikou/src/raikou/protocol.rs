@@ -506,6 +506,8 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         // Then, commit the transactions of this block.
 
         if qc.round == self.committed_qc.round {
+            // Extending the prefix of an already committed block.
+
             assert!(qc.prefix > self.committed_qc.prefix);
 
             self.log_detail(format!(
@@ -533,6 +535,8 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
 
             res.push(Payload::new(vec![], new_batches));
         } else {
+            // Committing a new block.
+
             self.log_detail(format!(
                 "Committing block {} proposed by node {} with prefix {}/{}{} ({:?})",
                 qc.round,
@@ -554,12 +558,44 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                 ));
             }
 
-            res.push(qc.block.payload.clone());
+            res.push(Payload::new(
+                qc.block.payload.acs().clone(),
+                qc.block
+                    .payload
+                    .batches()
+                    .iter()
+                    .take(qc.prefix)
+                    .cloned()
+                    .collect_vec(),
+            ));
         }
 
         // Finally, update the committed QC variable.
         self.committed_qc = qc.clone();
         res
+    }
+
+    fn uncommitted_batches(&self, qc: &QC) -> HashSet<BatchHash> {
+        let mut uncommitted = HashSet::new();
+
+        let mut cur = qc;
+        while cur.round != self.committed_qc.round {
+            uncommitted.extend(cur.block.batches().iter().map(|batch| batch.digest));
+            uncommitted.extend(cur.block.acs().iter().map(|ac| ac.batch.digest));
+            cur = cur.block.parent_qc.as_ref().unwrap();
+        }
+
+        if cur.prefix > self.committed_qc.prefix {
+            uncommitted.extend(
+                cur.block
+                    .batches()
+                    .iter()
+                    .skip(self.committed_qc.prefix)
+                    .map(|batch| batch.digest),
+            );
+        }
+
+        uncommitted
     }
 
     fn quorum(&self) -> usize {
@@ -623,11 +659,15 @@ where
                 // if the leader enters the round by forming or receiving a CC or TC
                 // for round r-1 respectively.
 
+                let parent_qc = self.qc_high.clone();
+
                 let block = Block {
                     round,
-                    // TODO: implement deduplication.
-                    payload: self.dissemination.prepare_block(round, HashSet::new()).await,
-                    parent_qc: Some(self.qc_high.clone()),
+                    payload: self.dissemination.prepare_block(
+                        round,
+                        self.uncommitted_batches(&parent_qc),
+                    ).await,
+                    parent_qc: Some(parent_qc),
                     reason: self.enter_reason.clone(),
                 };
                 self.blocks.insert(round, block.clone());

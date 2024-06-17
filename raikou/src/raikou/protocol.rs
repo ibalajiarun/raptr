@@ -313,7 +313,8 @@ impl<S: LeaderSchedule> Config<S> {
 }
 
 pub struct Metrics {
-    pub consensus_latency: Option<metrics::UnorderedSender<(Instant, f64)>>,
+    pub block_consensus_latency: Option<metrics::UnorderedSender<(Instant, f64)>>,
+    pub batch_consensus_latency: Option<metrics::UnorderedSender<(Instant, f64)>>,
 }
 
 pub struct RaikouNode<S, DL> {
@@ -539,6 +540,17 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                 vec![],
                 new_batches,
             ));
+
+            // Record the metrics
+            let now = Instant::now();
+            if self.config.leader(qc.round) == self.node_id {
+                for _ in 0..(qc.prefix - self.committed_qc.prefix) {
+                    self.metrics.batch_consensus_latency.push((
+                        now,
+                        self.to_deltas(now - self.block_create_time[&qc.round]),
+                    ));
+                }
+            }
         } else {
             // Committing a new block.
 
@@ -556,13 +568,6 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                 commit_reason,
             ));
 
-            if self.config.leader(qc.round) == self.node_id {
-                self.metrics.consensus_latency.push((
-                    Instant::now(),
-                    self.to_deltas(Instant::now() - self.block_create_time[&qc.round]),
-                ));
-            }
-
             res.push(Payload::new(
                 qc.round,
                 self.config.leader(qc.round),
@@ -575,6 +580,21 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                     .cloned()
                     .collect_vec(),
             ));
+
+            // Record the metrics
+            let now = Instant::now();
+            if self.config.leader(qc.round) == self.node_id {
+                self.metrics.block_consensus_latency.push((
+                    now,
+                    self.to_deltas(now - self.block_create_time[&qc.round]),
+                ));
+                for _ in 0..(qc.block.acs().len() + qc.prefix) {
+                    self.metrics.batch_consensus_latency.push((
+                        now,
+                        self.to_deltas(now - self.block_create_time[&qc.round]),
+                    ));
+                }
+            }
         }
 
         // Finally, update the committed QC variable.

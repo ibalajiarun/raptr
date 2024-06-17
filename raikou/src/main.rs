@@ -664,7 +664,8 @@ async fn test_raikou(
     let mut batch_commit_time = metrics::UnorderedBuilder::new();
     let mut queueing_time = metrics::UnorderedBuilder::new();
     let mut penalty_wait_time = metrics::UnorderedBuilder::new();
-    let mut consensus_latency = metrics::UnorderedBuilder::new();
+    let mut block_consensus_latency = metrics::UnorderedBuilder::new();
+    let mut batch_consensus_latency = metrics::UnorderedBuilder::new();
     // let mut indirectly_committed_slots = metrics::UnorderedBuilder::new();
 
     let start_time = Instant::now();
@@ -688,7 +689,8 @@ async fn test_raikou(
         let batch_commit_time_sender = Some(batch_commit_time.new_sender());
         let queueing_time_sender = Some(queueing_time.new_sender());
         let penalty_wait_time_sender = Some(penalty_wait_time.new_sender());
-        let consensus_latency_sender = Some(consensus_latency.new_sender());
+        let block_consensus_latency_sender = Some(block_consensus_latency.new_sender());
+        let batch_consensus_latency_sender = Some(batch_consensus_latency.new_sender());
         // let indirectly_committed_slots_sender = if node_id == monitored_node {
         //     Some(indirectly_committed_slots.new_sender())
         // } else {
@@ -722,7 +724,7 @@ async fn test_raikou(
                     ac_quorum: 2 * f + 1,
                     delta: Duration::from_secs_f64(delta),
                     batch_interval: Duration::from_secs_f64(delta * 0.1),
-                    enable_penalty_tracker: true,
+                    enable_penalty_tracker: false,
                     penalty_tracker_report_delay: Duration::from_secs_f64(delta * 5.),
                 },
                 txns_iter,
@@ -743,7 +745,8 @@ async fn test_raikou(
                 start_time,
                 node_id == monitored_node,
                 raikou::Metrics {
-                    consensus_latency: consensus_latency_sender,
+                    block_consensus_latency: block_consensus_latency_sender,
+                    batch_consensus_latency: batch_consensus_latency_sender,
                     // propose_time: propose_time_sender,
                     // enter_time: enter_time_sender,
                     // indirectly_committed_slots: indirectly_committed_slots_sender,
@@ -818,7 +821,7 @@ async fn test_raikou(
         })
         .map(|(_, queueing_time)| queueing_time)
         .sort();
-    println!("Batch commit time:");
+    println!("Queueing time:");
     queueing_time.print_stats();
     queueing_time.show_histogram(30, 10);
     println!();
@@ -831,12 +834,12 @@ async fn test_raikou(
         })
         .map(|(_, penalty_wait_time)| penalty_wait_time)
         .sort();
-    println!("Batch commit time:");
+    println!("Penalty system delay:");
     penalty_wait_time.print_stats();
     penalty_wait_time.show_histogram(30, 10);
     println!();
 
-    let consensus_latency = consensus_latency
+    let batch_consensus_latency = batch_consensus_latency
         .build()
         .await
         .filter(|&(timestamp, _)| {
@@ -844,9 +847,9 @@ async fn test_raikou(
         })
         .map(|(_, latency)| latency)
         .sort();
-    println!("Consensus latency:");
-    consensus_latency.print_stats();
-    consensus_latency.show_histogram(30, 10);
+    println!("Batch consensus latency:");
+    batch_consensus_latency.print_stats();
+    batch_consensus_latency.show_histogram(30, 10);
     println!();
 
     // println!("Indirectly Committed Slots:");

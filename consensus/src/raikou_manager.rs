@@ -11,6 +11,7 @@ use futures::StreamExt;
 use futures_channel::oneshot;
 use raikou::{
     framework::{
+        module_network::ModuleNetwork,
         network::{Network, NetworkService},
         timer::LocalTimerService,
         Protocol,
@@ -80,7 +81,11 @@ impl RaikouManager {
         let timer = LocalTimerService::new();
 
         let mut batch_commit_time = metrics::UnorderedBuilder::new();
+        let mut queueing_time = metrics::UnorderedBuilder::new();
+        let mut penalty_wait_time = metrics::UnorderedBuilder::new();
         let batch_commit_time_sender = Some(batch_commit_time.new_sender());
+        let queueing_time_sender = Some(queueing_time.new_sender());
+        let penalty_wait_time_sender = Some(penalty_wait_time.new_sender());
 
         let address_to_index = epoch_state.verifier.address_to_validator_index().clone();
         let node_id = *address_to_index.get(&self_author).unwrap();
@@ -102,9 +107,20 @@ impl RaikouManager {
             end_of_run: Instant::now() + Duration::from_secs_f64(delta) * total_duration_in_delta,
             enable_optimistic_dissemination,
             extra_wait_before_qc_vote: Duration::from_secs_f64(delta * 0.1),
+            extra_wait_before_commit_vote: Duration::from_secs_f64(delta * 0.1),
             enable_round_entry_permission: false,
             enable_commit_votes: true,
         };
+
+        let mut module_network = ModuleNetwork::new();
+        let diss_module_network = module_network.register().await;
+        let cons_module_network = module_network.register().await;
+
+        let mut block_consensus_latency = metrics::UnorderedBuilder::new();
+        let mut batch_consensus_latency = metrics::UnorderedBuilder::new();
+
+        let block_consensus_latency_sender = Some(block_consensus_latency.new_sender());
+        let batch_consensus_latency_sender = Some(batch_consensus_latency.new_sender());
 
         let dissemination = FakeDisseminationLayer::new(
             node_id,
@@ -112,8 +128,20 @@ impl RaikouManager {
                 n_nodes,
                 ac_quorum: 2 * f + 1,
                 batch_interval: Duration::from_secs_f64(delta * 0.1),
+                f,
+                delta: Duration::from_secs_f64(delta),
+                enable_penalty_tracker: false,
+                penalty_tracker_report_delay: Duration::from_secs_f64(delta * 5.),
+                module_id: diss_module_network.module_id(),
             },
             txns_iter,
+            start_time,
+            true,
+            dissemination::fake::Metrics {
+                batch_commit_time: batch_commit_time_sender,
+                queueing_time: queueing_time_sender,
+                penalty_wait_time: penalty_wait_time_sender,
+            },
         );
 
         let node = Arc::new(tokio::sync::Mutex::new(RaikouNode::new(
@@ -125,7 +153,8 @@ impl RaikouManager {
             raikou::raikou::Metrics {
                 // propose_time: propose_time_sender,
                 // enter_time: enter_time_sender,
-                batch_commit_time: batch_commit_time_sender,
+                block_consensus_latency: block_consensus_latency_sender,
+                batch_consensus_latency: batch_consensus_latency_sender,
                 // indirectly_committed_slots: indirectly_committed_slots_sender,
             },
         )));
@@ -134,6 +163,7 @@ impl RaikouManager {
             dissemination.protocol(),
             node_id,
             diss_network_service,
+            diss_module_network,
             diss_timer,
         ));
 
@@ -142,7 +172,7 @@ impl RaikouManager {
                 let _ = ack_tx.send(());
                 return;
             },
-            _ = Protocol::run(node, node_id, network_service, timer) => {
+            _ = Protocol::run(node, node_id, network_service, cons_module_network, timer) => {
                 unreachable!()
             },
         }

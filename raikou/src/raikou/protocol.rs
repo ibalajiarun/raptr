@@ -258,11 +258,13 @@ impl Debug for RoundEnterReason {
 #[derive(Clone)]
 pub enum Message {
     // Consensus
-    Block(Block),
+    Propose(Block),
     QcVote(BlockHash, Prefix),
     CommitVote(QC),
     Timeout(Round, QC),
     AdvanceRound(Round, QC, RoundEnterReason),
+    FetchReq(BlockHash),
+    FetchResp(Block),
 }
 
 #[derive(Clone)]
@@ -827,7 +829,7 @@ where
                 // self.blocks.insert(digest, block.clone());
 
                 self.block_create_time.insert(round, Instant::now());
-                ctx.multicast(Message::Block(block)).await;
+                ctx.multicast(Message::Propose(block)).await;
             }
 
             // Upon entering round r, the node starts a timer for leader timeout.
@@ -839,7 +841,7 @@ where
         // for the first time, if r >= r_cur and r > r_timeout, store the block,
         // execute on_new_qc and advance_round, start a timer for qc-vote,
         // and report missing batches to the leader.
-        upon receive [Message::Block(block)] from [leader] {
+        upon receive [Message::Propose(block)] from [leader] {
             if
                 block.is_valid()
                 && leader == self.config.leader(block.round)
@@ -1011,6 +1013,22 @@ where
         upon receive [Message::AdvanceRound(round, qc, reason)] from [_any_node] {
             self.on_new_qc(qc, ctx).await;
             self.advance_r_ready(round, reason, ctx).await;
+        };
+
+        // Block fetching
+
+        upon receive [Message::FetchReq(digest)] from [p] {
+            if let Some(block) = self.blocks.get(&digest) {
+                ctx.unicast(Message::FetchResp(block.clone()), p).await;
+            } else {
+                warn!("Received FetchReq for unknown block {:#x}", digest);
+            }
+        };
+
+        upon receive [Message::FetchResp(block)] from [_any_node] {
+            if !self.blocks.contains_key(&block.digest) {
+                self.on_new_block(&block, ctx).await;
+            }
         };
 
         // Logging and halting

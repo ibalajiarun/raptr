@@ -653,6 +653,7 @@ async fn test_raikou(
         extra_wait_before_commit_vote: Duration::from_secs_f64(delta * 0.1),
         enable_round_entry_permission: false,
         enable_commit_votes: true,
+        status_interval: 10 * Duration::from_secs_f64(delta),
     };
 
     let mut join_handles = Vec::new();
@@ -724,7 +725,7 @@ async fn test_raikou(
                     ac_quorum: 2 * f + 1,
                     delta: Duration::from_secs_f64(delta),
                     batch_interval: Duration::from_secs_f64(delta * 0.1),
-                    enable_penalty_tracker: false,
+                    enable_penalty_tracker: true,
                     penalty_tracker_report_delay: Duration::from_secs_f64(delta * 5.),
                 },
                 txns_iter,

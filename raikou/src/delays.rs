@@ -38,6 +38,11 @@ pub fn heterogeneous_symmetric_delay(
     add_noise_distr: impl Distribution<f64> + Send + Sync + Copy + 'static,
 ) -> impl DelayFunction {
     move |from: NodeId, to: NodeId| {
+        if from == to {
+            // TODO: check if 0 delays actually break anything.
+            return 0.00001;
+        }
+
         let mut base_seed = [0; 16];
         base_seed[..8].copy_from_slice(&hash((min(from, to), max(from, to))).to_le_bytes());
         let mut base_rng = SmallRng::from_seed(base_seed);

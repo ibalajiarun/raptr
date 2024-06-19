@@ -1,4 +1,7 @@
-use crate::{framework::NodeId, raikou::types::Round};
+use crate::{
+    framework::NodeId,
+    raikou::types::{BatchHash, Round},
+};
 use bitvec::prelude::BitVec;
 use std::{
     fmt::{Debug, Formatter},
@@ -16,11 +19,11 @@ pub type HashValue = u64;
 
 pub type BatchId = i64;
 
-#[derive(Clone)]
+#[derive(Clone, Hash)]
 pub struct BatchInfo {
     pub author: NodeId,
     pub batch_id: BatchId,
-    pub digest: HashValue,
+    pub digest: BatchHash,
 }
 
 pub fn hash(x: impl Hash) -> HashValue {
@@ -34,25 +37,26 @@ impl Debug for crate::raikou::types::BatchInfo {
         write!(
             f,
             "{{ node: {}, sn: {}, hash: {:#x} }}",
-            self.author, self.batch_id, self.digest
+            self.author, self.batch_id, &self.digest
         )
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash)]
 pub struct AC {
     // In practice, this would be a hash pointer.
     pub batch: BatchInfo,
     pub signers: BitVec,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash)]
 pub struct Payload {
     round: Round,
     leader: NodeId,
     data: Arc<PayloadData>,
 }
 
+#[derive(Hash)]
 struct PayloadData {
     acs: Vec<AC>,
     batches: Vec<BatchInfo>,

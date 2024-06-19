@@ -14,6 +14,7 @@ use crate::{
 use bitvec::vec::BitVec;
 use defaultmap::DefaultBTreeMap;
 use itertools::Itertools;
+use log::warn;
 use std::{
     cmp::{max, max_by, max_by_key, min, Ordering},
     collections::{BTreeMap, BTreeSet, HashSet},
@@ -23,12 +24,13 @@ use std::{
 };
 use tokio::time::Instant;
 
-#[derive(Clone)]
+#[derive(Clone, Hash)]
 pub struct Block {
     pub round: Round,
     pub payload: Payload,
     pub parent_qc: Option<QC>, // `None` only for the genesis block.
     pub reason: RoundEnterReason,
+    pub digest: BlockHash,
 }
 
 impl Block {
@@ -38,6 +40,7 @@ impl Block {
             payload: Payload::empty(-1, 999999999),
             parent_qc: None,
             reason: RoundEnterReason::Genesis,
+            digest: BlockHash::genesis(),
         }
     }
 
@@ -69,6 +72,8 @@ impl Block {
     ///    - `cc` is not None, `cc.round == round - 1`, and `parent_qc.id() >= cc.highest_qc_id()`.
     ///    - `tc` is not None, `cc.round == round - 1`, and `parent_qc.id() >= tc.highest_qc_id()`.
     pub fn is_valid(&self) -> bool {
+        // TODO: add digest verification.
+
         if self.is_genesis() {
             return true;
         }
@@ -92,17 +97,15 @@ impl Block {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash)]
 pub struct QC {
     round: Round,
     prefix: Prefix,
     n_batches: Prefix,
-
-    // In practice, this would be a hash pointer.
-    block: Arc<Block>,
+    block_digest: BlockHash,
 }
 
-#[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 pub struct SubBlockId {
     round: Round,
     prefix: Prefix,
@@ -131,7 +134,7 @@ impl QC {
             round: 0,
             prefix: 0,
             n_batches: 0,
-            block: Arc::new(Block::genesis()),
+            block_digest: BlockHash::genesis(),
         }
     }
 
@@ -164,7 +167,7 @@ impl Ord for QC {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash)]
 pub struct CC {
     round: Round,
     min_prefix: Prefix,
@@ -200,7 +203,7 @@ impl CC {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash)]
 pub struct TC {
     round: Round,
     max_vote: SubBlockId,
@@ -229,7 +232,7 @@ impl TC {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash)]
 pub enum RoundEnterReason {
     /// Special case for the genesis block.
     Genesis,
@@ -256,7 +259,7 @@ impl Debug for RoundEnterReason {
 pub enum Message {
     // Consensus
     Block(Block),
-    QcVote(Round, Prefix),
+    QcVote(BlockHash, Prefix),
     CommitVote(QC),
     Timeout(Round, QC),
     AdvanceRound(Round, QC, RoundEnterReason),
@@ -270,6 +273,7 @@ pub enum TimerEvent {
 
     // Other
     EndOfRun,
+    Status,
 }
 
 #[derive(Clone, Debug)]
@@ -297,6 +301,7 @@ pub struct Config<S> {
     pub extra_wait_before_qc_vote: Duration,
     pub extra_wait_before_commit_vote: Duration,
 
+    pub status_interval: Duration,
     pub end_of_run: Instant,
 }
 
@@ -339,14 +344,32 @@ pub struct RaikouNode<S, DL> {
     qc_high: QC,
     committed_qc: QC,
 
-    // For multichain integration
-
     // Additional variables necessary for an efficient implementation
-    blocks: BTreeMap<Round, Block>,
+
+    // Set of already processed QCs.
+    known_qcs: BTreeSet<SubBlockId>,
+
+    // Map from a QC id to the list of blocks that wait for this QC to be satisfied.
+    pending_blocks: DefaultBTreeMap<SubBlockId, Vec<BlockHash>>,
+
+    // Set of blocks for which we have the full causal history available.
+    satisfied_blocks: BTreeSet<BlockHash>,
+
+    // Map from a block id to the list of QCs that wait for this block to be satisfied.
+    pending_qcs: DefaultBTreeMap<BlockHash, Vec<QC>>,
+
+    // QCs for which we have the full causal history available.
+    satisfied_qcs: BTreeSet<SubBlockId>,
+
+    // QCs that are committed via direct commit votes, for which we do not yet have their full causal history available.
+    qcs_to_commit: BTreeMap<SubBlockId, (QC, CommitReason)>,
+
+    leader_proposal: BTreeMap<Round, BlockHash>,
+    blocks: BTreeMap<BlockHash, Block>,
     stored_prefix_cache: (Round, Prefix),
     // In practice, all votes should also include a signature.
     // In this prototype, signatures are omitted.
-    qc_votes: DefaultBTreeMap<Round, BTreeMap<NodeId, Prefix>>,
+    qc_votes: DefaultBTreeMap<BlockHash, BTreeMap<NodeId, Prefix>>,
     received_cc_vote: DefaultBTreeMap<Round, BTreeSet<NodeId>>,
     cc_votes: DefaultBTreeMap<Round, KthMaxSet<(QC, NodeId)>>,
     tc_votes: DefaultBTreeMap<Round, BTreeMap<NodeId, SubBlockId>>,
@@ -380,6 +403,13 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             r_timeout: 0,
             qc_high: QC::genesis(),
             committed_qc: QC::genesis(),
+            known_qcs: Default::default(),
+            pending_blocks: Default::default(),
+            satisfied_blocks: Default::default(),
+            pending_qcs: Default::default(),
+            satisfied_qcs: Default::default(),
+            qcs_to_commit: Default::default(),
+            leader_proposal: Default::default(),
             blocks: Default::default(),
             stored_prefix_cache: (0, 0),
             qc_votes: Default::default(),
@@ -389,22 +419,72 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         }
     }
 
-    async fn on_new_qc(&mut self, new_qc: &QC, ctx: &mut impl ContextFor<Self>) {
-        // Upon receiving a new highest QC, update qc_high and check the 2-chain commit rule.
-        if new_qc <= &self.qc_high {
-            return;
-        }
+    fn on_new_satisfied_block(&mut self, block_digest: BlockHash) {
+        assert!(!self.satisfied_blocks.contains(&block_digest));
 
-        // Update qc_high.
-        self.qc_high = new_qc.clone();
+        self.satisfied_blocks.insert(block_digest.clone());
+        if let Some(pending_qcs) = self.pending_qcs.remove(&block_digest) {
+            for pending_qc in pending_qcs {
+                self.on_new_satisfied_qc(pending_qc);
+            }
+        }
+    }
+
+    fn on_new_satisfied_qc(&mut self, qc: QC) {
+        assert!(
+            !self.satisfied_qcs.contains(&qc.sub_block_id()),
+            "QC {:?} already satisfied",
+            qc.sub_block_id()
+        );
+
+        self.satisfied_qcs.insert(qc.sub_block_id());
+
+        if let Some(pending_blocks) = self.pending_blocks.remove(&qc.sub_block_id()) {
+            for pending_block in pending_blocks {
+                self.on_new_satisfied_block(pending_block);
+            }
+        }
 
         // Two-chain commit rule:
         // If there exists two adjacent certified blocks B and B' in the chain with consecutive
         // round numbers, i.e., B'.r = B.r + 1, the replica commits B and all its ancestors.
-        if let Some(parent_qc) = new_qc.block.parent_qc.as_ref() {
-            if new_qc.round == parent_qc.round + 1 {
-                self.commit_qc(parent_qc, CommitReason::TwoChainRule).await;
+        if let Some(parent_qc) = self.blocks[&qc.block_digest].parent_qc.as_ref() {
+            if qc.round == parent_qc.round + 1 {
+                if !self.qcs_to_commit.contains_key(&parent_qc.sub_block_id()) {
+                    self.qcs_to_commit.insert(
+                        parent_qc.sub_block_id(),
+                        (parent_qc.clone(), CommitReason::TwoChainRule),
+                    );
+                }
             }
+        }
+    }
+
+    async fn on_new_block(&mut self, block: &Block, ctx: &mut impl ContextFor<Self>) {
+        assert!(!self.blocks.contains_key(&block.digest));
+
+        self.blocks.insert(block.digest.clone(), block.clone());
+        let parent_qc = block.parent_qc.as_ref().unwrap();
+
+        if !self.known_qcs.contains(&parent_qc.sub_block_id()) {
+            self.on_new_qc(parent_qc.clone(), ctx).await;
+        }
+
+        if self.satisfied_qcs.contains(&parent_qc.sub_block_id()) {
+            self.on_new_satisfied_block(block.digest.clone());
+        } else {
+            self.pending_blocks[parent_qc.sub_block_id()].push(block.digest.clone());
+        }
+    }
+
+    async fn on_new_qc(&mut self, new_qc: QC, ctx: &mut impl ContextFor<Self>) {
+        if self.known_qcs.contains(&new_qc.sub_block_id()) {
+            return;
+        }
+
+        // Update `qc_high`
+        if new_qc > self.qc_high {
+            self.qc_high = new_qc.clone();
         }
 
         // If new_qc.round > r_commit_vote and new_qc.round > r_timeout,
@@ -421,6 +501,13 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             // advance to the next round after that.
             self.advance_r_ready(new_qc.round + 1, RoundEnterReason::FullPrefixQC, ctx)
                 .await;
+        }
+
+        self.known_qcs.insert(new_qc.sub_block_id());
+        if self.satisfied_blocks.contains(&new_qc.block_digest) {
+            self.on_new_satisfied_qc(new_qc);
+        } else {
+            self.pending_qcs[new_qc.block_digest.clone()].push(new_qc);
         }
     }
 
@@ -446,8 +533,10 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
     }
 
     async fn stored_prefix(&mut self) -> Prefix {
-        debug_assert!(self.blocks.contains_key(&self.r_cur));
-        let block = &self.blocks[&self.r_cur];
+        assert!(self.leader_proposal.contains_key(&self.r_cur));
+
+        let block_digest = &self.leader_proposal[&self.r_cur];
+        let block = &self.blocks[block_digest];
 
         if self.stored_prefix_cache.0 != self.r_cur {
             self.stored_prefix_cache = (self.r_cur, 0);
@@ -456,7 +545,10 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         while self.stored_prefix_cache.1 < block.n_batches()
             && self
                 .dissemination
-                .check_stored_all(&vec![block.batch(self.stored_prefix_cache.1).digest])
+                .check_stored_all(&vec![block
+                    .batch(self.stored_prefix_cache.1)
+                    .digest
+                    .clone()])
                 .await
         {
             self.stored_prefix_cache.1 += 1;
@@ -468,10 +560,11 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
     /// Returns the number of full-prefix votes in `round` if received the block for `round`
     /// and `0` otherwise.
     fn n_full_prefix_votes(&self, round: Round) -> usize {
-        if let Some(block) = self.blocks.get(&round) {
+        if let Some(block_hash) = self.leader_proposal.get(&round) {
+            let block = &self.blocks[block_hash];
             // TODO: This can be optimized by tracking the number
             //       of full-prefix votes as they arrive.
-            self.qc_votes[round]
+            self.qc_votes[&block.digest]
                 .values()
                 .filter(|&&vote| vote == block.n_batches())
                 .count()
@@ -480,17 +573,21 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         }
     }
 
-    async fn commit_qc(&mut self, qc: &QC, commit_reason: CommitReason) {
+    async fn commit_qc(&mut self, qc: QC, commit_reason: CommitReason) {
         let committed = self.commit_qc_impl(qc, commit_reason);
         self.dissemination.notify_commit(committed).await;
     }
 
-    fn commit_qc_impl(&mut self, qc: &QC, commit_reason: CommitReason) -> Vec<Payload> {
-        if *qc <= self.committed_qc {
+    fn commit_qc_impl(&mut self, qc: QC, commit_reason: CommitReason) -> Vec<Payload> {
+        if qc <= self.committed_qc {
             return vec![];
         }
 
-        let parent = qc.block.parent_qc.as_ref().unwrap();
+        let parent = self.blocks[&qc.block_digest]
+            .parent_qc
+            .as_ref()
+            .unwrap()
+            .clone();
 
         // Check for safety violations:
         if qc.round > self.committed_qc.round && parent.round < self.committed_qc.round {
@@ -501,10 +598,10 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         }
 
         // First commit the parent block.
-        let mut res =
-            self.commit_qc_impl(qc.block.parent_qc.as_ref().unwrap(), CommitReason::Indirect);
+        let mut res = self.commit_qc_impl(parent, CommitReason::Indirect);
 
         // Then, commit the transactions of this block.
+        let block = &self.blocks[&qc.block_digest];
 
         if qc.round == self.committed_qc.round {
             // Extending the prefix of an already committed block.
@@ -516,8 +613,8 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                 qc.round,
                 self.committed_qc.prefix,
                 qc.prefix,
-                qc.block.n_batches(),
-                if qc.prefix == qc.block.n_batches() {
+                block.n_batches(),
+                if qc.prefix == block.n_batches() {
                     " (full)"
                 } else {
                     ""
@@ -525,8 +622,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                 commit_reason,
             ));
 
-            let new_batches: Vec<BatchInfo> = qc
-                .block
+            let new_batches: Vec<BatchInfo> = block
                 .batches()
                 .iter()
                 .take(qc.prefix)
@@ -545,10 +641,9 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             let now = Instant::now();
             if self.config.leader(qc.round) == self.node_id {
                 for _ in 0..(qc.prefix - self.committed_qc.prefix) {
-                    self.metrics.batch_consensus_latency.push((
-                        now,
-                        self.to_deltas(now - self.block_create_time[&qc.round]),
-                    ));
+                    self.metrics
+                        .batch_consensus_latency
+                        .push((now, self.to_deltas(now - self.block_create_time[&qc.round])));
                 }
             }
         } else {
@@ -559,8 +654,8 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                 qc.round,
                 self.config.leader(qc.round),
                 qc.prefix,
-                qc.block.n_batches(),
-                if qc.prefix == qc.block.n_batches() {
+                block.n_batches(),
+                if qc.prefix == block.n_batches() {
                     " (full)"
                 } else {
                     ""
@@ -571,8 +666,8 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             res.push(Payload::new(
                 qc.round,
                 self.config.leader(qc.round),
-                qc.block.payload.acs().clone(),
-                qc.block
+                block.payload.acs().clone(),
+                block
                     .payload
                     .batches()
                     .iter()
@@ -584,21 +679,19 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             // Record the metrics
             let now = Instant::now();
             if self.config.leader(qc.round) == self.node_id {
-                self.metrics.block_consensus_latency.push((
-                    now,
-                    self.to_deltas(now - self.block_create_time[&qc.round]),
-                ));
-                for _ in 0..(qc.block.acs().len() + qc.prefix) {
-                    self.metrics.batch_consensus_latency.push((
-                        now,
-                        self.to_deltas(now - self.block_create_time[&qc.round]),
-                    ));
+                self.metrics
+                    .block_consensus_latency
+                    .push((now, self.to_deltas(now - self.block_create_time[&qc.round])));
+                for _ in 0..(block.acs().len() + qc.prefix) {
+                    self.metrics
+                        .batch_consensus_latency
+                        .push((now, self.to_deltas(now - self.block_create_time[&qc.round])));
                 }
             }
         }
 
         // Finally, update the committed QC variable.
-        self.committed_qc = qc.clone();
+        self.committed_qc = qc;
         res
     }
 
@@ -607,22 +700,47 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
 
         let mut cur = qc;
         while cur.round != self.committed_qc.round {
-            uncommitted.extend(cur.block.batches().iter().map(|batch| batch.digest));
-            uncommitted.extend(cur.block.acs().iter().map(|ac| ac.batch.digest));
-            cur = cur.block.parent_qc.as_ref().unwrap();
+            // assert!(self.blocks.contains_key(&cur.block_digest),
+            //     "Block {:#x} not found for qc {:?}",
+            //     cur.block_digest,
+            //     cur.sub_block_id(),
+            // );
+
+            if !self.blocks.contains_key(&cur.block_digest) {
+                warn!(
+                    "Deduplication failed for QC {:?}. Block from round {} is missing. \
+                    This may often happen in an asynchronous network or a \
+                    network where the triangle inequality doesn't hold.",
+                    cur.sub_block_id(),
+                    cur.round
+                );
+                return uncommitted;
+            }
+
+            let block = &self.blocks[&cur.block_digest];
+            uncommitted.extend(block.batches().iter().map(|batch| batch.digest.clone()));
+            uncommitted.extend(block.acs().iter().map(|ac| ac.batch.digest.clone()));
+            cur = block.parent_qc.as_ref().unwrap();
         }
 
         if cur.prefix > self.committed_qc.prefix {
+            let block = &self.blocks[&cur.block_digest];
             uncommitted.extend(
-                cur.block
+                block
                     .batches()
                     .iter()
                     .skip(self.committed_qc.prefix)
-                    .map(|batch| batch.digest),
+                    .map(|batch| batch.digest.clone()),
             );
         }
 
         uncommitted
+    }
+
+    fn n_batches_in_proposal(&self, round: Round) -> Prefix {
+        assert!(self.leader_proposal.contains_key(&round));
+
+        self.blocks[&self.leader_proposal[&round]].n_batches()
     }
 
     fn quorum(&self) -> usize {
@@ -667,6 +785,10 @@ where
 
         // Nodes start the protocol by entering round 1.
         upon start {
+            // self.blocks.insert(BlockHash::genesis(), Block::genesis());
+            self.satisfied_blocks.insert(BlockHash::genesis());
+            self.satisfied_qcs.insert(QC::genesis().sub_block_id());
+            self.known_qcs.insert(QC::genesis().sub_block_id());
             self.advance_r_ready(1, RoundEnterReason::FullPrefixQC, ctx).await;
         };
 
@@ -688,16 +810,21 @@ where
 
                 let parent_qc = self.qc_high.clone();
 
+                let payload = self.dissemination.prepare_block(
+                    round,
+                    self.uncommitted_batches(&parent_qc),
+                ).await;
+
+                let digest = BlockHash(hash((&round, &payload, &parent_qc, &self.enter_reason)));
                 let block = Block {
                     round,
-                    payload: self.dissemination.prepare_block(
-                        round,
-                        self.uncommitted_batches(&parent_qc),
-                    ).await,
+                    payload,
                     parent_qc: Some(parent_qc),
                     reason: self.enter_reason.clone(),
+                    digest: digest.clone(),
                 };
-                self.blocks.insert(round, block.clone());
+                // self.leader_proposal.insert(round, digest.clone());
+                // self.blocks.insert(digest, block.clone());
 
                 self.block_create_time.insert(round, Instant::now());
                 ctx.multicast(Message::Block(block)).await;
@@ -716,17 +843,18 @@ where
             if
                 block.is_valid()
                 && leader == self.config.leader(block.round)
-                && (leader == self.node_id || !self.blocks.contains_key(&block.round))
+                && !self.leader_proposal.contains_key(&block.round)
                 && block.round >= self.r_cur
                 && block.round > self.r_timeout
             {
-                self.blocks.insert(block.round, block.clone());
+                self.leader_proposal.insert(block.round, block.digest.clone());
+                self.on_new_block(&block, ctx).await;
 
                 let Block { round, payload, parent_qc, reason, .. } = block;
                 // a valid non-genesis block, by definition, always has a parent QC.
                 let parent_qc = parent_qc.unwrap();
 
-                self.on_new_qc(&parent_qc, ctx).await;
+                self.on_new_qc(parent_qc, ctx).await;
                 self.advance_r_ready(round, reason, ctx).await;
 
                 ctx.set_timer(self.config.extra_wait_before_qc_vote, TimerEvent::QcVote(round));
@@ -751,23 +879,32 @@ where
             if round == self.r_cur && self.last_qc_vote.round < round && round > self.r_timeout {
                 let stored_prefix = self.stored_prefix().await;
                 self.last_qc_vote = (self.r_cur, stored_prefix).into();
-                ctx.multicast(Message::QcVote(self.r_cur, stored_prefix)).await;
+                ctx.multicast(Message::QcVote(
+                    self.leader_proposal[&round].clone(),
+                    stored_prefix,
+                )).await;
             }
         };
 
         upon [
             self.r_cur > self.r_timeout
-            && self.blocks.contains_key(&self.r_cur)
+            && self.leader_proposal.contains_key(&self.r_cur)
             && {
                 let stored_prefix = self.stored_prefix().await;
 
-                stored_prefix == self.blocks[&self.r_cur].n_batches()
+                stored_prefix == self.n_batches_in_proposal(self.r_cur)
                 && self.last_qc_vote < (self.r_cur, stored_prefix).into()
             }
         ] {
-            let stored_prefix = self.stored_prefix().await;
-            self.last_qc_vote = (self.r_cur, stored_prefix).into();
-            ctx.multicast(Message::QcVote(self.r_cur, stored_prefix)).await;
+            let round = self.r_cur;
+            let digest = self.leader_proposal[&self.r_cur].clone();
+            let stored_prefix = self.n_batches_in_proposal(self.r_cur);
+
+            self.last_qc_vote = (round, stored_prefix).into();
+            ctx.multicast(Message::QcVote(
+                digest,
+                stored_prefix,
+            )).await;
         };
 
         // Upon receiving the block for round r_cur and a quorum of qc-votes for this block,
@@ -775,25 +912,25 @@ where
         // 1. When it will be the first QC observed by the node in this round;
         // 2. When it will be the first full-prefix QC observed by the node in this round.
 
-        upon receive [Message::QcVote(round, prefix)] from node [p] {
-            self.qc_votes[round].insert(p, prefix);
+        upon receive [Message::QcVote(digest, prefix)] from node [p] {
+            self.qc_votes[digest].insert(p, prefix);
         };
 
         upon [
-            self.blocks.contains_key(&self.r_cur)
-            && self.qc_votes[self.r_cur].len() >= self.quorum()
+            self.leader_proposal.contains_key(&self.r_cur)
+            && self.qc_votes[&self.leader_proposal[&self.r_cur]].len() >= self.quorum()
             && (
                 self.qc_high.round < self.r_cur
                 || (
-                    self.blocks.contains_key(&self.r_cur)
-                    && self.qc_high.sub_block_id() < (self.r_cur, self.blocks[&self.r_cur].n_batches()).into()
+                    self.qc_high.sub_block_id() < (self.r_cur, self.n_batches_in_proposal(self.r_cur)).into()
                     && self.n_full_prefix_votes(self.r_cur) >= self.config.storage_requirement
                 )
             )
         ] {
-            let block = &self.blocks[&self.r_cur];
+            let block_digest = self.leader_proposal[&self.r_cur].clone();
+            let block = &self.blocks[&block_digest];
 
-            let mut votes = self.qc_votes[block.round].values().copied().collect_vec();
+            let mut votes = self.qc_votes[&block_digest].values().copied().collect_vec();
             votes.sort();
             let certified_prefix = votes[votes.len() - self.config.storage_requirement];
 
@@ -801,10 +938,10 @@ where
                 round: block.round,
                 prefix: certified_prefix,
                 n_batches: block.n_batches(),
-                block: Arc::new(block.clone()),
+                block_digest,
             };
 
-            self.on_new_qc(&qc, ctx).await;
+            self.on_new_qc(qc, ctx).await;
         };
 
         // Upon receiving a commit vote for a round-r qc from a node for the
@@ -813,7 +950,9 @@ where
         // commit the smallest prefix, and execute advance_round.
         upon receive [Message::CommitVote(qc)] from node [p] {
             if !self.received_cc_vote[qc.round].contains(&p) {
-                self.on_new_qc(&qc, ctx).await;
+                if !self.known_qcs.contains(&qc.sub_block_id()) {
+                    self.on_new_qc(qc.clone(), ctx).await;
+                }
 
                 self.received_cc_vote[qc.round].insert(p);
                 self.cc_votes[qc.round].insert((qc.clone(), p));
@@ -823,13 +962,27 @@ where
                     // times for the same round.
                     if *committed_qc > self.committed_qc {
                         let committed_qc = committed_qc.clone();
-                        self.commit_qc(&committed_qc, CommitReason::CC).await;
+
+                        if !self.qcs_to_commit.contains_key(&committed_qc.sub_block_id()) {
+                            self.qcs_to_commit.insert(
+                                committed_qc.sub_block_id(),
+                                (committed_qc, CommitReason::CC),
+                            );
+                        }
+
                         let cc = CC::new(qc.round, &self.cc_votes[qc.round].k_max_set());
-                        assert_eq!(cc.lowest_qc_id(), self.committed_qc.sub_block_id());
                         self.advance_r_ready(qc.round + 1, RoundEnterReason::CC(cc), ctx).await;
                     }
                 }
             }
+        };
+
+        upon [
+            !self.qcs_to_commit.is_empty()
+            && self.satisfied_qcs.contains(self.qcs_to_commit.keys().next().unwrap())
+        ] {
+            let (_, (qc, commit_reason)) = self.qcs_to_commit.pop_first().unwrap();
+            self.commit_qc(qc, commit_reason).await;
         };
 
         // When the timeout expires, multicast a signed timeout message
@@ -846,7 +999,7 @@ where
         // form the TC and execute advance_round.
         upon receive [Message::Timeout(round, qc)] from node [p] {
             self.tc_votes[round].insert(p, qc.sub_block_id());
-            self.on_new_qc(&qc, ctx).await;
+            self.on_new_qc(qc, ctx).await;
 
             if self.tc_votes[round].len() == self.quorum() {
                 let tc = TC::new(round, &self.tc_votes[round]);
@@ -856,7 +1009,7 @@ where
 
         // Upon receiving an AdvanceRound message, execute on_new_qc and advance_round.
         upon receive [Message::AdvanceRound(round, qc, reason)] from [_any_node] {
-            self.on_new_qc(&qc, ctx).await;
+            self.on_new_qc(qc, ctx).await;
             self.advance_r_ready(round, reason, ctx).await;
         };
 
@@ -865,12 +1018,44 @@ where
         upon start {
             self.log_detail("Started".to_string());
             ctx.set_timer(self.config.end_of_run - Instant::now(), TimerEvent::EndOfRun);
+            ctx.set_timer(self.config.status_interval, TimerEvent::Status);
         };
 
         upon timer [TimerEvent::EndOfRun] {
             self.log_detail("Halting".to_string());
             ctx.notify(self.dissemination.module_id(), dissemination::Kill()).await;
             ctx.halt();
+        };
+
+        upon timer [TimerEvent::Status] {
+            if self.detailed_logging {
+                self.log_info(format!(
+                    "STATUS:\n\
+                    \tRound: {}\n\
+                    \tr_cur: {}\n\
+                    \tr_ready: {}\n\
+                    \tr_allowed: {}\n\
+                    \tr_timeout: {}\n\
+                    \tqc_high: {:?}\n\
+                    \tcommitted_qc: {:?}\n\
+                    \tqcs_to_commit.len(): {}\n\
+                    \tqcs_to_commit.first(): {:?}\n\
+                    \tqcs_to_commit.last(): {:?}\n\
+                    \tlast satisfied qc: {:?}\n",
+                    self.r_cur,
+                    self.r_cur,
+                    self.r_ready,
+                    self.r_allowed,
+                    self.r_timeout,
+                    self.qc_high.sub_block_id(),
+                    self.committed_qc.sub_block_id(),
+                    self.qcs_to_commit.len(),
+                    self.qcs_to_commit.first_key_value().map(|(k, _)| k),
+                    self.qcs_to_commit.last_key_value().map(|(k, _)| k),
+                    self.satisfied_qcs.last(),
+                ));
+            }
+            ctx.set_timer(self.config.status_interval, TimerEvent::Status);
         };
     }
 }

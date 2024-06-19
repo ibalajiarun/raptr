@@ -5,8 +5,48 @@ use crate::raikou::sim_types;
 
 // Common types:
 
-pub type BatchHash = HashValue;
+/// Type-safe wrapper for a batch hash value.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BatchHash(pub HashValue);
+
+impl std::fmt::LowerHex for BatchHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use std::fmt::LowerHex;
+        self.0.fmt(f)
+    }
+}
+
+impl std::fmt::UpperHex for BatchHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use std::fmt::UpperHex;
+        self.0.fmt(f)
+    }
+}
+
+/// Type-safe wrapper for a block hash value.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BlockHash(pub HashValue);
+
+impl BlockHash {
+    pub fn genesis() -> Self {
+        Self(0)
+    }
+}
+
+impl std::fmt::LowerHex for BlockHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::fmt::UpperHex for BlockHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 pub type Round = i64; // Round number.
+
 pub type Prefix = usize;
 
 // Aptos types and functions:

@@ -26,7 +26,7 @@ use tokio::time::Instant;
 pub struct Batch {
     author: NodeId,
     batch_id: BatchId,
-    digest: HashValue,
+    digest: BatchHash,
     txns: Option<Vec<Txn>>,
 }
 
@@ -35,7 +35,7 @@ impl Batch {
         BatchInfo {
             author: self.author,
             batch_id: self.batch_id,
-            digest: self.digest,
+            digest: self.digest.clone(),
         }
     }
 }
@@ -154,7 +154,7 @@ where
             .acs()
             .into_iter()
             .cloned()
-            .map(|ac| (ac.batch.digest, ac));
+            .map(|ac| (ac.batch.digest.clone(), ac));
         self.inner.lock().await.acs.extend(new_acs);
     }
 
@@ -171,9 +171,12 @@ where
 
         for payload in payloads {
             for batch in payload.all() {
-                assert!(!inner.committed_batches.contains(&batch.digest));
+                if inner.committed_batches.contains(&batch.digest) {
+                    // TODO: add a metric for batch duplication.
+                    continue;
+                }
 
-                inner.committed_batches.insert(batch.digest);
+                inner.committed_batches.insert(batch.digest.clone());
                 inner.new_acs.remove(&batch.digest);
                 inner.new_batches.remove(&batch.digest);
 
@@ -188,7 +191,9 @@ where
                 if payload.leader() == inner.node_id {
                     let block_prepare_time =
                         inner.penalty_tracker.block_prepare_time(payload.round());
-                    let batch_receive_time = inner.penalty_tracker.batch_receive_time(batch.digest);
+                    let batch_receive_time = inner
+                        .penalty_tracker
+                        .batch_receive_time(batch.digest.clone());
                     let penalty = inner
                         .penalty_tracker
                         .block_prepare_penalty(payload.round(), batch.author);
@@ -320,18 +325,18 @@ where
 
         upon timer [TimerEvent::NewBatch(sn)] {
             let txns = self.txns_iter.next();
-            let digest = hash((self.node_id, sn, &txns));
+            let digest = BatchHash(hash((self.node_id, sn, &txns)));
 
             // Multicast a new batch
             ctx.multicast(Message::Batch(Batch {
                 author: self.node_id,
                 batch_id: sn,
-                digest,
+                digest: digest.clone(),
                 txns,
             })).await;
 
             self.batch_created_time[sn] = Instant::now();
-            self.my_batches.insert(sn, digest);
+            self.my_batches.insert(sn, digest.clone());
 
             // Reset the timer.
             ctx.set_timer(self.config.batch_interval, TimerEvent::NewBatch(sn + 1));
@@ -343,13 +348,13 @@ where
         // and execute try_vote.
         upon receive [Message::Batch(batch)] from node [p] {
             // TODO: add verification of the digest?
-            let digest = batch.digest;
+            let digest = batch.digest.clone();
             let batch_id = batch.batch_id;
 
             if !self.batches.contains_key(&digest) {
-                self.penalty_tracker.on_new_batch(digest);
+                self.penalty_tracker.on_new_batch(digest.clone());
 
-                self.batches.insert(digest, batch);
+                self.batches.insert(digest.clone(), batch);
 
                 ctx.unicast(Message::BatchStored(batch_id), p).await;
 
@@ -366,9 +371,8 @@ where
             self.batch_stored_votes[batch_id].set(p, true);
 
             if self.batch_stored_votes[batch_id].count_ones() == self.config.ac_quorum {
-                let digest = self.my_batches[&batch_id];
                 ctx.multicast(Message::AvailabilityCert(AC {
-                    batch: self.batches[&digest].get_info(),
+                    batch: self.batches[&self.my_batches[&batch_id]].get_info(),
                     signers: self.batch_stored_votes[batch_id].clone(),
                 })).await;
             }
@@ -378,11 +382,11 @@ where
             // Track the list of known uncommitted ACs
             // and the list of known uncommitted uncertified batches.
             if !self.committed_batches.contains(&ac.batch.digest) {
-                self.new_acs.insert(ac.batch.digest);
+                self.new_acs.insert(ac.batch.digest.clone());
                 self.new_batches.remove(&ac.batch.digest);
             }
 
-            self.acs.insert(ac.batch.digest, ac.clone());
+            self.acs.insert(ac.batch.digest.clone(), ac.clone());
         };
 
         // Penalty tracking

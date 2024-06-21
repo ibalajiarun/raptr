@@ -727,6 +727,7 @@ async fn test_raikou(
                     batch_interval: Duration::from_secs_f64(delta * 0.1),
                     enable_penalty_tracker: true,
                     penalty_tracker_report_delay: Duration::from_secs_f64(delta * 5.),
+                    n_sub_blocks: 4,
                 },
                 txns_iter,
                 start_time,

@@ -8,6 +8,8 @@ use std::{
     hash::{Hash, Hasher},
     sync::Arc,
 };
+use std::ops::Range;
+use crate::raikou::types::Prefix;
 
 // Unsafe crypto, for simulation and testing purposes only.
 pub type HashValue = u64;
@@ -54,20 +56,50 @@ pub struct Payload {
     round: Round,
     leader: NodeId,
     data: Arc<PayloadData>,
+    include_acs: bool,
+    sub_blocks: Range<Prefix>,
 }
 
 #[derive(Hash)]
 struct PayloadData {
     acs: Vec<AC>,
-    batches: Vec<BatchInfo>,
+    batches: Vec<Vec<BatchInfo>>,
 }
 
 impl Payload {
-    pub fn new(round: Round, leader: NodeId, acs: Vec<AC>, batches: Vec<BatchInfo>) -> Self {
+    pub fn new(round: Round, leader: NodeId, acs: Vec<AC>, sub_blocks: Vec<Vec<BatchInfo>>) -> Self {
+        let n_sub_blocks = sub_blocks.len();
+
         Self {
             round,
             leader,
-            data: Arc::new(PayloadData { acs, batches }),
+            data: Arc::new(PayloadData { acs, batches: sub_blocks }),
+            include_acs: true,
+            sub_blocks: 0..n_sub_blocks,
+        }
+    }
+
+    pub fn with_prefix(&self, prefix: Prefix) -> Self {
+        assert!(prefix <= self.data.batches.len());
+
+        Self {
+            round: self.round,
+            leader: self.leader,
+            data: self.data.clone(),
+            include_acs: true,
+            sub_blocks: 0..prefix,
+        }
+    }
+
+    pub fn take_sub_blocks(&self, range: Range<Prefix>) -> Self {
+        assert!(range.end <= self.data.batches.len());
+
+        Self {
+            round: self.round,
+            leader: self.leader,
+            data: self.data.clone(),
+            include_acs: false,
+            sub_blocks: range,
         }
     }
 
@@ -87,8 +119,8 @@ impl Payload {
         &self.data.acs
     }
 
-    pub fn batches(&self) -> &Vec<BatchInfo> {
-        &self.data.batches
+    pub fn sub_blocks(&self) -> &[Vec<BatchInfo>] {
+        &self.data.batches[self.sub_blocks.clone()]
     }
 
     pub fn all(&self) -> impl Iterator<Item = &BatchInfo> {
@@ -96,6 +128,6 @@ impl Payload {
             .acs
             .iter()
             .map(|ac| &ac.batch)
-            .chain(self.data.batches.iter())
+            .chain(self.sub_blocks().iter().flatten())
     }
 }

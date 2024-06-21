@@ -52,7 +52,7 @@ pub enum Message {
 #[derive(Clone)]
 pub enum TimerEvent {
     NewBatch(BatchId),
-    PenaltyTrackerReport(NodeId, Round, Instant, Vec<BatchInfo>),
+    PenaltyTrackerReport(NodeId, Round, Instant, Payload),
 }
 
 #[derive(Clone)]
@@ -65,6 +65,7 @@ pub struct Config {
     pub batch_interval: Duration,
     pub enable_penalty_tracker: bool,
     pub penalty_tracker_report_delay: Duration,
+    pub n_sub_blocks: usize,
 }
 
 pub struct Metrics {
@@ -158,11 +159,11 @@ where
         self.inner.lock().await.acs.extend(new_acs);
     }
 
-    async fn check_stored_all(&self, batches: &Vec<BatchHash>) -> bool {
+    async fn check_stored_all(&self, batches: &[BatchInfo]) -> bool {
         let inner = self.inner.lock().await;
         batches
             .into_iter()
-            .all(|batch| inner.batches.contains_key(&batch))
+            .all(|batch| inner.batches.contains_key(&batch.digest))
     }
 
     async fn notify_commit(&self, payloads: Vec<Payload>) {
@@ -265,6 +266,7 @@ where
             n_nodes: config.n_nodes,
             f: config.f,
             enable: config.enable_penalty_tracker,
+            n_sub_blocks: config.n_sub_blocks,
         };
 
         Self {
@@ -396,14 +398,19 @@ where
                 if self.config.enable_penalty_tracker {
                     ctx.set_timer(
                         self.config.penalty_tracker_report_delay,
-                        TimerEvent::PenaltyTrackerReport(leader, round, Instant::now(), payload.batches().clone())
+                        TimerEvent::PenaltyTrackerReport(
+                            leader, 
+                            round, 
+                            Instant::now(), 
+                            payload,
+                        )
                     );
                 }
             };
         };
 
-        upon timer event [TimerEvent::PenaltyTrackerReport(leader, round, block_receive_time, batches)] {
-            let reports = self.penalty_tracker.prepare_reports(&batches, block_receive_time);
+        upon timer event [TimerEvent::PenaltyTrackerReport(leader, round, block_receive_time, payload)] {
+            let reports = self.penalty_tracker.prepare_reports(payload, block_receive_time);
             ctx.unicast(Message::PenaltyTrackerReport(round, reports), leader).await;
         };
 

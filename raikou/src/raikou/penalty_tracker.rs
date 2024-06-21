@@ -47,6 +47,7 @@ pub struct Config {
     pub n_nodes: usize,
     pub f: usize,
     pub enable: bool,
+    pub n_sub_blocks: usize,
 }
 
 pub struct PenaltyTracker {
@@ -110,7 +111,7 @@ impl PenaltyTracker {
 
     pub fn prepare_reports(
         &self,
-        batches: &Vec<BatchInfo>,
+        payload: Payload,
         block_receive_time: Instant,
     ) -> PenaltyTrackerReports {
         assert!(self.config.enable);
@@ -122,7 +123,7 @@ impl PenaltyTracker {
         let mut missing = vec![None; self.config.n_nodes];
         let mut has_batches = vec![false; self.config.n_nodes];
 
-        for (batch_num, batch_info) in batches.iter().enumerate() {
+        for (batch_num, batch_info) in payload.sub_blocks().iter().flatten().enumerate() {
             has_batches[batch_info.author] = true;
 
             if let Some(batch_receive_time) =
@@ -376,13 +377,34 @@ impl PenaltyTracker {
         self.batch_receive_time.insert(digest, Instant::now());
     }
 
-    pub fn prepare_new_block(&mut self, round: Round, batches: Vec<BatchInfo>) -> Vec<BatchInfo> {
+    fn split_to_sub_blocks(&self, batches: Vec<BatchInfo>) -> Vec<Vec<BatchInfo>> {
+        if batches.is_empty() {
+            return vec![];
+        }
+
+        let n_batches = batches.len();
+        let sub_block_size = (n_batches + self.config.n_sub_blocks - 1) / self.config.n_sub_blocks;
+        assert!(sub_block_size * self.config.n_sub_blocks >= n_batches);
+        assert!((sub_block_size - 1) * self.config.n_sub_blocks < n_batches);
+
+        batches
+            .into_iter()
+            .chunks(sub_block_size)
+            .into_iter()
+            .map(|chunk| chunk.collect())
+            .collect()
+    }
+
+    pub fn prepare_new_block(&mut self, round: Round, batches: Vec<BatchInfo>) -> Vec<Vec<BatchInfo>> {
         if !self.config.enable {
             self.block_prepare_time.insert(round, Instant::now());
-            return batches
+
+            let batches = batches
                 .into_iter()
                 .sorted_by_key(|batch_info| self.batch_receive_time[&batch_info.digest])
-                .collect();
+                .collect_vec();
+
+            return self.split_to_sub_blocks(batches);
         }
 
         // `compute_new_penalties` must be called before any parts of the state are updated.
@@ -423,7 +445,7 @@ impl PenaltyTracker {
             .collect();
         self.reports.clear();
 
-        batches_to_propose
+        self.split_to_sub_blocks(batches_to_propose)
     }
 
     fn log_info(&self, msg: String) {

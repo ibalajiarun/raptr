@@ -297,7 +297,7 @@ macro_rules! protocol {
                     was_hit = true;
                     n_hits += 1;
                     if n_hits % 100_000 == 0 {
-                        log::warn!("Condition handler looped {} times. \
+                        aptos_logger::warn!("Condition handler looped {} times. \
                         Possible infinite loop.", n_hits);
                     }
                 };

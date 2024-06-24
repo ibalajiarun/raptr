@@ -3,7 +3,6 @@ use crate::{
     raikou::types::{Round, *},
 };
 use itertools::Itertools;
-use log::{info, warn};
 use rand::{seq::SliceRandom, thread_rng};
 use std::{
     cmp::{max, min},
@@ -198,7 +197,7 @@ impl PenaltyTracker {
             match report {
                 PenaltyTrackerReportEntry::Delay(batch_num, delay) => {
                     if self.proposed_batches[batch_num].author != node_id {
-                        warn!(
+                        aptos_logger::warn!(
                             "Received invalid penalty tracker report from node {}",
                             reporter
                         );
@@ -214,7 +213,7 @@ impl PenaltyTracker {
                 },
                 PenaltyTrackerReportEntry::Missing(batch_num, delay) => {
                     if self.proposed_batches[batch_num].author != node_id {
-                        warn!(
+                        aptos_logger::warn!(
                             "Received invalid penalty tracker report from node {}",
                             reporter
                         );
@@ -231,7 +230,7 @@ impl PenaltyTracker {
                 },
                 PenaltyTrackerReportEntry::None => {
                     if self.batch_authors.contains(&node_id) {
-                        warn!(
+                        aptos_logger::warn!(
                             "Received invalid penalty tracker report from node {}",
                             reporter
                         );
@@ -336,7 +335,7 @@ impl PenaltyTracker {
             // If there are not enough reports, the network must be in an asynchronous period.
             // Do not change the penalties.
             // TODO: What's the best strategy fo this case?
-            warn!(
+            aptos_logger::warn!(
                 "Not enough reports to compute new penalties after round {} ({} / {}). \
                    Either the network is asynchronous or the penalty tracker is misconfigured.",
                 self.last_round_this_node_was_leader,
@@ -468,7 +467,7 @@ impl PenaltyTracker {
     }
 
     fn log_info(&self, msg: String) {
-        info!("Node {}: Penalty tracker: {}", self.node_id, msg);
+        aptos_logger::info!("Node {}: Penalty tracker: {}", self.node_id, msg);
     }
 
     fn log_detail(&self, msg: String) {

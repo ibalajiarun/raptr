@@ -14,7 +14,6 @@ use crate::{
 use bitvec::vec::BitVec;
 use defaultmap::DefaultBTreeMap;
 use itertools::Itertools;
-use log::warn;
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::{max, max_by, max_by_key, min, Ordering},
@@ -682,7 +681,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             // );
 
             if !self.blocks.contains_key(&cur.block_digest) {
-                warn!(
+                aptos_logger::warn!(
                     "Deduplication failed for QC {:?}. Block from round {} is missing. \
                     This may often happen in an asynchronous network or a \
                     network where the triangle inequality doesn't hold.",
@@ -1009,7 +1008,7 @@ where
             if let Some(block) = self.blocks.get(&digest) {
                 ctx.unicast(Message::FetchResp(block.clone()), p).await;
             } else {
-                warn!("Received FetchReq for unknown block {:#x}", digest);
+                aptos_logger::warn!("Received FetchReq for unknown block {:#x}", digest);
             }
         };
 

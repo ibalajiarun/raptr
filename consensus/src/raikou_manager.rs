@@ -4,7 +4,6 @@ use crate::{
     network_interface::{ConsensusMsg, ConsensusNetworkClient},
     payload_client::PayloadClient,
     payload_manager::{self, PayloadManager},
-    transaction_filter::TransactionFilter,
 };
 use ::raikou::{leader_schedule::round_robin, raikou::dissemination::fake::FakeDisseminationLayer};
 use aptos_config::config::{ConsensusConfig, QuorumStoreConfig};
@@ -13,7 +12,6 @@ use aptos_consensus_types::{
     proof_of_store::{BatchInfo, ProofOfStore},
 };
 use aptos_types::epoch_state::EpochState;
-use aptos_validator_transaction_pool::TransactionFilter;
 use chrono::Local;
 use futures::StreamExt;
 use futures_channel::oneshot;
@@ -38,6 +36,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::time::Instant;
+use raikou::raikou::types::hash;
 
 const JOLTEON_TIMEOUT: u32 = 3; // in Deltas
 
@@ -119,6 +118,7 @@ impl RaikouManager {
             extra_wait_before_commit_vote: Duration::from_secs_f64(delta * 0.1),
             enable_round_entry_permission: false,
             enable_commit_votes: true,
+            status_interval: Duration::from_secs_f64(delta * 10.),
         };
 
         let mut module_network = ModuleNetwork::new();
@@ -131,11 +131,34 @@ impl RaikouManager {
         let block_consensus_latency_sender = Some(block_consensus_latency.new_sender());
         let batch_consensus_latency_sender = Some(batch_consensus_latency.new_sender());
 
-        let dissemination = RaikouQSDisseminationLayer {
-            payload_client,
-            config,
-            payload_manager,
-        };
+        // let dissemination = RaikouQSDisseminationLayer {
+        //     payload_client,
+        //     config,
+        //     payload_manager,
+        // };
+
+        let dissemination = FakeDisseminationLayer::new(
+            node_id,
+            dissemination::fake::Config {
+                module_id: diss_module_network.module_id(),
+                n_nodes,
+                f,
+                ac_quorum: 2 * f + 1,
+                delta: Duration::from_secs_f64(delta),
+                batch_interval: Duration::from_secs_f64(delta * 0.1),
+                enable_penalty_tracker: true,
+                penalty_tracker_report_delay: Duration::from_secs_f64(delta * 5.),
+                n_sub_blocks: 4,
+            },
+            txns_iter,
+            start_time,
+            true,
+            dissemination::fake::Metrics {
+                batch_commit_time: batch_commit_time_sender,
+                queueing_time: queueing_time_sender,
+                penalty_wait_time: penalty_wait_time_sender,
+            },
+        );
 
         let node = Arc::new(tokio::sync::Mutex::new(RaikouNode::new(
             node_id,
@@ -216,22 +239,26 @@ impl NetworkService for RaikouNetworkService {
         data: Self::Message,
     ) -> impl futures::Future<Output = ()> + Send {
         let remote_peer_id = *self.index_to_address.get(&target).unwrap();
-        let msg: ConsensusMsg = ConsensusMsg::RaikouMessage(RaikouNetworkMessage {
+
+        let raikou_msg = RaikouNetworkMessage {
             epoch: self.epoch,
             data: bcs::to_bytes(&data).unwrap(),
-        });
+        };
+        // assert!(raikou_msg.data.len() > 0);
+        // eprintln!("FOOBAR1: {:#x}", hash(&raikou_msg.data));
+
+        let msg: ConsensusMsg = ConsensusMsg::RaikouMessage(raikou_msg);
         self.network_sender.send(msg, vec![remote_peer_id])
     }
 
-    fn recv(
-        &mut self,
-    ) -> impl futures::Future<Output = (raikou::framework::NodeId, Self::Message)> + Send {
-        async {
-            let (sender, msg) = self.messages_rx.select_next_some().await;
-            let sender = *self.address_to_index.get(&sender).unwrap();
-            let msg = bcs::from_bytes(&msg.data).unwrap();
-            return (sender, msg);
-        }
+    async fn recv(&mut self) -> (raikou::framework::NodeId, Self::Message) {
+        let (sender, msg) = self.messages_rx.select_next_some().await;
+        let sender = *self.address_to_index.get(&sender).unwrap();
+        // assert!(msg.data.len() > 0);
+        // eprintln!("FOOBAR2: {:#x}", hash(&msg.data));
+
+        let msg = bcs::from_bytes(&msg.data).unwrap();
+        (sender, msg)
     }
 
     fn n_nodes(&self) -> usize {
@@ -283,10 +310,14 @@ impl NetworkService for RaikouDissNetworkService {
         data: Self::Message,
     ) -> impl futures::Future<Output = ()> + Send {
         let remote_peer_id = *self.index_to_address.get(&target).unwrap();
-        let msg: ConsensusMsg = ConsensusMsg::RaikouMessage(RaikouNetworkMessage {
+        let raikou_msg = RaikouNetworkMessage {
             epoch: self.epoch,
             data: bcs::to_bytes(&data).unwrap(),
-        });
+        };
+        // assert!(raikou_msg.data.len() > 0);
+        // eprintln!("BARBAR1: {:#x}", hash(&raikou_msg.data));
+
+        let msg: ConsensusMsg = ConsensusMsg::RaikouDissMessage(raikou_msg);
         self.network_sender.send(msg, vec![remote_peer_id])
     }
 
@@ -296,6 +327,7 @@ impl NetworkService for RaikouDissNetworkService {
         async {
             let (sender, msg) = self.messages_rx.select_next_some().await;
             let sender = *self.address_to_index.get(&sender).unwrap();
+            // eprintln!("BARBAR2: {:#x}", hash(&msg.data));
             let msg = bcs::from_bytes(&msg.data).unwrap();
             return (sender, msg);
         }
@@ -306,73 +338,73 @@ impl NetworkService for RaikouDissNetworkService {
     }
 }
 
-struct RaikouQSDisseminationLayer {
-    payload_client: Arc<dyn PayloadClient>,
-    config: ConsensusConfig,
-    payload_manager: Arc<PayloadManager>,
-}
-
-impl RaikouQSDisseminationLayer {}
-
-impl DisseminationLayer for RaikouQSDisseminationLayer {
-    fn module_id(&self) -> raikou::framework::module_network::ModuleId {
-        todo!()
-    }
-
-    fn prepare_block(
-        &self,
-        round: raikou::raikou::types::Round,
-        exclude: std::collections::HashSet<raikou::raikou::types::BatchHash>,
-    ) -> impl futures::Future<Output = raikou::raikou::types::Payload> + Send {
-        // TODO: Fix the payload filter
-        let payload_filter = PayloadFilter::Empty;
-        self.payload_client.pull_payload(
-            Duration::from_millis(50),
-            self.config.max_sending_block_txns,
-            self.config.max_sending_block_bytes,
-            0,
-            0,
-            TransactionFilter::empty(),
-            payload_filter,
-            Box::pin(async {}),
-            false,
-            0,
-            0.0,
-        )
-    }
-
-    fn prefetch_payload_data(
-        &self,
-        payload: raikou::raikou::types::Payload,
-    ) -> impl futures::Future<Output = ()> + Send {
-        async {
-            self.payload_manager.prefetch_payload_data(
-                &payload,
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs(),
-            );
-        }
-    }
-
-    fn check_stored_all(
-        &self,
-        batch: &Vec<raikou::raikou::types::BatchHash>,
-    ) -> impl futures::Future<Output = bool> + Send {
-        async { true }
-    }
-
-    fn notify_commit(
-        &self,
-        payloads: Vec<raikou::raikou::types::Payload>,
-    ) -> impl futures::Future<Output = ()> + Send {
-        self.payload_manager.notify_commit(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-            payloads,
-        )
-    }
-}
+// struct RaikouQSDisseminationLayer {
+//     payload_client: Arc<dyn PayloadClient>,
+//     config: ConsensusConfig,
+//     payload_manager: Arc<PayloadManager>,
+// }
+//
+// impl RaikouQSDisseminationLayer {}
+//
+// impl DisseminationLayer for RaikouQSDisseminationLayer {
+//     fn module_id(&self) -> raikou::framework::module_network::ModuleId {
+//         todo!()
+//     }
+//
+//     fn prepare_block(
+//         &self,
+//         round: raikou::raikou::types::Round,
+//         exclude: std::collections::HashSet<raikou::raikou::types::BatchHash>,
+//     ) -> impl futures::Future<Output = raikou::raikou::types::Payload> + Send {
+//         // TODO: Fix the payload filter
+//         let payload_filter = PayloadFilter::Empty;
+//         self.payload_client.pull_payload(
+//             Duration::from_millis(50),
+//             self.config.max_sending_block_txns,
+//             self.config.max_sending_block_bytes,
+//             0,
+//             0,
+//             TransactionFilter::empty(),
+//             payload_filter,
+//             Box::pin(async {}),
+//             false,
+//             0,
+//             0.0,
+//         )
+//     }
+//
+//     fn prefetch_payload_data(
+//         &self,
+//         payload: raikou::raikou::types::Payload,
+//     ) -> impl futures::Future<Output = ()> + Send {
+//         async {
+//             self.payload_manager.prefetch_payload_data(
+//                 &payload,
+//                 SystemTime::now()
+//                     .duration_since(UNIX_EPOCH)
+//                     .unwrap()
+//                     .as_secs(),
+//             );
+//         }
+//     }
+//
+//     fn check_stored_all(
+//         &self,
+//         batch: &Vec<raikou::raikou::types::BatchHash>,
+//     ) -> impl futures::Future<Output = bool> + Send {
+//         async { true }
+//     }
+//
+//     fn notify_commit(
+//         &self,
+//         payloads: Vec<raikou::raikou::types::Payload>,
+//     ) -> impl futures::Future<Output = ()> + Send {
+//         self.payload_manager.notify_commit(
+//             SystemTime::now()
+//                 .duration_since(UNIX_EPOCH)
+//                 .unwrap()
+//                 .as_secs(),
+//             payloads,
+//         )
+//     }
+// }

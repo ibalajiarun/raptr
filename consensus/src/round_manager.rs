@@ -90,6 +90,7 @@ pub enum UnverifiedEvent {
     SignedBatchInfo(Box<SignedBatchInfoMsg>),
     ProofOfStoreMsg(Box<ProofOfStoreMsg>),
     RaikouMessage(RaikouNetworkMessage),
+    RaikouDissMessage(RaikouNetworkMessage),
 }
 
 pub const BACK_PRESSURE_POLLING_INTERVAL_MS: u64 = 10;
@@ -170,6 +171,7 @@ impl UnverifiedEvent {
                 VerifiedEvent::ProofOfStoreMsg(p)
             },
             UnverifiedEvent::RaikouMessage(m) => VerifiedEvent::RaikouMessage(m),
+            UnverifiedEvent::RaikouDissMessage(m) => VerifiedEvent::RaikouDissMessage(m),
         })
     }
 
@@ -183,6 +185,7 @@ impl UnverifiedEvent {
             UnverifiedEvent::SignedBatchInfo(sd) => sd.epoch(),
             UnverifiedEvent::ProofOfStoreMsg(p) => p.epoch(),
             UnverifiedEvent::RaikouMessage(r) => r.epoch(),
+            UnverifiedEvent::RaikouDissMessage(r) => r.epoch(),
         }
     }
 }
@@ -197,6 +200,8 @@ impl From<ConsensusMsg> for UnverifiedEvent {
             ConsensusMsg::BatchMsg(m) => UnverifiedEvent::BatchMsg(m),
             ConsensusMsg::SignedBatchInfo(m) => UnverifiedEvent::SignedBatchInfo(m),
             ConsensusMsg::ProofOfStoreMsg(m) => UnverifiedEvent::ProofOfStoreMsg(m),
+            ConsensusMsg::RaikouMessage(m) => UnverifiedEvent::RaikouMessage(m),
+            ConsensusMsg::RaikouDissMessage(m) => UnverifiedEvent::RaikouDissMessage(m),
             _ => unreachable!("Unexpected conversion"),
         }
     }
@@ -218,6 +223,7 @@ pub enum VerifiedEvent {
     // Shutdown the NetworkListener
     Shutdown(TokioOneshot::Sender<()>),
     RaikouMessage(RaikouNetworkMessage),
+    RaikouDissMessage(RaikouNetworkMessage),
 }
 
 #[cfg(test)]

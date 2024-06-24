@@ -19,6 +19,7 @@ use once_cell::sync::OnceCell;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, fmt, fmt::Write, sync::Arc};
+use std::ops::Range;
 use tokio::sync::oneshot;
 
 /// The round of a block is a consensus-internal counter, which starts with 0 and increases

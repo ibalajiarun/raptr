@@ -220,7 +220,7 @@ impl<S: LeaderSchedule> MultiChainRaikou<S> {
     }
 
     fn log_info(&self, msg: String) {
-        log::info!(
+        aptos_logger::info!(
             "Node {} at {:.2}Δ: {}",
             self.node_id,
             self.time_in_delta(),

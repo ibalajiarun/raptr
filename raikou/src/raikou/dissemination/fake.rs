@@ -295,7 +295,7 @@ where
     }
 
     fn log_info(&self, msg: String) {
-        log::info!("Node {}: Dissemination Layer: {}", self.node_id, msg,);
+        aptos_logger::info!("Node {}: Dissemination Layer: {}", self.node_id, msg,);
     }
 
     fn log_detail(&self, msg: String) {

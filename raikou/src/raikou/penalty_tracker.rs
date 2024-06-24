@@ -13,13 +13,31 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 
+trait Micros {
+    fn as_micros_i32(&self) -> i32;
+
+    fn from_micros_i32(micros: i32) -> Self;
+}
+
+impl Micros for Duration {
+    fn as_micros_i32(&self) -> i32 {
+        self.as_micros() as i32
+    }
+
+    fn from_micros_i32(micros: i32) -> Self {
+        assert!(micros >= 0);
+        Duration::from_micros(micros as u64)
+    }
+}
+
+
 #[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
 /// Penalty tracker report for the optimistically proposed batches from a single node for
 /// a single node. See the description of `PenaltyTrackerReport` for details.
 pub enum PenaltyTrackerReportEntry {
-    Delay(usize, f32),
+    Delay(usize, i32),
 
-    Missing(usize, f32),
+    Missing(usize, i32),
 
     None,
 }
@@ -64,7 +82,7 @@ pub struct PenaltyTracker {
     block_issue_time: Instant,
     proposed_batches: Vec<BatchInfo>,
     batch_authors: BTreeSet<NodeId>,
-    reports: BTreeMap<NodeId, BTreeMap<NodeId, f32>>,
+    reports: BTreeMap<NodeId, BTreeMap<NodeId, i32>>,
 
     last_selected_quorum: Vec<NodeId>,
 
@@ -120,7 +138,7 @@ impl PenaltyTracker {
         let now = Instant::now();
         assert!(now >= block_receive_time);
 
-        let mut delays = vec![(0, f32::MIN); self.config.n_nodes];
+        let mut delays = vec![(0, i32::MIN); self.config.n_nodes];
         let mut missing = vec![None; self.config.n_nodes];
         let mut has_batches = vec![false; self.config.n_nodes];
 
@@ -131,9 +149,9 @@ impl PenaltyTracker {
                 self.batch_receive_time.get(&batch_info.digest).copied()
             {
                 let batch_delay = if batch_receive_time > block_receive_time {
-                    (batch_receive_time - block_receive_time).as_secs_f32()
+                    (batch_receive_time - block_receive_time).as_micros_i32()
                 } else {
-                    -(block_receive_time - batch_receive_time).as_secs_f32()
+                    -(block_receive_time - batch_receive_time).as_micros_i32()
                 };
 
                 if batch_delay > delays[batch_info.author].1 {
@@ -151,11 +169,11 @@ impl PenaltyTracker {
                 } else if let Some(batch_num) = missing[node_id] {
                     PenaltyTrackerReportEntry::Missing(
                         batch_num,
-                        (now - block_receive_time).as_secs_f32(),
+                        (now - block_receive_time).as_micros_i32(),
                     )
                 } else {
                     let (batch_num, delay) = delays[node_id];
-                    assert_ne!(delay, f32::MIN);
+                    assert_ne!(delay, i32::MIN);
                     PenaltyTrackerReportEntry::Delay(batch_num, delay)
                 }
             })
@@ -191,7 +209,7 @@ impl PenaltyTracker {
                     assert!(propose_delay >= self.penalties[node_id]);
 
                     let extra_delay = propose_delay - self.penalties[node_id];
-                    let adjusted_delay = delay + extra_delay.as_secs_f32();
+                    let adjusted_delay = delay + extra_delay.as_micros_i32();
                     processed_reports.insert(node_id, adjusted_delay);
                 },
                 PenaltyTrackerReportEntry::Missing(batch_num, delay) => {
@@ -208,7 +226,7 @@ impl PenaltyTracker {
                     assert!(propose_delay >= self.penalties[node_id]);
 
                     let extra_delay = propose_delay - self.penalties[node_id];
-                    let adjusted_delay = delay + extra_delay.as_secs_f32();
+                    let adjusted_delay = delay + extra_delay.as_micros_i32();
                     processed_reports.insert(node_id, adjusted_delay);
                 },
                 PenaltyTrackerReportEntry::None => {
@@ -246,17 +264,17 @@ impl PenaltyTracker {
                     .max_by(|x, y| x.partial_cmp(y).unwrap())
                     .unwrap();
 
-                if max_reported_delay_in_a_quorum > 0. {
+                if max_reported_delay_in_a_quorum > 0 {
                     // Increase penalty.
                     updated_penalties[node_id] = self.penalties[node_id]
-                        + Duration::from_secs_f32(max_reported_delay_in_a_quorum);
+                        + Duration::from_micros_i32(max_reported_delay_in_a_quorum);
                 } else {
                     // Decrease penalty.
                     // Always at most halve the penalty when decreasing it.
                     updated_penalties[node_id] = self.penalties[node_id]
                         - min(
                             self.penalties[node_id] / 2,
-                            Duration::from_secs_f32(-max_reported_delay_in_a_quorum),
+                            Duration::from_micros_i32(-max_reported_delay_in_a_quorum),
                         );
                 }
             } else {

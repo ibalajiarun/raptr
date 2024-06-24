@@ -82,6 +82,7 @@ pub enum ConsensusMsg {
     /// on a block.
     OrderVoteMsg(Box<OrderVoteMsg>),
     RaikouMessage(RaikouNetworkMessage),
+    RaikouDissMessage(RaikouNetworkMessage),
 }
 
 /// Network type for consensus
@@ -110,6 +111,7 @@ impl ConsensusMsg {
             ConsensusMsg::RandGenMessage(_) => "RandGenMessage",
             ConsensusMsg::BatchResponseV2(_) => "BatchResponseV2",
             ConsensusMsg::RaikouMessage(_) => "RaikouMessage",
+            ConsensusMsg::RaikouDissMessage(_) => "RaikouDissMessage",
         }
     }
 }

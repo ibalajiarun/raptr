@@ -35,7 +35,7 @@ pub fn hash(x: impl Hash) -> HashValue {
     hasher.finish()
 }
 
-impl Debug for crate::raikou::types::BatchInfo {
+impl Debug for BatchInfo {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,

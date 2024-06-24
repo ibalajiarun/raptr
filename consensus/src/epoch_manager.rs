@@ -1310,6 +1310,9 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             raikou_message_rx,
             diss_rx,
             raikou_shutdown_rx,
+            payload_client,
+            payload_manager,
+            self.config.clone(),
         ));
     }
 
@@ -1489,6 +1492,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             let epoch_state = self.epoch_state.clone().unwrap();
             let proof_cache = self.proof_cache.clone();
             let quorum_store_enabled = self.quorum_store_enabled;
+            let raikou_tx = self.raikou_message_tx.clone();
             let quorum_store_msg_tx = self.quorum_store_msg_tx.clone();
             let buffered_proposal_tx = self.buffered_proposal_tx.clone();
             let round_manager_tx = self.round_manager_tx.clone();
@@ -1514,6 +1518,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
                     ) {
                         Ok(verified_event) => {
                             Self::forward_event(
+                                raikou_tx,
                                 quorum_store_msg_tx,
                                 round_manager_tx,
                                 buffered_proposal_tx,
@@ -1544,7 +1549,8 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
         msg: ConsensusMsg,
     ) -> anyhow::Result<Option<UnverifiedEvent>> {
         match msg {
-            ConsensusMsg::ProposalMsg(_)
+            ConsensusMsg::RaikouMessage(_)
+            | ConsensusMsg::ProposalMsg(_)
             | ConsensusMsg::SyncInfo(_)
             | ConsensusMsg::VoteMsg(_)
             | ConsensusMsg::OrderVoteMsg(_)
@@ -1640,6 +1646,9 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
     }
 
     fn forward_event(
+        raikou_tx: Option<
+            aptos_channel::Sender<AccountAddress, (AccountAddress, RaikouNetworkMessage)>,
+        >,
         quorum_store_msg_tx: Option<aptos_channel::Sender<AccountAddress, VerifiedEvent>>,
         round_manager_tx: Option<
             aptos_channel::Sender<(Author, Discriminant<VerifiedEvent>), (Author, VerifiedEvent)>,
@@ -1657,6 +1666,13 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             );
         }
         if let Err(e) = match event {
+            VerifiedEvent::RaikouMessage(m) => {
+                if let Some(tx) = &mut raikou_tx {
+                    tx.push(peer_id, (peer_id, m));
+                } else {
+                    panic!("channel not initialized");
+                }
+            },
             quorum_store_event @ (VerifiedEvent::SignedBatchInfo(_)
             | VerifiedEvent::ProofOfStoreMsg(_)
             | VerifiedEvent::BatchMsg(_)) => {

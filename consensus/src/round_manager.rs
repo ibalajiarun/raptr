@@ -29,6 +29,7 @@ use crate::{
     pending_votes::VoteReceptionResult,
     persistent_liveness_storage::PersistentLivenessStorage,
     quorum_store::types::BatchMsg,
+    raikou_manager::RaikouNetworkMessage,
     rand::rand_gen::types::{FastShare, RandConfig, Share, TShare},
     util::is_vtxn_expected,
 };
@@ -88,6 +89,7 @@ pub enum UnverifiedEvent {
     BatchMsg(Box<BatchMsg>),
     SignedBatchInfo(Box<SignedBatchInfoMsg>),
     ProofOfStoreMsg(Box<ProofOfStoreMsg>),
+    RaikouMessage(RaikouNetworkMessage),
 }
 
 pub const BACK_PRESSURE_POLLING_INTERVAL_MS: u64 = 10;
@@ -167,6 +169,7 @@ impl UnverifiedEvent {
                 }
                 VerifiedEvent::ProofOfStoreMsg(p)
             },
+            UnverifiedEvent::RaikouMessage(m) => VerifiedEvent::RaikouMessage(m),
         })
     }
 
@@ -179,6 +182,7 @@ impl UnverifiedEvent {
             UnverifiedEvent::BatchMsg(b) => b.epoch(),
             UnverifiedEvent::SignedBatchInfo(sd) => sd.epoch(),
             UnverifiedEvent::ProofOfStoreMsg(p) => p.epoch(),
+            UnverifiedEvent::RaikouMessage(r) => r.epoch(),
         }
     }
 }
@@ -213,6 +217,7 @@ pub enum VerifiedEvent {
     LocalTimeout(Round),
     // Shutdown the NetworkListener
     Shutdown(TokioOneshot::Sender<()>),
+    RaikouMessage(RaikouNetworkMessage),
 }
 
 #[cfg(test)]

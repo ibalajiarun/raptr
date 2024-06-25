@@ -1,3 +1,6 @@
+// Copyright (c) Aptos Foundation
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::framework::NodeId;
 use futures::poll;
 use rand::{distributions::Distribution, Rng};
@@ -7,7 +10,9 @@ use tokio::sync::mpsc;
 pub trait NetworkService: Send + Sync + 'static {
     type Message: Send + Sync + Clone + 'static;
 
-    fn send(&self, target: NodeId, data: Self::Message) -> impl Future<Output = ()> + Send;
+    fn unicast(&self, data: Self::Message, target: NodeId) -> impl Future<Output = ()> + Send;
+
+    fn multicast(&self, data: Self::Message) -> impl Future<Output = ()> + Send;
 
     fn recv(&mut self) -> impl Future<Output = (NodeId, Self::Message)> + Send;
 
@@ -55,7 +60,7 @@ where
     ///
     /// Since the injection happens in a new task, `send` always returns immediately, not
     /// affected by any injected delay.
-    async fn send(&self, target: NodeId, data: M) {
+    async fn unicast(&self, data: M, target: NodeId) {
         let sender = self.node_id;
         let channel = self.send[target].clone();
         let injection = self.injection.clone();
@@ -69,6 +74,13 @@ where
                 let _ = channel.send((sender, data)).await;
             }
         });
+    }
+
+    /// `multicast` sends the message to all nodes in the network, including itself.
+    async fn multicast(&self, data: M) {
+        for target in 0..self.n_nodes() {
+            self.unicast(data.clone(), target as NodeId).await;
+        }
     }
 
     async fn recv(&mut self) -> (NodeId, M) {

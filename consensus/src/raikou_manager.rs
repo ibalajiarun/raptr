@@ -1,3 +1,6 @@
+// Copyright (c) Aptos Foundation
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::{
     dag::DAGNetworkMessage,
     network::NetworkSender,
@@ -35,6 +38,7 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use std::future::Future;
 use tokio::time::Instant;
 use raikou::raikou::types::hash;
 
@@ -233,11 +237,8 @@ impl RaikouNetworkService {
 impl NetworkService for RaikouNetworkService {
     type Message = raikou::raikou::Message;
 
-    fn send(
-        &self,
-        target: raikou::framework::NodeId,
-        data: Self::Message,
-    ) -> impl futures::Future<Output = ()> + Send {
+    async fn unicast(&self, data: Self::Message, target: raikou::framework::NodeId) {
+        // TODO: should we spawn a task for async serialization?
         let remote_peer_id = *self.index_to_address.get(&target).unwrap();
 
         let raikou_msg = RaikouNetworkMessage {
@@ -248,10 +249,22 @@ impl NetworkService for RaikouNetworkService {
         // eprintln!("FOOBAR1: {:#x}", hash(&raikou_msg.data));
 
         let msg: ConsensusMsg = ConsensusMsg::RaikouMessage(raikou_msg);
-        self.network_sender.send(msg, vec![remote_peer_id])
+        self.network_sender.send(msg, vec![remote_peer_id]).await
+    }
+
+    async fn multicast(&self, data: Self::Message) {
+        // TODO: should we spawn a task for async serialization?
+        let raikou_msg = RaikouNetworkMessage {
+            epoch: self.epoch,
+            data: bcs::to_bytes(&data).unwrap(),
+        };
+        let msg: ConsensusMsg = ConsensusMsg::RaikouMessage(raikou_msg);
+
+        self.network_sender.send(msg, self.index_to_address.values().cloned().collect()).await
     }
 
     async fn recv(&mut self) -> (raikou::framework::NodeId, Self::Message) {
+        // TODO: should we spawn a task for async deserialization?
         let (sender, msg) = self.messages_rx.select_next_some().await;
         let sender = *self.address_to_index.get(&sender).unwrap();
         // assert!(msg.data.len() > 0);
@@ -304,11 +317,8 @@ impl RaikouDissNetworkService {
 impl NetworkService for RaikouDissNetworkService {
     type Message = raikou::raikou::dissemination::fake::Message;
 
-    fn send(
-        &self,
-        target: raikou::framework::NodeId,
-        data: Self::Message,
-    ) -> impl futures::Future<Output = ()> + Send {
+    async fn unicast(&self, data: Self::Message, target: raikou::framework::NodeId) {
+        // TODO: should we spawn a task for async serialization?
         let remote_peer_id = *self.index_to_address.get(&target).unwrap();
         let raikou_msg = RaikouNetworkMessage {
             epoch: self.epoch,
@@ -318,19 +328,27 @@ impl NetworkService for RaikouDissNetworkService {
         // eprintln!("BARBAR1: {:#x}", hash(&raikou_msg.data));
 
         let msg: ConsensusMsg = ConsensusMsg::RaikouDissMessage(raikou_msg);
-        self.network_sender.send(msg, vec![remote_peer_id])
+        self.network_sender.send(msg, vec![remote_peer_id]).await
     }
 
-    fn recv(
-        &mut self,
-    ) -> impl futures::Future<Output = (raikou::framework::NodeId, Self::Message)> + Send {
-        async {
-            let (sender, msg) = self.messages_rx.select_next_some().await;
-            let sender = *self.address_to_index.get(&sender).unwrap();
-            // eprintln!("BARBAR2: {:#x}", hash(&msg.data));
-            let msg = bcs::from_bytes(&msg.data).unwrap();
-            return (sender, msg);
-        }
+    async fn multicast(&self, data: Self::Message) {
+        // TODO: should we spawn a task for async serialization?
+        let raikou_msg = RaikouNetworkMessage {
+            epoch: self.epoch,
+            data: bcs::to_bytes(&data).unwrap(),
+        };
+
+        let msg: ConsensusMsg = ConsensusMsg::RaikouDissMessage(raikou_msg);
+        self.network_sender.send(msg, self.index_to_address.values().cloned().collect()).await
+    }
+
+    async fn recv(&mut self) -> (raikou::framework::NodeId, Self::Message) {
+        // TODO: should we spawn a task for async deserialization?
+        let (sender, msg) = self.messages_rx.select_next_some().await;
+        let sender = *self.address_to_index.get(&sender).unwrap();
+        // eprintln!("BARBAR2: {:#x}", hash(&msg.data));
+        let msg = bcs::from_bytes(&msg.data).unwrap();
+        (sender, msg)
     }
 
     fn n_nodes(&self) -> usize {

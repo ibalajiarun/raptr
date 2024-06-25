@@ -1,3 +1,6 @@
+// Copyright (c) Aptos Foundation
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::framework::{
     module_network::{ModuleEvent, ModuleId, ModuleNetworkService},
     network::NetworkService,
@@ -25,13 +28,7 @@ pub trait Context: Send + Sync {
     fn unicast(&self, message: Self::Message, target: NodeId) -> impl Future<Output = ()> + Send;
 
     /// Multicast sends the same message to all nodes in the network.
-    fn multicast(&self, message: Self::Message) -> impl Future<Output = ()> + Send {
-        async move {
-            for target in 0..self.n_nodes() {
-                self.unicast(message.clone(), target).await;
-            }
-        }
-    }
+    fn multicast(&self, message: Self::Message) -> impl Future<Output = ()> + Send;
 
     fn notify<E>(&self, module: ModuleId, event: E) -> impl Future<Output = ()> + Send
     where
@@ -111,7 +108,11 @@ impl<NS: NetworkService, TS: TimerService> Context for SimpleContext<NS, TS> {
     }
 
     async fn unicast(&self, message: Self::Message, target: NodeId) {
-        self.network.send(target, message).await;
+        self.network.unicast(message, target).await;
+    }
+
+    async fn multicast(&self, message: Self::Message) {
+        self.network.multicast(message).await;
     }
 
     async fn notify_boxed(&self, module: ModuleId, event: ModuleEvent) {

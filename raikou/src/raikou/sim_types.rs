@@ -1,15 +1,21 @@
-use crate::{
-    framework::NodeId,
-    raikou::types::{BatchHash, Round},
-};
-use bitvec::prelude::BitVec;
-use serde::{Deserialize, Serialize};
+// Copyright (c) Aptos Foundation
+// SPDX-License-Identifier: Apache-2.0
+
 use std::{
     fmt::{Debug, Formatter},
     hash::{Hash, Hasher},
     sync::Arc,
 };
 use std::ops::Range;
+
+use bitvec::prelude::BitVec;
+use serde::{Deserialize, Serialize};
+use siphasher::sip::SipHasher13;
+
+use crate::{
+    framework::NodeId,
+    raikou::types::{BatchHash, Round},
+};
 use crate::raikou::types::Prefix;
 
 // Unsafe crypto, for simulation and testing purposes only.
@@ -30,7 +36,11 @@ pub struct BatchInfo {
 }
 
 pub fn hash(x: impl Hash) -> HashValue {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    // This hashing is obviously not secure, but it's good enough for simulation purposes.
+    let mut hasher = SipHasher13::new_with_keys(
+        13153606100881650582,
+        6006124427657524892
+    );
     x.hash(&mut hasher);
     hasher.finish()
 }

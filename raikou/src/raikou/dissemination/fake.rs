@@ -1,6 +1,22 @@
+// Copyright (c) Aptos Foundation
+// SPDX-License-Identifier: Apache-2.0
+
+use std::{
+    collections::{BTreeMap, BTreeSet, HashSet},
+    future::Future,
+    sync::Arc,
+    time::Duration,
+};
+
+use bitvec::prelude::BitVec;
+use defaultmap::DefaultBTreeMap;
+use itertools::Itertools;
+use serde::{Deserialize, Serialize};
+use tokio::time::Instant;
+
 use crate::{
     framework::{
-        module_network::ModuleId, network::NetworkService, timer::TimerService, NodeId, Protocol,
+        module_network::ModuleId, network::NetworkService, NodeId, Protocol, timer::TimerService,
     },
     metrics,
     metrics::Sender,
@@ -12,23 +28,13 @@ use crate::{
         types::*,
     },
 };
-use bitvec::prelude::BitVec;
-use defaultmap::DefaultBTreeMap;
-use serde::{Deserialize, Serialize};
-use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
-    future::Future,
-    sync::Arc,
-    time::Duration,
-};
-use tokio::time::Instant;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Batch {
     author: NodeId,
     batch_id: BatchId,
     digest: BatchHash,
-    txns: Option<Vec<Txn>>,
+    txns: Vec<Txn>,
 }
 
 impl Batch {
@@ -43,7 +49,7 @@ impl Batch {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Message {
-    Batch(Batch),
+    Batch(BatchId, Vec<Txn>),
     BatchStored(BatchId),
     AvailabilityCert(AC),
     // Fetch(BatchHash),
@@ -162,16 +168,27 @@ where
 
     async fn check_stored_all(&self, batches: &[BatchInfo]) -> bool {
         let inner = self.inner.lock().await;
-        batches
+        if let Some(missing) = batches
             .into_iter()
-            .all(|batch| inner.batches.contains_key(&batch.digest))
+            .find(|batch| !inner.batches.contains_key(&batch.digest))
+        {
+            inner.log_detail(format!(
+                "Missing batch #{} from node {} with digest {:#x}",
+                missing.batch_id,
+                missing.author,
+                missing.digest,
+            ));
+            false
+        } else {
+            true
+        }
     }
 
     async fn notify_commit(&self, payloads: Vec<Payload>) {
         let mut inner = self.inner.lock().await;
         let now = Instant::now();
 
-        for payload in payloads {
+        for payload in &payloads {
             for batch in payload.all() {
                 if inner.committed_batches.contains(&batch.digest) {
                     // TODO: add a metric for batch duplication.
@@ -187,9 +204,14 @@ where
                         inner.to_deltas(inner.batch_send_time[&batch.digest].elapsed());
                     inner.metrics.batch_commit_time.push((now, commit_time));
                 }
+            }
+        }
 
-                // Metrics:
-                // Only track queueing time and penalties for the committed batches.
+        // Metrics:
+        // Only track queueing time and penalties for the committed batches.
+        // At the moment, they are only tracked for optimistically committed batches.
+        for payload in &payloads {
+            for batch in payload.sub_blocks().iter().flatten() {
                 if payload.leader() == inner.node_id {
                     let block_prepare_time =
                         inner.penalty_tracker.block_prepare_time(payload.round());
@@ -268,6 +290,7 @@ where
             f: config.f,
             enable: config.enable_penalty_tracker,
             n_sub_blocks: config.n_sub_blocks,
+            batch_expiration_time: config.delta * 3,
         };
 
         Self {
@@ -326,31 +349,39 @@ where
 
         // Creating and certifying batches
 
-        upon timer [TimerEvent::NewBatch(sn)] {
-            let txns = self.txns_iter.next();
-            let digest = BatchHash(hash((self.node_id, sn, &txns)));
+        upon timer [TimerEvent::NewBatch(batch_id)] {
+            let txns = self.txns_iter.next().unwrap();
+            let digest = BatchHash(hash((self.node_id, batch_id, &txns)));
 
             // Multicast a new batch
-            ctx.multicast(Message::Batch(Batch {
-                author: self.node_id,
-                batch_id: sn,
-                digest: digest.clone(),
-                txns,
-            })).await;
+            ctx.multicast(Message::Batch(batch_id, txns)).await;
 
-            self.batch_created_time[sn] = Instant::now();
-            self.my_batches.insert(sn, digest.clone());
+            self.batch_created_time[batch_id] = Instant::now();
+            self.my_batches.insert(batch_id, digest.clone());
 
             // Reset the timer.
-            ctx.set_timer(self.config.batch_interval, TimerEvent::NewBatch(sn + 1));
+            ctx.set_timer(self.config.batch_interval, TimerEvent::NewBatch(batch_id + 1));
 
             self.batch_send_time.insert(digest, Instant::now());
         };
 
         // Upon receiving a batch, store it, reply with a BatchStored message,
         // and execute try_vote.
-        upon receive [Message::Batch(batch)] from node [p] {
-            // TODO: add verification of the digest?
+        upon receive [Message::Batch(batch_id, txns)] from node [p] {
+            let batch = Batch {
+                author: p,
+                batch_id,
+                digest: BatchHash(hash((p, batch_id, &txns))),
+                txns,
+            };
+
+            // self.log_detail(format!(
+            //     "Received batch #{} from node {} with digest {:#x}",
+            //     batch.batch_id,
+            //     batch.author,
+            //     batch.digest,
+            // ));
+
             let digest = batch.digest.clone();
             let batch_id = batch.batch_id;
 
@@ -400,9 +431,9 @@ where
                     ctx.set_timer(
                         self.config.penalty_tracker_report_delay,
                         TimerEvent::PenaltyTrackerReport(
-                            leader, 
-                            round, 
-                            Instant::now(), 
+                            leader,
+                            round,
+                            Instant::now(),
                             payload,
                         )
                     );

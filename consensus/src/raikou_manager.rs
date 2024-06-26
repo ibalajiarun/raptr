@@ -1,29 +1,29 @@
 // Copyright (c) Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{
-    dag::DAGNetworkMessage,
-    network::NetworkSender,
-    network_interface::{ConsensusMsg, ConsensusNetworkClient},
-    payload_client::PayloadClient,
-    payload_manager::{self, PayloadManager},
+use std::{
+    collections::HashMap
+    ,
+    sync::Arc,
+    time::Duration,
 };
-use ::raikou::{leader_schedule::round_robin, raikou::dissemination::fake::FakeDisseminationLayer};
-use aptos_config::config::{ConsensusConfig, QuorumStoreConfig};
-use aptos_consensus_types::{
-    common::{Author, Payload, PayloadFilter, ProofWithData},
-    proof_of_store::{BatchInfo, ProofOfStore},
-};
-use aptos_types::epoch_state::EpochState;
-use chrono::Local;
+use std::future::Future;
+
 use futures::StreamExt;
 use futures_channel::oneshot;
+use serde::{Deserialize, Serialize};
+use tokio::time::Instant;
+
+use ::raikou::{leader_schedule::round_robin, raikou::dissemination::fake::FakeDisseminationLayer};
+use aptos_config::config::ConsensusConfig;
+use aptos_consensus_types::common::Author;
+use aptos_types::epoch_state::EpochState;
 use raikou::{
     framework::{
         module_network::ModuleNetwork,
         network::{Network, NetworkService},
-        timer::LocalTimerService,
         Protocol,
+        timer::LocalTimerService,
     },
     metrics,
     raikou::{
@@ -31,16 +31,13 @@ use raikou::{
         RaikouNode,
     },
 };
-use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    marker::PhantomData,
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+
+use crate::{
+    network::NetworkSender,
+    network_interface::ConsensusMsg,
+    payload_client::PayloadClient,
+    payload_manager::PayloadManager,
 };
-use std::future::Future;
-use tokio::time::Instant;
-use raikou::raikou::types::hash;
 
 const JOLTEON_TIMEOUT: u32 = 3; // in Deltas
 
@@ -111,7 +108,7 @@ impl RaikouManager {
         let config = raikou::raikou::Config {
             n_nodes,
             f,
-            storage_requirement: f + (f / 2 + 1),
+            storage_requirement: f + 1,  // f + (f / 2 + 1),
             leader_timeout: JOLTEON_TIMEOUT,
             leader_schedule: round_robin(n_nodes),
             delta: Duration::from_secs_f64(delta),
@@ -203,6 +200,7 @@ pub struct RaikouNetworkService {
     epoch: u64,
     n_nodes: usize,
     index_to_address: HashMap<usize, Author>,
+    all_peer_addresses: Vec<Author>,
     address_to_index: HashMap<Author, usize>,
     network_sender: Arc<NetworkSender>,
     messages_rx: aptos_channels::aptos_channel::Receiver<Author, (Author, RaikouNetworkMessage)>,
@@ -227,6 +225,7 @@ impl RaikouNetworkService {
             epoch: epoch_state.epoch,
             n_nodes: epoch_state.verifier.len(),
             index_to_address,
+            all_peer_addresses: address_to_index.keys().cloned().collect(),
             address_to_index,
             network_sender,
             messages_rx,
@@ -238,33 +237,43 @@ impl NetworkService for RaikouNetworkService {
     type Message = raikou::raikou::Message;
 
     async fn unicast(&self, data: Self::Message, target: raikou::framework::NodeId) {
-        // TODO: should we spawn a task for async serialization?
+        let epoch = self.epoch;
         let remote_peer_id = *self.index_to_address.get(&target).unwrap();
+        let network_sender = self.network_sender.clone();
 
-        let raikou_msg = RaikouNetworkMessage {
-            epoch: self.epoch,
-            data: bcs::to_bytes(&data).unwrap(),
-        };
-        // assert!(raikou_msg.data.len() > 0);
-        // eprintln!("FOOBAR1: {:#x}", hash(&raikou_msg.data));
+        tokio::spawn(async move {
+            let raikou_msg = RaikouNetworkMessage {
+                epoch,
+                data: bcs::to_bytes(&data).unwrap(),
+            };
+            // assert!(raikou_msg.data.len() > 0);
+            // eprintln!("FOOBAR1: {:#x}", hash(&raikou_msg.data));
 
-        let msg: ConsensusMsg = ConsensusMsg::RaikouMessage(raikou_msg);
-        self.network_sender.send(msg, vec![remote_peer_id]).await
+            let msg: ConsensusMsg = ConsensusMsg::RaikouMessage(raikou_msg);
+            network_sender.send(msg, vec![remote_peer_id]).await
+        });
     }
 
     async fn multicast(&self, data: Self::Message) {
-        // TODO: should we spawn a task for async serialization?
-        let raikou_msg = RaikouNetworkMessage {
-            epoch: self.epoch,
-            data: bcs::to_bytes(&data).unwrap(),
-        };
-        let msg: ConsensusMsg = ConsensusMsg::RaikouMessage(raikou_msg);
+        let epoch = self.epoch;
+        // let remote_peer_ids = self.all_peer_addresses.clone();
+        let remote_peer_ids = (0..self.n_nodes).map(|i| *self.index_to_address.get(&i).unwrap()).collect();
+        let network_sender = self.network_sender.clone();
 
-        self.network_sender.send(msg, self.index_to_address.values().cloned().collect()).await
+        tokio::spawn(async move {
+            let raikou_msg = RaikouNetworkMessage {
+                epoch,
+                data: bcs::to_bytes(&data).unwrap(),
+            };
+            let msg: ConsensusMsg = ConsensusMsg::RaikouMessage(raikou_msg);
+
+            network_sender.send(msg, remote_peer_ids).await;
+        });
     }
 
     async fn recv(&mut self) -> (raikou::framework::NodeId, Self::Message) {
         // TODO: should we spawn a task for async deserialization?
+
         let (sender, msg) = self.messages_rx.select_next_some().await;
         let sender = *self.address_to_index.get(&sender).unwrap();
         // assert!(msg.data.len() > 0);
@@ -283,6 +292,7 @@ pub struct RaikouDissNetworkService {
     epoch: u64,
     n_nodes: usize,
     index_to_address: HashMap<usize, Author>,
+    all_peer_addresses: Vec<Author>,
     address_to_index: HashMap<Author, usize>,
     network_sender: Arc<NetworkSender>,
     messages_rx: aptos_channels::aptos_channel::Receiver<Author, (Author, RaikouNetworkMessage)>,
@@ -307,6 +317,7 @@ impl RaikouDissNetworkService {
             epoch: epoch_state.epoch,
             n_nodes: epoch_state.verifier.len(),
             index_to_address,
+            all_peer_addresses: address_to_index.keys().cloned().collect(),
             address_to_index,
             network_sender,
             messages_rx,
@@ -318,28 +329,38 @@ impl NetworkService for RaikouDissNetworkService {
     type Message = raikou::raikou::dissemination::fake::Message;
 
     async fn unicast(&self, data: Self::Message, target: raikou::framework::NodeId) {
-        // TODO: should we spawn a task for async serialization?
+        let epoch = self.epoch;
         let remote_peer_id = *self.index_to_address.get(&target).unwrap();
-        let raikou_msg = RaikouNetworkMessage {
-            epoch: self.epoch,
-            data: bcs::to_bytes(&data).unwrap(),
-        };
-        // assert!(raikou_msg.data.len() > 0);
-        // eprintln!("BARBAR1: {:#x}", hash(&raikou_msg.data));
+        let network_sender = self.network_sender.clone();
 
-        let msg: ConsensusMsg = ConsensusMsg::RaikouDissMessage(raikou_msg);
-        self.network_sender.send(msg, vec![remote_peer_id]).await
+        tokio::spawn(async move {
+            let raikou_msg = RaikouNetworkMessage {
+                epoch,
+                data: bcs::to_bytes(&data).unwrap(),
+            };
+            // assert!(raikou_msg.data.len() > 0);
+            // eprintln!("BARBAR1: {:#x}", hash(&raikou_msg.data));
+
+            let msg: ConsensusMsg = ConsensusMsg::RaikouDissMessage(raikou_msg);
+            network_sender.send(msg, vec![remote_peer_id]).await
+        });
     }
 
     async fn multicast(&self, data: Self::Message) {
-        // TODO: should we spawn a task for async serialization?
-        let raikou_msg = RaikouNetworkMessage {
-            epoch: self.epoch,
-            data: bcs::to_bytes(&data).unwrap(),
-        };
+        let epoch = self.epoch;
+        // let remote_peer_ids = self.all_peer_addresses.clone();
+        let remote_peer_ids = (0..self.n_nodes).map(|i| *self.index_to_address.get(&i).unwrap()).collect();
+        let network_sender = self.network_sender.clone();
 
-        let msg: ConsensusMsg = ConsensusMsg::RaikouDissMessage(raikou_msg);
-        self.network_sender.send(msg, self.index_to_address.values().cloned().collect()).await
+        tokio::spawn(async move {
+            let raikou_msg = RaikouNetworkMessage {
+                epoch,
+                data: bcs::to_bytes(&data).unwrap(),
+            };
+
+            let msg: ConsensusMsg = ConsensusMsg::RaikouDissMessage(raikou_msg);
+            network_sender.send(msg, remote_peer_ids).await;
+        });
     }
 
     async fn recv(&mut self) -> (raikou::framework::NodeId, Self::Message) {

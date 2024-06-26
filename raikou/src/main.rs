@@ -1,12 +1,18 @@
-use raikou::{delays::{heterogeneous_symmetric_delay, DelayFunction}, framework::{
+// Copyright (c) Aptos Foundation
+// SPDX-License-Identifier: Apache-2.0
+
+use std::{iter, sync::Arc, time::Duration};
+
+use rand::{Rng, thread_rng};
+use tokio::{spawn, time, time::Instant};
+
+use raikou::{delays::{DelayFunction, heterogeneous_symmetric_delay}, framework::{
     module_network::ModuleNetwork,
     network::{InjectedLocalNetwork, Network, NetworkInjection},
-    timer::{clock_skew_injection, InjectedTimerService},
-    NodeId, Protocol,
-}, leader_schedule::round_robin, metrics, multichain::{Config, MultiChainBft}, raikou::{dissemination, dissemination::fake::FakeDisseminationLayer}};
-use rand::{seq::SliceRandom, thread_rng, Rng};
-use std::{collections::BTreeMap, iter, sync::Arc, time::Duration};
-use tokio::{spawn, sync::mpsc, time, time::Instant};
+    NodeId,
+    Protocol, timer::{clock_skew_injection, InjectedTimerService},
+}, leader_schedule::round_robin, metrics, raikou::{dissemination, dissemination::fake::FakeDisseminationLayer}};
+use raikou::framework::network::NetworkService;
 use raikou::raikou::RaikouNode;
 
 type Slot = i64;
@@ -627,7 +633,7 @@ async fn test_raikou(
     let config = raikou::raikou::Config {
         n_nodes,
         f,
-        storage_requirement: f + (f / 2 + 1),
+        storage_requirement: f + 1,  // f + (f / 2 + 1),
         leader_timeout: JOLTEON_TIMEOUT,
         leader_schedule: round_robin(n_nodes),
         delta: Duration::from_secs_f64(delta),
@@ -657,8 +663,8 @@ async fn test_raikou(
     let start_time = Instant::now();
     for node_id in 0..n_nodes {
         let config = config.clone();
-        let diss_network_service = diss_network.service(node_id);
-        let network_service = network.service(node_id);
+        let mut diss_network_service = diss_network.service(node_id);
+        let mut network_service = network.service(node_id);
 
         let clock_speed = { thread_rng().sample(clock_speed_distr) };
 
@@ -692,8 +698,9 @@ async fn test_raikou(
             };
             time::sleep(Duration::from_secs_f64(spawn_delay)).await;
 
-            // // Before starting the node, "drop" all messages sent to it during the spawn delay.
-            // network_service.clear_inbox().await;
+            // Before starting the node, "drop" all messages sent to it during the spawn delay.
+            network_service.clear_inbox().await;
+            diss_network_service.clear_inbox().await;
 
             let txns_iter = iter::repeat_with(|| vec![]);
 

@@ -1,3 +1,6 @@
+// Copyright (c) Aptos Foundation
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::{
     framework::NodeId,
     raikou::types::{Round, *},
@@ -66,6 +69,7 @@ pub struct Config {
     pub f: usize,
     pub enable: bool,
     pub n_sub_blocks: usize,
+    pub batch_expiration_time: Duration,
 }
 
 pub struct PenaltyTracker {
@@ -416,9 +420,13 @@ impl PenaltyTracker {
     pub fn prepare_new_block(&mut self, round: Round, batches: Vec<BatchInfo>) -> Vec<Vec<BatchInfo>> {
         if !self.config.enable {
             self.block_prepare_time.insert(round, Instant::now());
+            let now = Instant::now();
 
             let batches = batches
                 .into_iter()
+                .filter(|batch_info| {
+                    (now - self.batch_receive_time[&batch_info.digest]) < self.config.batch_expiration_time
+                })
                 .sorted_by_key(|batch_info| self.batch_receive_time[&batch_info.digest])
                 .collect_vec();
 
@@ -442,13 +450,16 @@ impl PenaltyTracker {
             .insert(round, new_penalties.clone());
         let batches_to_propose: Vec<BatchInfo> = batches
             .into_iter()
+            .filter(|batch_info| {
+                (now - self.batch_receive_time[&batch_info.digest]) < self.config.batch_expiration_time
+            })
             .map(|batch_info| {
                 let receive_time = self.batch_receive_time[&batch_info.digest];
                 let safe_propose_time = receive_time + new_penalties[batch_info.author];
                 (safe_propose_time, batch_info)
             })
+            .filter(|&(safe_propose_time, _)| safe_propose_time <= now)
             .sorted_by_key(|(safe_propose_time, _)| *safe_propose_time)
-            .take_while(|&(safe_propose_time, _)| safe_propose_time <= now)
             .map(|(_, batch_info)| batch_info)
             .collect_vec();
 

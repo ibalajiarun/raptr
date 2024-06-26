@@ -1,3 +1,20 @@
+// Copyright (c) Aptos Foundation
+// SPDX-License-Identifier: Apache-2.0
+
+use std::{
+    cmp::{max, max_by, max_by_key, min, Ordering},
+    collections::{BTreeMap, BTreeSet, HashSet},
+    fmt::{Debug, Formatter},
+    sync::Arc,
+    time::Duration,
+};
+
+use bitvec::vec::BitVec;
+use defaultmap::DefaultBTreeMap;
+use itertools::Itertools;
+use serde::{Deserialize, Serialize};
+use tokio::time::Instant;
+
 use crate::{
     framework::{ContextFor, NodeId, Protocol},
     leader_schedule::LeaderSchedule,
@@ -11,18 +28,6 @@ use crate::{
     },
     utils::kth_max_set::KthMaxSet,
 };
-use bitvec::vec::BitVec;
-use defaultmap::DefaultBTreeMap;
-use itertools::Itertools;
-use serde::{Deserialize, Serialize};
-use std::{
-    cmp::{max, max_by, max_by_key, min, Ordering},
-    collections::{BTreeMap, BTreeSet, HashSet},
-    fmt::{Debug, Formatter},
-    sync::Arc,
-    time::Duration,
-};
-use tokio::time::Instant;
 
 #[derive(Clone, Hash, Serialize, Deserialize)]
 pub struct Block {
@@ -55,7 +60,7 @@ impl Block {
     pub fn acs(&self) -> &Vec<AC> {
         self.payload.acs()
     }
-    
+
     pub fn sub_blocks(&self) -> &[Vec<BatchInfo>] {
         self.payload.sub_blocks()
     }
@@ -624,11 +629,15 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             // Committing a new block.
 
             self.log_detail(format!(
-                "Committing block {} proposed by node {} with prefix {}/{}{} ({:?})",
+                "Committing block {} proposed by node {} with {} ACs \
+                and prefix {}/{} [{}/{} batches]{} ({:?}).",
                 qc.round,
                 self.config.leader(qc.round),
+                block.acs().len(),
                 qc.prefix,
                 block.n_sub_blocks(),
+                block.sub_blocks().iter().take(qc.prefix).map(|b| b.len()).sum::<usize>(),
+                block.sub_blocks().iter().map(|b| b.len()).sum::<usize>(),
                 if qc.is_full() {
                     " (full)"
                 } else {
@@ -802,6 +811,13 @@ where
                 // self.leader_proposal.insert(round, digest.clone());
                 // self.blocks.insert(digest, block.clone());
 
+                self.log_detail(format!(
+                    "Proposing block {} with {} ACs and {} sub-blocks",
+                    round,
+                    block.acs().len(),
+                    block.n_sub_blocks(),
+                ));
+
                 self.block_create_time.insert(round, Instant::now());
                 ctx.multicast(Message::Propose(block)).await;
             }
@@ -823,6 +839,12 @@ where
                 && block.round >= self.r_cur
                 && block.round > self.r_timeout
             {
+                self.log_detail(format!(
+                    "Received block {} proposed by node {}",
+                    block.round,
+                    leader
+                ));
+
                 self.leader_proposal.insert(block.round, block.digest.clone());
                 self.on_new_block(&block, ctx).await;
 
@@ -854,6 +876,13 @@ where
         upon timer [TimerEvent::QcVote(round)] {
             if round == self.r_cur && self.last_qc_vote.round < round && round > self.r_timeout {
                 let stored_prefix = self.stored_prefix().await;
+
+                self.log_detail(format!(
+                    "QC-voting for block {} proposed by node {} by Timer with prefix {}",
+                    round,
+                    self.config.leader(round),
+                    stored_prefix,
+                ));
 
                 self.last_qc_vote = (self.r_cur, stored_prefix).into();
                 ctx.multicast(Message::QcVote(
@@ -919,14 +948,14 @@ where
                             .skip(self.config.storage_requirement - 1)
                             .next()
                             .expect("storage_requirement cannot be bigger than the quorum size");
-            
+
                         let qc = QC {
                             round,
                             prefix: certified_prefix,
                             n_sub_blocks,
                             block_digest: digest,
                         };
-            
+
                         self.on_new_qc(qc, ctx).await;
                     }
                 }

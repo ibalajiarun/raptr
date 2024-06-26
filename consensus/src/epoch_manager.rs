@@ -1289,7 +1289,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
         let (raikou_shutdown_tx, raikou_shutdown_rx) = oneshot::channel();
         self.raikou_shutdown_tx = Some(raikou_shutdown_tx);
 
-        let delta = 1.;
+        let delta = 0.16;
         let total_duration_in_delta = 1000;
         let enable_optimistic_dissemination = true;
 

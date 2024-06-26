@@ -285,6 +285,7 @@ pub enum TimerEvent {
     // Other
     EndOfRun,
     Status,
+    RoundSync
 }
 
 #[derive(Clone, Debug)]
@@ -310,6 +311,8 @@ pub struct Config<S> {
     /// if it doesn't have all the batches yet.
     pub extra_wait_before_qc_vote: Duration,
     pub extra_wait_before_commit_vote: Duration,
+
+    pub round_sync_interval: Duration,
 
     pub status_interval: Duration,
     pub end_of_run: Instant,
@@ -1058,6 +1061,31 @@ where
             if !self.blocks.contains_key(&block.digest) {
                 self.on_new_block(&block, ctx).await;
             }
+        };
+
+        // State sync
+
+        upon start {
+            ctx.set_timer(self.config.round_sync_interval, TimerEvent::RoundSync);
+        };
+
+        // To tolerate message loss during asynchronous periods, nodes periodically
+        // broadcast their current round with the proof that they have a valid reason
+        // to enter it and the highest QC they have seen.
+        // Additionally, if the node has voted to time out the current round,
+        // it repeats the timeout message.
+        upon timer event [TimerEvent::RoundSync] {
+            ctx.multicast(Message::AdvanceRound(
+                self.r_ready,
+                self.qc_high.clone(),
+                self.enter_reason.clone(),
+            )).await;
+
+            if self.r_timeout == self.r_cur {
+                ctx.multicast(Message::Timeout(self.r_cur, self.qc_high.clone())).await;
+            }
+
+            ctx.set_timer(self.config.round_sync_interval, TimerEvent::RoundSync);
         };
 
         // Logging and halting

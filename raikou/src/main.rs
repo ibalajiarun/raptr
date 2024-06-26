@@ -637,7 +637,6 @@ async fn test_raikou(
         leader_timeout: JOLTEON_TIMEOUT,
         leader_schedule: round_robin(n_nodes),
         delta: Duration::from_secs_f64(delta),
-        batch_interval: Duration::from_secs_f64(delta * 0.1),
         end_of_run: Instant::now() + Duration::from_secs_f64(delta) * total_duration_in_delta,
         enable_optimistic_dissemination,
         extra_wait_before_qc_vote: Duration::from_secs_f64(delta * 0.1),
@@ -645,6 +644,7 @@ async fn test_raikou(
         enable_round_entry_permission: false,
         enable_commit_votes: true,
         status_interval: 10 * Duration::from_secs_f64(delta),
+        round_sync_interval: Duration::from_secs_f64(delta * 15.),
     };
 
     let mut join_handles = Vec::new();

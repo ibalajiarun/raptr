@@ -120,6 +120,7 @@ impl RaikouManager {
             enable_round_entry_permission: false,
             enable_commit_votes: true,
             status_interval: Duration::from_secs_f64(delta * 10.),
+            round_sync_interval: Duration::from_secs_f64(delta * 15.),
         };
 
         let mut module_network = ModuleNetwork::new();

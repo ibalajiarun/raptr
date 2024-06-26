@@ -286,13 +286,14 @@ async fn test_fault_tolerance_of_network_send() {
             // let wanted_client = small_rng.gen_range(0usize, num_validators);
 
             (
-                (0..num_validators).map(|i| {
-                    (
-                        i,
-                        "consensus::send::any".to_string(),
-                        format!("delay(100)"),
-                    )
-                }).collect(),
+                // (0..num_validators).map(|i| {
+                //     (
+                //         i,
+                //         "consensus::send::any".to_string(),
+                //         format!("delay(100)"),
+                //     )
+                // }).collect(),
+                vec![],
                 false,
             )
         }),

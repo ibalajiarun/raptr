@@ -302,7 +302,6 @@ pub struct Config<S> {
     pub leader_timeout: u32, // in deltas
     pub leader_schedule: S,
     pub delta: Duration,
-    pub batch_interval: Duration,
     pub enable_commit_votes: bool,
     pub enable_optimistic_dissemination: bool,
     pub enable_round_entry_permission: bool,
@@ -836,8 +835,6 @@ where
                 block.is_valid()
                 && leader == self.config.leader(block.round)
                 && !self.leader_proposal.contains_key(&block.round)
-                && block.round >= self.r_cur
-                && block.round > self.r_timeout
             {
                 self.log_detail(format!(
                     "Received block {} proposed by node {}",
@@ -848,21 +845,37 @@ where
                 self.leader_proposal.insert(block.round, block.digest.clone());
                 self.on_new_block(&block, ctx).await;
 
-                let Block { round, payload, parent_qc, reason, .. } = block;
-                // a valid non-genesis block, by definition, always has a parent QC.
-                let parent_qc = parent_qc.unwrap();
-
-                self.on_new_qc(parent_qc, ctx).await;
+                let Block { round, payload, reason, .. } = block;
                 self.advance_r_ready(round, reason, ctx).await;
 
-                ctx.set_timer(self.config.extra_wait_before_qc_vote, TimerEvent::QcVote(round));
-
-                // store the ACs
                 ctx.notify(
                     self.dissemination.module_id(),
                     BlockReceived::new(leader, round, payload),
                 ).await;
-                // self.log_detail(format!("Sending BlockReceived event at time {:?}", Instant::now()));
+
+                if block.round < self.r_cur {
+                    self.log_detail(format!(
+                        "Ignoring proposal of block {} by node {} because already in round {}",
+                        block.round,
+                        leader,
+                        self.r_cur,
+                    ));
+                } else if block.round <= self.r_timeout {
+                    self.log_detail(format!(
+                        "Ignoring proposal of block {} by node {} because already timed out round {}",
+                        block.round,
+                        leader,
+                        self.r_timeout,
+                    ));
+                } else {
+                    self.log_detail(format!(
+                        "Processing proposal of block {} by node {}",
+                        block.round,
+                        leader,
+                    ));
+
+                    ctx.set_timer(self.config.extra_wait_before_qc_vote, TimerEvent::QcVote(round));
+                }
             }
         };
 

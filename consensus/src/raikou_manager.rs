@@ -11,6 +11,7 @@ use std::future::Future;
 
 use futures::StreamExt;
 use futures_channel::oneshot;
+use rand::{Rng, thread_rng};
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 
@@ -112,7 +113,6 @@ impl RaikouManager {
             leader_timeout: JOLTEON_TIMEOUT,
             leader_schedule: round_robin(n_nodes),
             delta: Duration::from_secs_f64(delta),
-            batch_interval: Duration::from_secs_f64(delta * 0.1),
             end_of_run: Instant::now() + Duration::from_secs_f64(delta) * total_duration_in_delta,
             enable_optimistic_dissemination,
             extra_wait_before_qc_vote: Duration::from_secs_f64(delta * 0.1),
@@ -233,6 +233,12 @@ impl RaikouNetworkService {
     }
 }
 
+async fn delay_injection() {
+    // TODO: don't forget to remove before any experiments in real networks.
+    let delay = Duration::from_millis(thread_rng().gen_range(50, 150));
+    tokio::time::sleep(delay).await;
+}
+
 impl NetworkService for RaikouNetworkService {
     type Message = raikou::raikou::Message;
 
@@ -242,6 +248,8 @@ impl NetworkService for RaikouNetworkService {
         let network_sender = self.network_sender.clone();
 
         tokio::spawn(async move {
+            delay_injection().await;
+
             let raikou_msg = RaikouNetworkMessage {
                 epoch,
                 data: bcs::to_bytes(&data).unwrap(),
@@ -261,6 +269,8 @@ impl NetworkService for RaikouNetworkService {
         let network_sender = self.network_sender.clone();
 
         tokio::spawn(async move {
+            delay_injection().await;
+
             let raikou_msg = RaikouNetworkMessage {
                 epoch,
                 data: bcs::to_bytes(&data).unwrap(),
@@ -326,7 +336,7 @@ impl RaikouDissNetworkService {
 }
 
 impl NetworkService for RaikouDissNetworkService {
-    type Message = raikou::raikou::dissemination::fake::Message;
+    type Message = dissemination::fake::Message;
 
     async fn unicast(&self, data: Self::Message, target: raikou::framework::NodeId) {
         let epoch = self.epoch;
@@ -334,6 +344,8 @@ impl NetworkService for RaikouDissNetworkService {
         let network_sender = self.network_sender.clone();
 
         tokio::spawn(async move {
+            delay_injection().await;
+
             let raikou_msg = RaikouNetworkMessage {
                 epoch,
                 data: bcs::to_bytes(&data).unwrap(),
@@ -353,6 +365,8 @@ impl NetworkService for RaikouDissNetworkService {
         let network_sender = self.network_sender.clone();
 
         tokio::spawn(async move {
+            delay_injection().await;
+
             let raikou_msg = RaikouNetworkMessage {
                 epoch,
                 data: bcs::to_bytes(&data).unwrap(),

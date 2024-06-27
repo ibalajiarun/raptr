@@ -28,3 +28,6 @@ thread_local = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 siphasher = "1.0.1"
+
+[features]
+sim-types = []

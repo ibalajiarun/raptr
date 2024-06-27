@@ -111,6 +111,7 @@ fuzzing = [
     "aptos-safety-rules/testing",
 ]
 failpoints = ["fail/failpoints"]
+sim-types = ["raikou/sim-types"]
 
 [package.metadata.cargo-machete]
 ignored = ["serde_bytes"]

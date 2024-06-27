@@ -29,27 +29,65 @@ use crate::{
     },
 };
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize)]
 pub struct Batch {
+    data: BatchData,
+    #[serde(skip)]
+    digest: BatchHash,
+}
+
+#[derive(Clone, Hash, Serialize, Deserialize)]
+struct BatchData {
     author: NodeId,
     batch_id: BatchId,
-    digest: BatchHash,
     txns: Vec<Txn>,
+}
+
+impl<'de> Deserialize<'de> for Batch {
+    fn deserialize<D>(deserializer: D) -> Result<Batch, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let data = BatchData::deserialize(deserializer)?;
+        let digest = hash(&data);
+        Ok(Batch { data, digest })
+    }
+
+    fn deserialize_in_place<D>(deserializer: D, place: &mut Self) -> Result<(), D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        BatchData::deserialize_in_place(deserializer, &mut place.data)?;
+        place.digest = hash(&place.data);
+        Ok(())
+    }
 }
 
 impl Batch {
     pub fn get_info(&self) -> BatchInfo {
         BatchInfo {
-            author: self.author,
-            batch_id: self.batch_id,
+            author: self.author(),
+            batch_id: self.batch_id(),
             digest: self.digest.clone(),
         }
+    }
+
+    pub fn author(&self) -> NodeId {
+        self.data.author
+    }
+
+    pub fn batch_id(&self) -> BatchId {
+        self.data.batch_id
+    }
+
+    pub fn txns(&self) -> &[Txn] {
+        &self.data.txns
     }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Message {
-    Batch(BatchId, Vec<Txn>),
+    Batch(Batch),
     BatchStored(BatchId),
     AvailabilityCert(AC),
     // Fetch(BatchHash),
@@ -162,7 +200,7 @@ where
             .acs()
             .into_iter()
             .cloned()
-            .map(|ac| (ac.batch.digest.clone(), ac));
+            .map(|ac| (ac.info.digest.clone(), ac));
         self.inner.lock().await.acs.extend(new_acs);
     }
 
@@ -351,10 +389,17 @@ where
 
         upon timer [TimerEvent::NewBatch(batch_id)] {
             let txns = self.txns_iter.next().unwrap();
-            let digest = BatchHash(hash((self.node_id, batch_id, &txns)));
+            let digest = hash((self.node_id, batch_id, &txns));
 
             // Multicast a new batch
-            ctx.multicast(Message::Batch(batch_id, txns)).await;
+            let batch_data = BatchData {
+                author: self.node_id,
+                batch_id,
+                txns,
+            };
+            let batch = Batch { data: batch_data, digest: digest.clone() };
+
+            ctx.multicast(Message::Batch(batch)).await;
 
             self.batch_created_time[batch_id] = Instant::now();
             self.my_batches.insert(batch_id, digest.clone());
@@ -367,13 +412,10 @@ where
 
         // Upon receiving a batch, store it, reply with a BatchStored message,
         // and execute try_vote.
-        upon receive [Message::Batch(batch_id, txns)] from node [p] {
-            let batch = Batch {
-                author: p,
-                batch_id,
-                digest: BatchHash(hash((p, batch_id, &txns))),
-                txns,
-            };
+        upon receive [Message::Batch(batch)] from node [p] 'handler: {
+            if batch.author() != p {
+                break 'handler;
+            }
 
             // self.log_detail(format!(
             //     "Received batch #{} from node {} with digest {:#x}",
@@ -383,7 +425,7 @@ where
             // ));
 
             let digest = batch.digest.clone();
-            let batch_id = batch.batch_id;
+            let batch_id = batch.batch_id();
 
             if !self.batches.contains_key(&digest) {
                 self.penalty_tracker.on_new_batch(digest.clone());
@@ -406,7 +448,7 @@ where
 
             if self.batch_stored_votes[batch_id].count_ones() == self.config.ac_quorum {
                 ctx.multicast(Message::AvailabilityCert(AC {
-                    batch: self.batches[&self.my_batches[&batch_id]].get_info(),
+                    info: self.batches[&self.my_batches[&batch_id]].get_info(),
                     signers: self.batch_stored_votes[batch_id].clone(),
                 })).await;
             }
@@ -415,12 +457,12 @@ where
         upon receive [Message::AvailabilityCert(ac)] from [_any_node] {
             // Track the list of known uncommitted ACs
             // and the list of known uncommitted uncertified batches.
-            if !self.committed_batches.contains(&ac.batch.digest) {
-                self.new_acs.insert(ac.batch.digest.clone());
-                self.new_batches.remove(&ac.batch.digest);
+            if !self.committed_batches.contains(&ac.info.digest) {
+                self.new_acs.insert(ac.info.digest.clone());
+                self.new_batches.remove(&ac.info.digest);
             }
 
-            self.acs.insert(ac.batch.digest.clone(), ac.clone());
+            self.acs.insert(ac.info.digest.clone(), ac.clone());
         };
 
         // Penalty tracking

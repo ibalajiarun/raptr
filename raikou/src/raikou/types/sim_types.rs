@@ -2,24 +2,51 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    fmt::{Debug, Formatter},
     hash::{Hash, Hasher},
     sync::Arc,
 };
+use std::fmt::Formatter;
 use std::ops::Range;
 
 use bitvec::prelude::BitVec;
 use serde::{Deserialize, Serialize};
 use siphasher::sip::SipHasher13;
 
-use crate::{
-    framework::NodeId,
-    raikou::types::{BatchHash, Round},
-};
-use crate::raikou::types::Prefix;
+use crate::framework::NodeId;
+use crate::raikou::types::{BatchHash, Prefix, Round};
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Txn();
 
 // Unsafe crypto, for simulation and testing purposes only.
-pub type HashValue = u64;
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct HashValue(pub u64);
+
+impl HashValue {
+    pub fn zero() -> Self {
+        Self(0)
+    }
+}
+
+impl std::fmt::LowerHex for HashValue {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+fn hasher() -> SipHasher13 {
+    SipHasher13::new_with_keys(
+        13153606100881650582,
+        6006124427657524892
+    )
+}
+
+pub fn hash(x: impl Hash) -> HashValue {
+    // This hashing is obviously not secure, but it's good enough for simulation purposes.
+    let mut hasher = hasher();
+    x.hash(&mut hasher);
+    HashValue(hasher.finish())
+}
 
 // TODO: add signatures to the protocol
 // pub struct Signature(NodeId, HashValue);
@@ -35,17 +62,7 @@ pub struct BatchInfo {
     pub digest: BatchHash,
 }
 
-pub fn hash(x: impl Hash) -> HashValue {
-    // This hashing is obviously not secure, but it's good enough for simulation purposes.
-    let mut hasher = SipHasher13::new_with_keys(
-        13153606100881650582,
-        6006124427657524892
-    );
-    x.hash(&mut hasher);
-    hasher.finish()
-}
-
-impl Debug for BatchInfo {
+impl std::fmt::Debug for BatchInfo {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -58,8 +75,14 @@ impl Debug for BatchInfo {
 #[derive(Clone, Hash, Serialize, Deserialize)]
 pub struct AC {
     // In practice, this would be a hash pointer.
-    pub batch: BatchInfo,
+    pub info: BatchInfo,
     pub signers: BitVec,
+}
+
+impl AC {
+    pub fn info(&self) -> &BatchInfo {
+        &self.info
+    }
 }
 
 #[derive(Clone, Hash, Serialize, Deserialize)]
@@ -138,7 +161,7 @@ impl Payload {
         self.data
             .acs
             .iter()
-            .map(|ac| &ac.batch)
+            .map(|ac| &ac.info)
             .chain(self.sub_blocks().iter().flatten())
     }
 }

@@ -76,3 +76,6 @@ rand = { workspace = true }
 regex = { workspace = true }
 reqwest = { workspace = true }
 serde_yaml = { workspace = true }
+
+[features]
+sim-types = ["aptos-consensus/sim-types"]

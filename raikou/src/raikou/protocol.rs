@@ -12,7 +12,8 @@ use std::{
 use bitvec::vec::BitVec;
 use defaultmap::DefaultBTreeMap;
 use itertools::Itertools;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::ser::SerializeTuple;
 use tokio::time::Instant;
 
 use crate::{
@@ -29,44 +30,94 @@ use crate::{
     utils::kth_max_set::KthMaxSet,
 };
 
-#[derive(Clone, Hash, Serialize, Deserialize)]
+#[derive(Clone, Hash)]
 pub struct Block {
-    pub round: Round,
-    pub payload: Payload,
-    pub parent_qc: Option<QC>, // `None` only for the genesis block.
-    pub reason: RoundEnterReason,
-    pub digest: BlockHash,
+    data: BlockData,
+    digest: BlockHash,
+}
+
+impl Serialize for Block {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.data.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Block {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where D: Deserializer<'de>
+    {
+        let data = BlockData::deserialize(deserializer)?;
+        Ok(Block {
+            digest: hash(&data),
+            data,
+        })
+    }
+
+    fn deserialize_in_place<D>(deserializer: D, place: &mut Self) -> Result<(), D::Error>
+        where D: Deserializer<'de>
+    {
+        BlockData::deserialize_in_place(deserializer, &mut place.data)?;
+        place.digest = hash(&place.data);
+        Ok(())
+    }
+}
+
+#[derive(Clone, Hash, Serialize, Deserialize)]
+struct BlockData {
+    round: Round,
+    payload: Payload,
+    parent_qc: Option<QC>, // `None` only for the genesis block.
+    reason: RoundEnterReason,
 }
 
 impl Block {
     pub fn genesis() -> Self {
-        Block {
+        let data = BlockData {
             round: 0,
             payload: Payload::empty(-1, 999999999),
             parent_qc: None,
             reason: RoundEnterReason::Genesis,
-            digest: BlockHash::genesis(),
+        };
+        Block {
+            digest: hash(&data),
+            data,
         }
     }
 
+    pub fn round(&self) -> Round {
+        self.data.round
+    }
+
+    pub fn payload(&self) -> &Payload {
+        &self.data.payload
+    }
+
+    pub fn parent_qc(&self) -> Option<&QC> {
+        self.data.parent_qc.as_ref()
+    }
+
+    pub fn reason(&self) -> &RoundEnterReason {
+        &self.data.reason
+    }
+
     pub fn n_sub_blocks(&self) -> usize {
-        self.payload.sub_blocks().len()
+        self.payload().sub_blocks().len()
     }
 
     pub fn sub_block(&self, index: usize) -> &[BatchInfo] {
-        &self.payload.sub_blocks()[index]
+        &self.payload().sub_blocks()[index]
     }
 
     pub fn acs(&self) -> &Vec<AC> {
-        self.payload.acs()
+        self.payload().acs()
     }
 
     pub fn sub_blocks(&self) -> &[Vec<BatchInfo>] {
-        self.payload.sub_blocks()
+        self.payload().sub_blocks()
     }
 
     pub fn is_genesis(&self) -> bool {
-        self.round == 0
+        self.round() == 0
     }
 
     /// A non-genesis block is considered valid if:
@@ -83,20 +134,20 @@ impl Block {
             return true;
         }
 
-        let Some(parent_qc) = &self.parent_qc else {
+        let Some(parent_qc) = &self.parent_qc() else {
             return false;
         };
 
-        match &self.reason {
+        match &self.reason() {
             RoundEnterReason::Genesis => false, // Should not be used in a non-genesis block.
             RoundEnterReason::FullPrefixQC => {
-                parent_qc.round == self.round - 1 && parent_qc.is_full()
+                parent_qc.round == self.round() - 1 && parent_qc.is_full()
             },
             RoundEnterReason::CC(cc) => {
-                cc.round == self.round - 1 && parent_qc.sub_block_id() >= cc.highest_qc_id()
+                cc.round == self.round() - 1 && parent_qc.sub_block_id() >= cc.highest_qc_id()
             },
             RoundEnterReason::TC(tc) => {
-                tc.round == self.round - 1 && parent_qc.sub_block_id() >= tc.highest_qc_id()
+                tc.round == self.round() - 1 && parent_qc.sub_block_id() >= tc.highest_qc_id()
             },
         }
     }
@@ -139,7 +190,7 @@ impl QC {
             round: 0,
             prefix: 0,
             n_sub_blocks: 0,
-            block_digest: BlockHash::genesis(),
+            block_digest: BlockHash::zero(),  // TODO: FIXME
         }
     }
 
@@ -461,7 +512,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         // Two-chain commit rule:
         // If there exists two adjacent certified blocks B and B' in the chain with consecutive
         // round numbers, i.e., B'.r = B.r + 1, the replica commits B and all its ancestors.
-        if let Some(parent_qc) = self.blocks[&qc.block_digest].parent_qc.as_ref() {
+        if let Some(parent_qc) = self.blocks[&qc.block_digest].parent_qc() {
             if qc.round == parent_qc.round + 1 {
                 if !self.qcs_to_commit.contains_key(&parent_qc.sub_block_id()) {
                     self.qcs_to_commit.insert(
@@ -477,7 +528,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         assert!(!self.blocks.contains_key(&block.digest));
 
         self.blocks.insert(block.digest.clone(), block.clone());
-        let parent_qc = block.parent_qc.as_ref().unwrap();
+        let parent_qc = block.parent_qc().unwrap();
 
         if !self.known_qcs.contains(&parent_qc.sub_block_id()) {
             self.on_new_qc(parent_qc.clone(), ctx).await;
@@ -578,8 +629,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         }
 
         let parent = self.blocks[&qc.block_digest]
-            .parent_qc
-            .as_ref()
+            .parent_qc()
             .unwrap()
             .clone();
 
@@ -616,7 +666,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                 commit_reason,
             ));
 
-            res.push(block.payload.take_sub_blocks(self.committed_qc.prefix..qc.prefix));
+            res.push(block.payload().take_sub_blocks(self.committed_qc.prefix..qc.prefix));
 
             // Record the metrics
             let now = Instant::now();
@@ -648,18 +698,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                 commit_reason,
             ));
 
-            res.push(Payload::new(
-                qc.round,
-                self.config.leader(qc.round),
-                block.payload.acs().clone(),
-                block
-                    .payload
-                    .sub_blocks()
-                    .iter()
-                    .take(qc.prefix)
-                    .cloned()
-                    .collect_vec(),
-            ));
+            res.push(block.payload().with_prefix(qc.prefix));
 
             // Record the metrics
             let now = Instant::now();
@@ -703,9 +742,9 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             }
 
             let block = &self.blocks[&cur.block_digest];
-            uncommitted.extend(block.acs().iter().map(|ac| ac.batch.digest.clone()));
+            uncommitted.extend(block.acs().iter().map(|ac| ac.info().digest.clone()));
             uncommitted.extend(block.sub_blocks().iter().take(cur.prefix).flatten().map(|batch| batch.digest.clone()));
-            cur = block.parent_qc.as_ref().unwrap();
+            cur = block.parent_qc().unwrap();
         }
 
         if cur.prefix > self.committed_qc.prefix {
@@ -773,7 +812,7 @@ where
         // Nodes start the protocol by entering round 1.
         upon start {
             // self.blocks.insert(BlockHash::genesis(), Block::genesis());
-            self.satisfied_blocks.insert(BlockHash::genesis());
+            self.satisfied_blocks.insert(BlockHash::zero());  // TODO: FIXME
             self.satisfied_qcs.insert(QC::genesis().sub_block_id());
             self.known_qcs.insert(QC::genesis().sub_block_id());
             self.advance_r_ready(1, RoundEnterReason::FullPrefixQC, ctx).await;
@@ -802,13 +841,16 @@ where
                     self.uncommitted_batches(&parent_qc),
                 ).await;
 
-                let digest = BlockHash(hash((&round, &payload, &parent_qc, &self.enter_reason)));
-                let block = Block {
+                let block_data = BlockData {
                     round,
                     payload,
                     parent_qc: Some(parent_qc),
                     reason: self.enter_reason.clone(),
-                    digest: digest.clone(),
+                };
+
+                let block = Block {
+                    digest: hash(&block_data),
+                    data: block_data,
                 };
                 // self.leader_proposal.insert(round, digest.clone());
                 // self.blocks.insert(digest, block.clone());
@@ -836,19 +878,19 @@ where
         upon receive [Message::Propose(block)] from [leader] {
             if
                 block.is_valid()
-                && leader == self.config.leader(block.round)
-                && !self.leader_proposal.contains_key(&block.round)
+                && leader == self.config.leader(block.round())
+                && !self.leader_proposal.contains_key(&block.round())
             {
                 self.log_detail(format!(
                     "Received block {} proposed by node {}",
-                    block.round,
+                    block.round(),
                     leader
                 ));
 
-                self.leader_proposal.insert(block.round, block.digest.clone());
+                self.leader_proposal.insert(block.round(), block.digest.clone());
                 self.on_new_block(&block, ctx).await;
 
-                let Block { round, payload, reason, .. } = block;
+                let BlockData { round, payload, reason, .. } = block.data;
                 self.advance_r_ready(round, reason, ctx).await;
 
                 ctx.notify(
@@ -856,24 +898,24 @@ where
                     BlockReceived::new(leader, round, payload),
                 ).await;
 
-                if block.round < self.r_cur {
+                if round < self.r_cur {
                     self.log_detail(format!(
                         "Ignoring proposal of block {} by node {} because already in round {}",
-                        block.round,
+                        round,
                         leader,
                         self.r_cur,
                     ));
-                } else if block.round <= self.r_timeout {
+                } else if round <= self.r_timeout {
                     self.log_detail(format!(
                         "Ignoring proposal of block {} by node {} because already timed out round {}",
-                        block.round,
+                        round,
                         leader,
                         self.r_timeout,
                     ));
                 } else {
                     self.log_detail(format!(
                         "Processing proposal of block {} by node {}",
-                        block.round,
+                        round,
                         leader,
                     ));
 

@@ -34,7 +34,7 @@ use raikou::{
         RaikouNode,
     },
 };
-use raikou::framework::module_network::ModuleNetworkService;
+use raikou::framework::module_network::{ModuleId, ModuleNetworkService};
 use raikou::framework::NodeId;
 
 use crate::{
@@ -144,6 +144,7 @@ impl RaikouManager {
             payload_client,
             consensus_config,
             payload_manager,
+            diss_module_network,
         ).await;
 
         let node = Arc::new(tokio::sync::Mutex::new(RaikouNode::new(
@@ -177,14 +178,22 @@ impl RaikouManager {
         payload_client: Arc<dyn PayloadClient>,
         consensus_config: ConsensusConfig,
         payload_manager: Arc<PayloadManager>,
+        module_network: ModuleNetworkService
     ) -> impl DisseminationLayer {
         let dissemination = RaikouQSDisseminationLayer {
             payload_client,
             config: consensus_config,
             payload_manager,
+            module_id: module_network.module_id(),
         };
 
-        // TODO: spawn the task?
+        // Ignore all module network messages.
+        tokio::spawn(async move {
+            let mut module_network = module_network;
+            loop {
+                let _ = module_network.recv().await;
+            }
+        });
 
         dissemination
     }
@@ -451,6 +460,7 @@ struct RaikouQSDisseminationLayer {
     payload_client: Arc<dyn PayloadClient>,
     config: ConsensusConfig,
     payload_manager: Arc<PayloadManager>,
+    module_id: ModuleId,
 }
 
 #[cfg(any(feature = "force-aptos-types", not(feature = "sim-types")))]

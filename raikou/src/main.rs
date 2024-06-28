@@ -1,19 +1,21 @@
 // Copyright (c) Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
+use raikou::{
+    delays::{heterogeneous_symmetric_delay, DelayFunction},
+    framework::{
+        module_network::ModuleNetwork,
+        network::{InjectedLocalNetwork, Network, NetworkInjection, NetworkService},
+        timer::{clock_skew_injection, InjectedTimerService},
+        NodeId, Protocol,
+    },
+    leader_schedule::round_robin,
+    metrics,
+    raikou::{dissemination, dissemination::fake::FakeDisseminationLayer, RaikouNode},
+};
+use rand::{thread_rng, Rng};
 use std::{iter, sync::Arc, time::Duration};
-
-use rand::{Rng, thread_rng};
 use tokio::{spawn, time, time::Instant};
-
-use raikou::{delays::{DelayFunction, heterogeneous_symmetric_delay}, framework::{
-    module_network::ModuleNetwork,
-    network::{InjectedLocalNetwork, Network, NetworkInjection},
-    NodeId,
-    Protocol, timer::{clock_skew_injection, InjectedTimerService},
-}, leader_schedule::round_robin, metrics, raikou::{dissemination, dissemination::fake::FakeDisseminationLayer}};
-use raikou::framework::network::NetworkService;
-use raikou::raikou::RaikouNode;
 
 type Slot = i64;
 
@@ -633,7 +635,7 @@ async fn test_raikou(
     let config = raikou::raikou::Config {
         n_nodes,
         f,
-        storage_requirement: f + 1,  // f + (f / 2 + 1),
+        storage_requirement: f + 1, // f + (f / 2 + 1),
         leader_timeout: JOLTEON_TIMEOUT,
         leader_schedule: round_robin(n_nodes),
         delta: Duration::from_secs_f64(delta),

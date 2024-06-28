@@ -769,7 +769,7 @@ impl NetworkTask {
                         | ConsensusMsg::SyncInfo(_)
                         | ConsensusMsg::EpochRetrievalRequest(_)
                         | ConsensusMsg::RaikouMessage(_)
-                            | ConsensusMsg::RaikouDissMessage(_)
+                        | ConsensusMsg::RaikouDissMessage(_)
                         | ConsensusMsg::EpochChangeProof(_)) => {
                             if let ConsensusMsg::ProposalMsg(proposal) = &consensus_msg {
                                 observe_block(

@@ -7,12 +7,12 @@ use crate::{
 };
 use itertools::Itertools;
 use rand::{seq::SliceRandom, thread_rng};
+use serde::{Deserialize, Serialize};
 use std::{
     cmp::{max, min},
     collections::{BTreeMap, BTreeSet},
     time::Duration,
 };
-use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 
 trait Micros {
@@ -31,7 +31,6 @@ impl Micros for Duration {
         Duration::from_micros(micros as u64)
     }
 }
-
 
 #[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
 /// Penalty tracker report for the optimistically proposed batches from a single node for
@@ -417,7 +416,11 @@ impl PenaltyTracker {
             .collect()
     }
 
-    pub fn prepare_new_block(&mut self, round: Round, batches: Vec<BatchInfo>) -> Vec<Vec<BatchInfo>> {
+    pub fn prepare_new_block(
+        &mut self,
+        round: Round,
+        batches: Vec<BatchInfo>,
+    ) -> Vec<Vec<BatchInfo>> {
         if !self.config.enable {
             self.block_prepare_time.insert(round, Instant::now());
             let now = Instant::now();
@@ -425,7 +428,8 @@ impl PenaltyTracker {
             let batches = batches
                 .into_iter()
                 .filter(|batch_info| {
-                    (now - self.batch_receive_time[&batch_info.digest]) < self.config.batch_expiration_time
+                    (now - self.batch_receive_time[&batch_info.digest])
+                        < self.config.batch_expiration_time
                 })
                 .sorted_by_key(|batch_info| self.batch_receive_time[&batch_info.digest])
                 .collect_vec();
@@ -451,7 +455,8 @@ impl PenaltyTracker {
         let batches_to_propose: Vec<BatchInfo> = batches
             .into_iter()
             .filter(|batch_info| {
-                (now - self.batch_receive_time[&batch_info.digest]) < self.config.batch_expiration_time
+                (now - self.batch_receive_time[&batch_info.digest])
+                    < self.config.batch_expiration_time
             })
             .map(|batch_info| {
                 let receive_time = self.batch_receive_time[&batch_info.digest];

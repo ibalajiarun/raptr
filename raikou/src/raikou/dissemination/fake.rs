@@ -1,34 +1,34 @@
 // Copyright (c) Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::{
+    framework::{
+        module_network::ModuleId, network::NetworkService, timer::TimerService, NodeId, Protocol,
+    },
+    metrics,
+    metrics::Sender,
+    protocol,
+    raikou::{
+        dissemination::{
+            penalty_tracker,
+            penalty_tracker::{PenaltyTracker, PenaltyTrackerReports},
+            BlockReceived, DisseminationLayer, Kill,
+        },
+        types::*,
+    },
+};
+use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
+use bitvec::prelude::BitVec;
+use defaultmap::DefaultBTreeMap;
+use itertools::Itertools;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     future::Future,
     sync::Arc,
     time::Duration,
 };
-
-use bitvec::prelude::BitVec;
-use defaultmap::DefaultBTreeMap;
-use itertools::Itertools;
-use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
-
-use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
-
-use crate::{
-    framework::{
-        module_network::ModuleId, network::NetworkService, NodeId, Protocol, timer::TimerService,
-    },
-    metrics,
-    metrics::Sender,
-    protocol,
-    raikou::{
-        dissemination::{BlockReceived, DisseminationLayer, Kill, penalty_tracker},
-        dissemination::penalty_tracker::{PenaltyTracker, PenaltyTrackerReports},
-        types::*,
-    },
-};
 
 #[derive(Clone, Serialize)]
 pub struct Batch {
@@ -213,9 +213,7 @@ where
         {
             inner.log_detail(format!(
                 "Missing batch #{} from node {} with digest {:#x}",
-                missing.batch_id,
-                missing.author,
-                missing.digest,
+                missing.batch_id, missing.author, missing.digest,
             ));
             false
         } else {

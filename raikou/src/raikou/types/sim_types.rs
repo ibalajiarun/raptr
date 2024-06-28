@@ -1,19 +1,19 @@
 // Copyright (c) Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    hash::{Hash, Hasher},
-    sync::Arc,
+use crate::{
+    framework::NodeId,
+    raikou::types::{BatchHash, Prefix, Round},
 };
-use std::fmt::Formatter;
-use std::ops::Range;
-
 use bitvec::prelude::BitVec;
 use serde::{Deserialize, Serialize};
 use siphasher::sip::SipHasher13;
-
-use crate::framework::NodeId;
-use crate::raikou::types::{BatchHash, Prefix, Round};
+use std::{
+    fmt::Formatter,
+    hash::{Hash, Hasher},
+    ops::Range,
+    sync::Arc,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Txn();
@@ -35,10 +35,7 @@ impl std::fmt::LowerHex for HashValue {
 }
 
 fn hasher() -> SipHasher13 {
-    SipHasher13::new_with_keys(
-        13153606100881650582,
-        6006124427657524892
-    )
+    SipHasher13::new_with_keys(13153606100881650582, 6006124427657524892)
 }
 
 pub fn hash(x: impl Hash) -> HashValue {
@@ -101,13 +98,21 @@ struct PayloadData {
 }
 
 impl Payload {
-    pub fn new(round: Round, leader: NodeId, acs: Vec<AC>, sub_blocks: Vec<Vec<BatchInfo>>) -> Self {
+    pub fn new(
+        round: Round,
+        leader: NodeId,
+        acs: Vec<AC>,
+        sub_blocks: Vec<Vec<BatchInfo>>,
+    ) -> Self {
         let n_sub_blocks = sub_blocks.len();
 
         Self {
             round,
             leader,
-            data: Arc::new(PayloadData { acs, batches: sub_blocks }),
+            data: Arc::new(PayloadData {
+                acs,
+                batches: sub_blocks,
+            }),
             include_acs: true,
             sub_blocks: 0..n_sub_blocks,
         }

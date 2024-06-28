@@ -1,32 +1,25 @@
 // Copyright (c) Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    collections::HashMap
-    ,
-    sync::Arc,
-    time::Duration,
+use crate::{
+    network::NetworkSender, network_interface::ConsensusMsg, payload_client::PayloadClient,
+    payload_manager::PayloadManager, transaction_filter::TransactionFilter,
 };
-use std::future::Future;
-use std::time::{SystemTime, UNIX_EPOCH};
-
+use ::raikou::leader_schedule::round_robin;
+use aptos_config::config::ConsensusConfig;
+use aptos_consensus_types::{
+    common::{Author, PayloadFilter},
+    proof_of_store::BatchInfo,
+};
+use aptos_types::epoch_state::EpochState;
 use futures::StreamExt;
 use futures_channel::oneshot;
-use rand::{Rng, thread_rng};
-use serde::{Deserialize, Serialize};
-use tokio::time::Instant;
-
-use ::raikou::{leader_schedule::round_robin};
-use aptos_config::config::ConsensusConfig;
-use aptos_consensus_types::common::{Author, PayloadFilter};
-use aptos_consensus_types::proof_of_store::BatchInfo;
-use aptos_types::epoch_state::EpochState;
 use raikou::{
     framework::{
-        module_network::ModuleNetwork,
+        module_network::{ModuleId, ModuleNetwork, ModuleNetworkService},
         network::{Network, NetworkService},
-        Protocol,
         timer::LocalTimerService,
+        NodeId, Protocol,
     },
     metrics,
     raikou::{
@@ -34,16 +27,15 @@ use raikou::{
         RaikouNode,
     },
 };
-use raikou::framework::module_network::{ModuleId, ModuleNetworkService};
-use raikou::framework::NodeId;
-
-use crate::{
-    network::NetworkSender,
-    network_interface::ConsensusMsg,
-    payload_client::PayloadClient,
-    payload_manager::PayloadManager,
+use rand::{thread_rng, Rng};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashMap,
+    future::Future,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use crate::transaction_filter::TransactionFilter;
+use tokio::time::Instant;
 
 const JOLTEON_TIMEOUT: u32 = 3; // in Deltas
 
@@ -102,7 +94,7 @@ impl RaikouManager {
         let config = raikou::raikou::Config {
             n_nodes,
             f,
-            storage_requirement: f + 1,  // f + (f / 2 + 1),
+            storage_requirement: f + 1, // f + (f / 2 + 1),
             leader_timeout: JOLTEON_TIMEOUT,
             leader_schedule: round_robin(n_nodes),
             delta: Duration::from_secs_f64(delta),
@@ -137,7 +129,8 @@ impl RaikouManager {
             epoch_state.clone(),
             diss_rx,
             network_sender.clone(),
-        ).await;
+        )
+        .await;
 
         #[cfg(any(feature = "force-aptos-types", not(feature = "sim-types")))]
         let dissemination = Self::spawn_qs_dissemination_layer(
@@ -145,7 +138,8 @@ impl RaikouManager {
             consensus_config,
             payload_manager,
             diss_module_network,
-        ).await;
+        )
+        .await;
 
         let node = Arc::new(tokio::sync::Mutex::new(RaikouNode::new(
             node_id,
@@ -178,7 +172,7 @@ impl RaikouManager {
         payload_client: Arc<dyn PayloadClient>,
         consensus_config: ConsensusConfig,
         payload_manager: Arc<PayloadManager>,
-        module_network: ModuleNetworkService
+        module_network: ModuleNetworkService,
     ) -> impl DisseminationLayer {
         let dissemination = RaikouQSDisseminationLayer {
             payload_client,
@@ -207,7 +201,10 @@ impl RaikouManager {
         delta: f64,
         start_time: Instant,
         epoch_state: Arc<EpochState>,
-        diss_rx: aptos_channels::aptos_channel::Receiver<aptos_types::PeerId, (Author, RaikouNetworkMessage)>,
+        diss_rx: aptos_channels::aptos_channel::Receiver<
+            aptos_types::PeerId,
+            (Author, RaikouNetworkMessage),
+        >,
         network_sender: Arc<NetworkSender>,
     ) -> impl DisseminationLayer {
         let diss_network_service =
@@ -326,7 +323,9 @@ impl NetworkService for RaikouNetworkService {
     async fn multicast(&self, data: Self::Message) {
         let epoch = self.epoch;
         // let remote_peer_ids = self.all_peer_addresses.clone();
-        let remote_peer_ids = (0..self.n_nodes).map(|i| *self.index_to_address.get(&i).unwrap()).collect();
+        let remote_peer_ids = (0..self.n_nodes)
+            .map(|i| *self.index_to_address.get(&i).unwrap())
+            .collect();
         let network_sender = self.network_sender.clone();
 
         tokio::spawn(async move {
@@ -425,7 +424,9 @@ impl NetworkService for RaikouDissNetworkService {
     async fn multicast(&self, data: Self::Message) {
         let epoch = self.epoch;
         // let remote_peer_ids = self.all_peer_addresses.clone();
-        let remote_peer_ids = (0..self.n_nodes).map(|i| *self.index_to_address.get(&i).unwrap()).collect();
+        let remote_peer_ids = (0..self.n_nodes)
+            .map(|i| *self.index_to_address.get(&i).unwrap())
+            .collect();
         let network_sender = self.network_sender.clone();
 
         tokio::spawn(async move {

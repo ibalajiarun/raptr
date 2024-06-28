@@ -1643,7 +1643,8 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
 
     fn forward_event(
         mut raikou_diss_tx: Option<
-            aptos_channel::Sender<AccountAddress, (AccountAddress, RaikouNetworkMessage)>>,
+            aptos_channel::Sender<AccountAddress, (AccountAddress, RaikouNetworkMessage)>,
+        >,
         mut raikou_tx: Option<
             aptos_channel::Sender<AccountAddress, (AccountAddress, RaikouNetworkMessage)>,
         >,
@@ -1677,7 +1678,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
                 } else {
                     panic!("channel not initialized");
                 }
-            }
+            },
             quorum_store_event @ (VerifiedEvent::SignedBatchInfo(_)
             | VerifiedEvent::ProofOfStoreMsg(_)
             | VerifiedEvent::BatchMsg(_)) => {

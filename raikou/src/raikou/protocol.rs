@@ -1,22 +1,6 @@
 // Copyright (c) Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    cmp::{max, max_by, max_by_key, min, Ordering},
-    collections::{BTreeMap, BTreeSet, HashSet},
-    fmt::{Debug, Formatter},
-    sync::Arc,
-    time::Duration,
-};
-
-use bitvec::vec::BitVec;
-use defaultmap::DefaultBTreeMap;
-use itertools::Itertools;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde::ser::SerializeTuple;
-use tokio::time::Instant;
-use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
-
 use crate::{
     framework::{ContextFor, NodeId, Protocol},
     leader_schedule::LeaderSchedule,
@@ -30,6 +14,19 @@ use crate::{
     },
     utils::kth_max_set::KthMaxSet,
 };
+use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
+use bitvec::vec::BitVec;
+use defaultmap::DefaultBTreeMap;
+use itertools::Itertools;
+use serde::{ser::SerializeTuple, Deserialize, Deserializer, Serialize, Serializer};
+use std::{
+    cmp::{max, max_by, max_by_key, min, Ordering},
+    collections::{BTreeMap, BTreeSet, HashSet},
+    fmt::{Debug, Formatter},
+    sync::Arc,
+    time::Duration,
+};
+use tokio::time::Instant;
 
 #[derive(Clone, Serialize)]
 pub struct Block {
@@ -40,7 +37,8 @@ pub struct Block {
 
 impl<'de> Deserialize<'de> for Block {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where D: Deserializer<'de>
+    where
+        D: Deserializer<'de>,
     {
         let data = BlockData::deserialize(deserializer)?;
         Ok(Block {
@@ -50,7 +48,8 @@ impl<'de> Deserialize<'de> for Block {
     }
 
     fn deserialize_in_place<D>(deserializer: D, place: &mut Self) -> Result<(), D::Error>
-        where D: Deserializer<'de>
+    where
+        D: Deserializer<'de>,
     {
         BlockData::deserialize_in_place(deserializer, &mut place.data)?;
         place.digest = hash(&place.data);
@@ -58,7 +57,10 @@ impl<'de> Deserialize<'de> for Block {
     }
 }
 
-#[cfg_attr(all(feature = "sim-types", not(feature = "force-aptos-types")), derive(Hash))]
+#[cfg_attr(
+    all(feature = "sim-types", not(feature = "force-aptos-types")),
+    derive(Hash)
+)]
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
 struct BlockData {
     round: Round,
@@ -158,7 +160,9 @@ pub struct QC {
     block_digest: BlockHash,
 }
 
-#[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Serialize, Deserialize)]
+#[derive(
+    Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Serialize, Deserialize,
+)]
 pub struct SubBlockId {
     round: Round,
     prefix: Prefix,
@@ -187,7 +191,7 @@ impl QC {
             round: 0,
             prefix: 0,
             n_sub_blocks: 0,
-            block_digest: BlockHash::zero(),  // TODO: FIXME
+            block_digest: BlockHash::zero(), // TODO: FIXME
         }
     }
 
@@ -333,7 +337,7 @@ pub enum TimerEvent {
     // Other
     EndOfRun,
     Status,
-    RoundSync
+    RoundSync,
 }
 
 #[derive(Clone, Debug)]
@@ -625,10 +629,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             return vec![];
         }
 
-        let parent = self.blocks[&qc.block_digest]
-            .parent_qc()
-            .unwrap()
-            .clone();
+        let parent = self.blocks[&qc.block_digest].parent_qc().unwrap().clone();
 
         // Check for safety violations:
         if qc.round > self.committed_qc.round && parent.round < self.committed_qc.round {
@@ -655,15 +656,15 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                 self.committed_qc.prefix,
                 qc.prefix,
                 block.n_sub_blocks(),
-                if qc.is_full() {
-                    " (full)"
-                } else {
-                    ""
-                },
+                if qc.is_full() { " (full)" } else { "" },
                 commit_reason,
             ));
 
-            res.push(block.payload().take_sub_blocks(self.committed_qc.prefix..qc.prefix));
+            res.push(
+                block
+                    .payload()
+                    .take_sub_blocks(self.committed_qc.prefix..qc.prefix),
+            );
 
             // Record the metrics
             let now = Instant::now();
@@ -685,13 +686,14 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                 block.acs().len(),
                 qc.prefix,
                 block.n_sub_blocks(),
-                block.sub_blocks().iter().take(qc.prefix).map(|b| b.len()).sum::<usize>(),
+                block
+                    .sub_blocks()
+                    .iter()
+                    .take(qc.prefix)
+                    .map(|b| b.len())
+                    .sum::<usize>(),
                 block.sub_blocks().iter().map(|b| b.len()).sum::<usize>(),
-                if qc.is_full() {
-                    " (full)"
-                } else {
-                    ""
-                },
+                if qc.is_full() { " (full)" } else { "" },
                 commit_reason,
             ));
 
@@ -740,7 +742,14 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
 
             let block = &self.blocks[&cur.block_digest];
             uncommitted.extend(block.acs().iter().map(|ac| ac.info().digest.clone()));
-            uncommitted.extend(block.sub_blocks().iter().take(cur.prefix).flatten().map(|batch| batch.digest.clone()));
+            uncommitted.extend(
+                block
+                    .sub_blocks()
+                    .iter()
+                    .take(cur.prefix)
+                    .flatten()
+                    .map(|batch| batch.digest.clone()),
+            );
             cur = block.parent_qc().unwrap();
         }
 

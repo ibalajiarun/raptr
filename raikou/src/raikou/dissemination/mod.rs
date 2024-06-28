@@ -1,10 +1,17 @@
+// Copyright (c) Aptos Foundation
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::{
     framework::{module_network::ModuleId, NamedAny, NodeId},
     raikou::types::*,
 };
 use std::{collections::HashSet, future::Future};
 
-pub mod fake;
+#[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
+pub mod fake;// pub mod multichain_raikou;
+
+#[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
+pub mod penalty_tracker;
 
 /// Event sent by the consensus module to the dissemination layer to notify of a new block.
 pub struct BlockReceived {
@@ -50,7 +57,7 @@ pub trait DisseminationLayer: Send + Sync + 'static {
 
     fn prefetch_payload_data(&self, payload: Payload) -> impl Future<Output = ()> + Send;
 
-    fn check_stored_all(&self, batch: &[BatchInfo]) -> impl Future<Output = bool> + Send;
+    fn check_stored_all(&self, batches: &[BatchInfo]) -> impl Future<Output = bool> + Send;
 
     fn notify_commit(&self, payloads: Vec<Payload>) -> impl Future<Output = ()> + Send;
 }

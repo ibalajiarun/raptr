@@ -58,7 +58,8 @@ impl<'de> Deserialize<'de> for Block {
     }
 }
 
-#[derive(Clone, Hash, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
+#[cfg_attr(all(feature = "sim-types", not(feature = "force-aptos-types")), derive(Hash))]
+#[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
 struct BlockData {
     round: Round,
     payload: Payload,

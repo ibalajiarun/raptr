@@ -13,6 +13,7 @@ use defaultmap::DefaultBTreeMap;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
+
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
 
 use crate::{
@@ -23,9 +24,8 @@ use crate::{
     metrics::Sender,
     protocol,
     raikou::{
-        dissemination::{BlockReceived, DisseminationLayer, Kill},
-        penalty_tracker,
-        penalty_tracker::{PenaltyTracker, PenaltyTrackerReports},
+        dissemination::{BlockReceived, DisseminationLayer, Kill, penalty_tracker},
+        dissemination::penalty_tracker::{PenaltyTracker, PenaltyTrackerReports},
         types::*,
     },
 };

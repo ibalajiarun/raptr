@@ -20,12 +20,12 @@ pub type AC = aptos_consensus_types::proof_of_store::ProofOfStore;
 
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
 pub struct Payload {
-    round: Round,
-    leader: NodeId,
-    inner: aptos_consensus_types::common::Payload,
+    pub round: Round,
+    pub leader: NodeId,
+    pub inner: aptos_consensus_types::common::Payload,
 }
 
-pub fn hash(x: impl CryptoHash) -> HashValue {
+pub fn hash(x: &impl CryptoHash) -> HashValue {
     x.hash()
 }
 

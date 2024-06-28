@@ -79,3 +79,4 @@ serde_yaml = { workspace = true }
 
 [features]
 sim-types = ["aptos-consensus/sim-types"]
+force-aptos-types = ["aptos-consensus/force-aptos-types"]

@@ -112,6 +112,7 @@ fuzzing = [
 ]
 failpoints = ["fail/failpoints"]
 sim-types = ["raikou/sim-types"]
+force-aptos-types = ["raikou/force-aptos-types"]
 
 [package.metadata.cargo-machete]
 ignored = ["serde_bytes"]

@@ -4,10 +4,10 @@
 //! Use `--features sim-types` to run with simulator types.
 //! Otherwise, aptos types will be used.
 
-#[cfg(not(feature = "sim-types"))]
+#[cfg(any(not(feature = "sim-types"), feature = "force-aptos-types"))]
 pub use aptos_types::*;
 
-#[cfg(feature = "sim-types")]
+#[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
 pub use sim_types::*;
 
 pub use common::*;

@@ -15,6 +15,7 @@ use itertools::Itertools;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde::ser::SerializeTuple;
 use tokio::time::Instant;
+use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
 
 use crate::{
     framework::{ContextFor, NodeId, Protocol},
@@ -30,16 +31,11 @@ use crate::{
     utils::kth_max_set::KthMaxSet,
 };
 
-#[derive(Clone, Hash)]
+#[derive(Clone, Serialize)]
 pub struct Block {
     data: BlockData,
+    #[serde(skip)]
     digest: BlockHash,
-}
-
-impl Serialize for Block {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.data.serialize(serializer)
-    }
 }
 
 impl<'de> Deserialize<'de> for Block {
@@ -62,7 +58,7 @@ impl<'de> Deserialize<'de> for Block {
     }
 }
 
-#[derive(Clone, Hash, Serialize, Deserialize)]
+#[derive(Clone, Hash, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
 struct BlockData {
     round: Round,
     payload: Payload,

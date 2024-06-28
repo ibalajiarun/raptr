@@ -13,6 +13,7 @@ use defaultmap::DefaultBTreeMap;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
+use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
 
 use crate::{
     framework::{
@@ -36,7 +37,7 @@ pub struct Batch {
     digest: BatchHash,
 }
 
-#[derive(Clone, Hash, Serialize, Deserialize)]
+#[derive(Clone, Hash, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
 struct BatchData {
     author: NodeId,
     batch_id: BatchId,

@@ -1,24 +1,32 @@
 // Copyright (c) Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
-use std::hash::Hasher;
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
+
 use serde::{Deserialize, Serialize};
+
+use aptos_crypto::hash::{CryptoHash, CryptoHasher};
+use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
 
 use crate::framework::NodeId;
 use crate::raikou::types::common::{Prefix, Round};
 
-pub type Txn = aptos_types::transaction::Transaction;
 pub use aptos_consensus_types::proof_of_store::BatchId;
-pub use aptos_crypto::hash::HashValue;
 pub use aptos_consensus_types::proof_of_store::BatchInfo;
+pub use aptos_crypto::hash::HashValue;
+pub type Txn = aptos_types::transaction::Transaction;
 pub type AC = aptos_consensus_types::proof_of_store::ProofOfStore;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
 pub struct Payload {
     round: Round,
     leader: NodeId,
     inner: aptos_consensus_types::common::Payload,
+}
+
+pub fn hash(x: impl CryptoHash) -> HashValue {
+    x.hash()
 }
 
 // impl `Hash` just for compatibility with `sim_types`.

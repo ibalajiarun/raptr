@@ -1921,7 +1921,7 @@ impl AccountTransactionsWithProof {
 /// transaction.
 #[allow(clippy::large_enum_variant)]
 #[cfg_attr(any(test, feature = "fuzzing"), derive(Arbitrary))]
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, CryptoHasher, BCSCryptoHash)]
+#[derive(Clone, Hash, Debug, Eq, PartialEq, Serialize, Deserialize, CryptoHasher, BCSCryptoHash)]
 pub enum Transaction {
     /// Transaction submitted by the user. e.g: P2P payment transaction, publishing module
     /// transaction, etc.

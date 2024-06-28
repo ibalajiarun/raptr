@@ -13192,8 +13192,10 @@ version = "0.1.0"
 dependencies = [
  "aptos-consensus-types",
  "aptos-crypto",
+ "aptos-crypto-derive",
  "aptos-logger",
  "aptos-types",
+ "bcs 0.1.4",
  "bitvec 1.0.1",
  "defaultmap",
  "env_logger",

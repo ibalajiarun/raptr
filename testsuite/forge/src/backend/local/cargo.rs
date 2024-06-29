@@ -190,6 +190,10 @@ where
     let mut args = cargo_build_common_args();
     // build the aptos-node package directly to avoid feature unification issues
     args.push("--package=aptos-node");
+
+    #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
+    args.append(&mut vec!["--features", "sim-types"]);
+
     info!("Compiling with cargo args: {:?}", args);
     let output = Command::new("cargo")
         .current_dir(directory)

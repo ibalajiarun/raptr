@@ -78,5 +78,5 @@ reqwest = { workspace = true }
 serde_yaml = { workspace = true }
 
 [features]
-sim-types = ["aptos-consensus/sim-types"]
-force-aptos-types = ["aptos-consensus/force-aptos-types"]
+sim-types = ["aptos-consensus/sim-types", "aptos-forge/sim-types"]
+force-aptos-types = ["aptos-consensus/force-aptos-types", "aptos-forge/force-aptos-types"]

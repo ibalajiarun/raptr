@@ -10,10 +10,8 @@ pub use aptos_crypto::hash::HashValue;
 use aptos_crypto::hash::{CryptoHash, CryptoHasher};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
 use serde::{Deserialize, Serialize};
-use std::{
-    hash::{Hash, Hasher},
-    ops::Range,
-};
+use std::ops::Range;
+
 pub type Txn = aptos_types::transaction::Transaction;
 pub type AC = aptos_consensus_types::proof_of_store::ProofOfStore;
 
@@ -26,13 +24,6 @@ pub struct Payload {
 
 pub fn hash(x: &impl CryptoHash) -> HashValue {
     x.hash()
-}
-
-// impl `Hash` just for compatibility with `sim_types`.
-impl std::hash::Hash for Payload {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        unimplemented!()
-    }
 }
 
 impl Payload {

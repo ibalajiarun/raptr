@@ -10,6 +10,8 @@ pub use common::*;
 #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
 pub use sim_types::*;
 
+#[cfg(any(not(feature = "sim-types"), feature = "force-aptos-types"))]
 mod aptos_types;
 mod common;
+#[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
 mod sim_types;

@@ -18,11 +18,14 @@ use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
 use bitvec::vec::BitVec;
 use defaultmap::DefaultBTreeMap;
 use itertools::Itertools;
+use nanovec::NanoArrayBit;
+use rand::prelude::SliceRandom;
 use serde::{ser::SerializeTuple, Deserialize, Deserializer, Serialize, Serializer};
 use std::{
     cmp::{max, max_by, max_by_key, min, Ordering},
     collections::{BTreeMap, BTreeSet, HashSet},
     fmt::{Debug, Formatter},
+    num::NonZeroU8,
     sync::Arc,
     time::Duration,
 };
@@ -158,6 +161,51 @@ pub struct QC {
     prefix: Prefix,
     n_sub_blocks: usize,
     block_digest: BlockHash,
+
+    signature_data: QcSignatureData,
+}
+
+impl QC {
+    pub fn signers(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.signature_data.get().map(|(node_id, _prefix)| node_id)
+    }
+}
+
+#[derive(Clone, Hash, Serialize, Deserialize)]
+struct QcSignatureData {
+    len: u8,
+    #[serde(with = "serde_bytes")]
+    repr: Vec<u8>,
+}
+
+impl QcSignatureData {
+    pub fn new(votes: &Vec<(NodeId, Prefix)>, n_nodes: usize) -> Self {
+        let mut repr = vec![0; (n_nodes + 1) / 2];
+        for &(node_id, prefix) in votes {
+            let byte_id = node_id / 2;
+            let shift = (node_id % 2) * 4;
+            repr[byte_id] |= (prefix as u8) << shift;
+        }
+
+        QcSignatureData {
+            len: n_nodes as u8,
+            repr,
+        }
+    }
+
+    pub fn get(&self) -> impl Iterator<Item = (NodeId, Prefix)> + '_ {
+        self.repr
+            .iter()
+            .copied()
+            .enumerate()
+            .flat_map(|(byte_id, byte)| {
+                [
+                    (byte_id * 2 + 1, (byte & 0x0F) as Prefix),
+                    (byte_id * 2, (byte >> 4) as Prefix),
+                ]
+            })
+            .filter(|(id, prefix)| *id < (self.len as usize) && *prefix != 0x0F)
+    }
 }
 
 #[derive(
@@ -191,7 +239,8 @@ impl QC {
             round: 0,
             prefix: 0,
             n_sub_blocks: 0,
-            block_digest: BlockHash::zero(), // TODO: FIXME
+            block_digest: Block::genesis().digest,
+            signature_data: QcSignatureData::new(&vec![], 0),
         }
     }
 
@@ -333,6 +382,7 @@ pub enum TimerEvent {
     // Consensus
     QcVote(Round),
     Timeout(Round),
+    FetchBlock(BlockHash, Vec<NodeId>),
 
     // Other
     EndOfRun,
@@ -363,6 +413,8 @@ pub struct Config<S> {
     /// if it doesn't have all the batches yet.
     pub extra_wait_before_qc_vote: Duration,
     pub extra_wait_before_commit_vote: Duration,
+
+    pub block_fetch_multiplicity: usize,
 
     pub round_sync_interval: Duration,
 
@@ -450,6 +502,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         metrics: Metrics,
     ) -> Self {
         let quorum = config.quorum();
+        assert!(config.block_fetch_multiplicity <= quorum);
 
         RaikouNode {
             node_id: id,
@@ -572,6 +625,12 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         if self.satisfied_blocks.contains(&new_qc.block_digest) {
             self.on_new_satisfied_qc(new_qc);
         } else {
+            if !self.pending_qcs.contains_key(&new_qc.block_digest) {
+                ctx.set_timer(
+                    Duration::ZERO,
+                    TimerEvent::FetchBlock(new_qc.block_digest.clone(), new_qc.signers().collect()),
+                )
+            }
             self.pending_qcs[new_qc.block_digest.clone()].push(new_qc);
         }
     }
@@ -818,9 +877,10 @@ where
         // Nodes start the protocol by entering round 1.
         upon start {
             // self.blocks.insert(BlockHash::genesis(), Block::genesis());
-            self.satisfied_blocks.insert(BlockHash::zero());  // TODO: FIXME
-            self.satisfied_qcs.insert(QC::genesis().sub_block_id());
-            self.known_qcs.insert(QC::genesis().sub_block_id());
+            let genesis_qc = QC::genesis();
+            self.satisfied_blocks.insert(genesis_qc.block_digest.clone());
+            self.satisfied_qcs.insert(genesis_qc.sub_block_id());
+            self.known_qcs.insert(genesis_qc.sub_block_id());
             self.advance_r_ready(1, RoundEnterReason::FullPrefixQC, ctx).await;
         };
 
@@ -1002,14 +1062,21 @@ where
                         && n_full_prefix_votes >= self.config.storage_requirement;
 
                     if cond_1 || cond_2 {
+                        // Take the quorum of the largest-prefix votes.
+                        let votes = votes
+                            .iter()
+                            .map(|(&node, &prefix)| (node, prefix))
+                            .sorted_by_key(|(_, prefix)| std::cmp::Reverse(*prefix))
+                            .take(self.quorum())
+                            .collect_vec();
+
                         // `certified_prefix` is the maximum number such that at least
                         // `storage_requirement` nodes have voted for a prefix of size
                         // `certified_prefix` or larger.
                         let certified_prefix = votes
-                            .values()
-                            .copied()
-                            .sorted_by_key(|x| std::cmp::Reverse(*x))
+                            .iter()
                             .skip(self.config.storage_requirement - 1)
+                            .map(|(_, prefix)| *prefix)
                             .next()
                             .expect("storage_requirement cannot be bigger than the quorum size");
 
@@ -1018,6 +1085,7 @@ where
                             prefix: certified_prefix,
                             n_sub_blocks,
                             block_digest: digest,
+                            signature_data: QcSignatureData::new(&votes, self.config.n_nodes),
                         };
 
                         self.on_new_qc(qc, ctx).await;
@@ -1096,6 +1164,24 @@ where
         };
 
         // Block fetching
+
+        upon timer event [TimerEvent::FetchBlock(digest, qc_signers)] {
+            if !self.blocks.contains_key(&digest) {
+                let sample = qc_signers.choose_multiple(
+                    &mut rand::thread_rng(),
+                    self.config.block_fetch_multiplicity,
+                );
+
+                for node in sample {
+                    ctx.unicast(Message::FetchReq(digest.clone()), *node).await;
+                }
+
+                ctx.set_timer(
+                    self.config.delta * 2,
+                    TimerEvent::FetchBlock(digest, qc_signers),
+                );
+            }
+        };
 
         upon receive [Message::FetchReq(digest)] from [p] {
             if let Some(block) = self.blocks.get(&digest) {

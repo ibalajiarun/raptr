@@ -11262,6 +11262,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanovec"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "454dce55cbe467ef9fe2f57514936668284323fb9564cbe3023ce3557c3369d6"
+dependencies = [
+ "num-traits",
+ "replace_with",
+]
+
+[[package]]
 name = "native-tls"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13202,9 +13212,11 @@ dependencies = [
  "futures",
  "itertools 0.12.1",
  "log",
+ "nanovec",
  "rand 0.7.3",
  "rand_distr",
  "serde",
+ "serde_bytes",
  "siphasher 1.0.1",
  "thread_local",
  "tokio",
@@ -13478,6 +13490,12 @@ name = "regex-syntax"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08c74e62047bb2de4ff487b251e4a92e24f48745648451635cec7d591162d9f"
+
+[[package]]
+name = "replace_with"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3a8614ee435691de62bcffcf4a66d91b3594bf1428a5722e79103249a095690"
 
 [[package]]
 name = "reqwest"

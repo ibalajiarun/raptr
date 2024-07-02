@@ -24,11 +24,13 @@ env_logger = { workspace = true }
 futures = { workspace = true }
 itertools = { workspace = true }
 log = { workspace = true }
+nanovec = "0.2.1"
 rand = { workspace = true, features = ["small_rng", "alloc"] }
 rand_distr = { workspace = true }
 thread_local = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
+serde_bytes = { workspace = true }
 siphasher = "1.0.1"
 
 [features]

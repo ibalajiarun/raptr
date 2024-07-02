@@ -106,6 +106,7 @@ impl RaikouManager {
             enable_commit_votes: true,
             status_interval: Duration::from_secs_f64(delta * 10.),
             round_sync_interval: Duration::from_secs_f64(delta * 15.),
+            block_fetch_multiplicity: 2,
         };
 
         let mut module_network = ModuleNetwork::new();
@@ -230,7 +231,7 @@ impl RaikouManager {
                 batch_interval: Duration::from_secs_f64(delta * 0.1),
                 enable_penalty_tracker: true,
                 penalty_tracker_report_delay: Duration::from_secs_f64(delta * 5.),
-                n_sub_blocks: 4,
+                n_sub_blocks: 7,
             },
             std::iter::repeat_with(|| vec![]),
             start_time,

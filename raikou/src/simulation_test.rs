@@ -1,12 +1,18 @@
 // Copyright (c) Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{delays::{heterogeneous_symmetric_delay, DelayFunction}, framework::{
-    module_network::ModuleNetwork,
-    network::{InjectedLocalNetwork, Network, NetworkInjection, NetworkService},
-    timer::{clock_skew_injection, InjectedTimerService},
-    NodeId, Protocol,
-}, leader_schedule::round_robin, metrics, raikou::{dissemination, dissemination::fake::FakeDisseminationLayer, RaikouNode}, raikou};
+use crate::{
+    delays::{heterogeneous_symmetric_delay, DelayFunction},
+    framework::{
+        module_network::ModuleNetwork,
+        network::{InjectedLocalNetwork, Network, NetworkInjection, NetworkService},
+        timer::{clock_skew_injection, InjectedTimerService},
+        NodeId, Protocol,
+    },
+    leader_schedule::round_robin,
+    metrics, raikou,
+    raikou::{dissemination, dissemination::fake::FakeDisseminationLayer, RaikouNode},
+};
 use rand::{thread_rng, Rng};
 use std::{iter, sync::Arc, time::Duration};
 use tokio::{spawn, time, time::Instant};
@@ -865,7 +871,9 @@ pub async fn main() {
     //     .format_target(false)
     //     .format_timestamp(None)
     //     .init();
-    aptos_logger::Logger::builder().level(aptos_logger::Level::Info).build();
+    aptos_logger::Logger::builder()
+        .level(aptos_logger::Level::Info)
+        .build();
 
     let n_nodes = 31;
     let delta = 1.;
@@ -924,7 +932,7 @@ pub async fn main() {
         monitored_node,
         true,
     )
-        .await;
+    .await;
 
     // test_jolteon(
     //     uniformly_random_delay(rand_distr::Normal::new(0.6, 0.06).unwrap()),

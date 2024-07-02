@@ -8,7 +8,7 @@ use std::{future::Future, task::Poll::Ready, time::Duration};
 use tokio::sync::mpsc;
 
 pub trait NetworkService: Send + Sync + 'static {
-    type Message: Send + Sync + Clone + 'static;
+    type Message: Send + Sync + 'static;
 
     fn unicast(&self, data: Self::Message, target: NodeId) -> impl Future<Output = ()> + Send;
 

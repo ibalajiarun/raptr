@@ -17,7 +17,7 @@ pub enum Event<M, TE> {
 }
 
 pub trait Context: Send + Sync {
-    type Message: Clone + Send + Sync;
+    type Message: Send + Sync;
     type TimerEvent;
 
     fn node_id(&self) -> NodeId;

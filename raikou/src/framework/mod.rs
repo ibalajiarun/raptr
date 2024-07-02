@@ -1,3 +1,6 @@
+// Copyright (c) Aptos Foundation
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::framework::{
     context::{Context, Event, SimpleContext},
     module_network::{ModuleEvent, ModuleNetworkService},
@@ -8,6 +11,7 @@ pub mod context;
 pub mod module_network;
 pub mod network;
 pub mod timer;
+pub mod udp_network;
 
 pub type NodeId = usize;
 
@@ -130,6 +134,9 @@ pub trait Protocol: Send + Sync {
 
 /// Should be used as follows:
 /// ```
+/// use raikou::framework::Protocol;
+/// use raikou::protocol;
+///
 /// impl Protocol for MyProtocol {
 ///     type Message = MyMessageType;
 ///     type TimerEvent = MyTimerEventType;

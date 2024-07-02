@@ -207,14 +207,14 @@ where
 
     async fn check_stored_all(&self, batches: &[BatchInfo]) -> bool {
         let inner = self.inner.lock().await;
-        if let Some(missing) = batches
+        if let Some(_missing) = batches
             .into_iter()
             .find(|batch| !inner.batches.contains_key(&batch.digest))
         {
-            inner.log_detail(format!(
-                "Missing batch #{} from node {} with digest {:#x}",
-                missing.batch_id, missing.author, missing.digest,
-            ));
+            // inner.log_detail(format!(
+            //     "Missing batch #{} from node {} with digest {:#x}",
+            //     _missing.batch_id, _missing.author, _missing.digest,
+            // ));
             false
         } else {
             true

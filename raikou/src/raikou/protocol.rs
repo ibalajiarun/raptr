@@ -382,7 +382,7 @@ pub enum TimerEvent {
     // Consensus
     QcVote(Round),
     Timeout(Round),
-    FetchBlock(BlockHash, Vec<NodeId>),
+    FetchBlock(Round, BlockHash, Vec<NodeId>),
 
     // Other
     EndOfRun,
@@ -628,9 +628,14 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             if !self.pending_qcs.contains_key(&new_qc.block_digest) {
                 ctx.set_timer(
                     Duration::ZERO,
-                    TimerEvent::FetchBlock(new_qc.block_digest.clone(), new_qc.signers().collect()),
+                    TimerEvent::FetchBlock(
+                        new_qc.round,
+                        new_qc.block_digest.clone(),
+                        new_qc.signers().collect(),
+                    ),
                 )
             }
+
             self.pending_qcs[new_qc.block_digest.clone()].push(new_qc);
         }
     }
@@ -1165,12 +1170,19 @@ where
 
         // Block fetching
 
-        upon timer event [TimerEvent::FetchBlock(digest, qc_signers)] {
+        upon timer event [TimerEvent::FetchBlock(block_round, digest, qc_signers)] {
             if !self.blocks.contains_key(&digest) {
                 let sample = qc_signers.choose_multiple(
                     &mut rand::thread_rng(),
                     self.config.block_fetch_multiplicity,
-                );
+                ).collect_vec();
+
+                self.log_detail(format!(
+                    "Fetching block {} ({:#x}) from nodes {:?}",
+                    block_round,
+                    digest,
+                    sample,
+                ));
 
                 for node in sample {
                     ctx.unicast(Message::FetchReq(digest.clone()), *node).await;
@@ -1178,13 +1190,20 @@ where
 
                 ctx.set_timer(
                     self.config.delta * 2,
-                    TimerEvent::FetchBlock(digest, qc_signers),
+                    TimerEvent::FetchBlock(block_round, digest, qc_signers),
                 );
             }
         };
 
         upon receive [Message::FetchReq(digest)] from [p] {
             if let Some(block) = self.blocks.get(&digest) {
+                self.log_detail(format!(
+                    "Sending block {} ({:#x}) to {}",
+                    block.round(),
+                    digest,
+                    p,
+                ));
+
                 ctx.unicast(Message::FetchResp(block.clone()), p).await;
             } else {
                 aptos_logger::warn!("Received FetchReq for unknown block {:#x}", digest);

@@ -298,6 +298,10 @@ async fn delay_injection() {
     tokio::time::sleep(delay).await;
 }
 
+fn drop_injection() -> bool {
+    thread_rng().gen_bool(0.01)
+}
+
 impl NetworkService for RaikouNetworkService {
     type Message = raikou::raikou::Message;
 
@@ -305,6 +309,10 @@ impl NetworkService for RaikouNetworkService {
         let epoch = self.epoch;
         let remote_peer_id = *self.index_to_address.get(&target).unwrap();
         let network_sender = self.network_sender.clone();
+
+        if drop_injection() {
+            return;
+        }
 
         tokio::spawn(async move {
             delay_injection().await;
@@ -326,6 +334,7 @@ impl NetworkService for RaikouNetworkService {
         // let remote_peer_ids = self.all_peer_addresses.clone();
         let remote_peer_ids = (0..self.n_nodes)
             .map(|i| *self.index_to_address.get(&i).unwrap())
+            .filter(|_| !drop_injection())
             .collect();
         let network_sender = self.network_sender.clone();
 

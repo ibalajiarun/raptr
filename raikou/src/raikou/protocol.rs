@@ -30,6 +30,7 @@ use std::{
     time::Duration,
 };
 use tokio::time::Instant;
+use crate::framework::network::Validate;
 
 #[derive(Clone, Serialize)]
 pub struct Block {
@@ -375,6 +376,13 @@ pub enum Message {
     AdvanceRound(Round, QC, RoundEnterReason),
     FetchReq(BlockHash),
     FetchResp(Block),
+}
+
+impl Validate for Message {
+    fn validate(&self) -> anyhow::Result<()> {
+        // TODO
+        Ok(())
+    }
 }
 
 #[derive(Clone)]

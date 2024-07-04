@@ -113,6 +113,8 @@ fuzzing = [
 failpoints = ["fail/failpoints"]
 sim-types = ["raikou/sim-types"]
 force-aptos-types = ["raikou/force-aptos-types"]
+inject-delays = ["raikou/inject-delays"]
+inject-drops = ["raikou/inject-drops"]
 
 [package.metadata.cargo-machete]
 ignored = ["serde_bytes"]

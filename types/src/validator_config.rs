@@ -2,6 +2,7 @@
 // Parts of the project are originally copyright © Meta Platforms, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::net::IpAddr;
 use crate::network_address::NetworkAddress;
 use aptos_crypto::bls12381;
 use move_core_types::{
@@ -64,5 +65,15 @@ impl ValidatorConfig {
 
     pub fn validator_network_addresses(&self) -> Result<Vec<NetworkAddress>, bcs::Error> {
         bcs::from_bytes(&self.validator_network_addresses)
+    }
+
+    pub fn find_ip_addr(&self) -> Option<IpAddr> {
+        let network_addresses = self.validator_network_addresses().unwrap();
+        for network_address in network_addresses {
+            if let Some(ip_addr) = network_address.find_ip_addr() {
+                return Some(ip_addr);
+            }
+        }
+        None
     }
 }

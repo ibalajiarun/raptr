@@ -5,7 +5,13 @@ use crate::framework::NodeId;
 use futures::poll;
 use rand::{distributions::Distribution, Rng};
 use std::{future::Future, task::Poll::Ready, time::Duration};
+use std::marker::PhantomData;
 use tokio::sync::mpsc;
+use crate::framework::timer::NeverReturn;
+
+pub trait Validate {
+    fn validate(&self) -> anyhow::Result<()>;
+}
 
 pub trait NetworkService: Send + Sync + 'static {
     type Message: Send + Sync + 'static;
@@ -158,5 +164,39 @@ where
         };
         tokio::time::sleep(Duration::from_secs_f64(delay)).await;
         Some(message)
+    }
+}
+
+pub struct DropAllNetworkService<M> {
+    n_nodes: usize,
+    _phantom: PhantomData<M>,
+}
+
+impl<M> DropAllNetworkService<M> {
+    pub fn new(n_nodes: usize) -> Self {
+        DropAllNetworkService {
+            n_nodes,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<M> NetworkService for DropAllNetworkService<M>
+where
+    M: Send + Sync + Clone + 'static,
+{
+    type Message = M;
+
+    async fn unicast(&self, _: M, _: NodeId) {}
+
+    async fn multicast(&self, _: M) {}
+
+    async fn recv(&mut self) -> (NodeId, M) {
+        NeverReturn {}.await;
+        unreachable!()
+    }
+
+    fn n_nodes(&self) -> usize {
+        self.n_nodes
     }
 }

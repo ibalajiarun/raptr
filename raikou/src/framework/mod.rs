@@ -12,6 +12,8 @@ pub mod module_network;
 pub mod network;
 pub mod timer;
 pub mod udp_network;
+pub mod injection;
+pub mod tcp_network;
 
 pub type NodeId = usize;
 

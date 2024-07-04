@@ -191,8 +191,17 @@ where
     // build the aptos-node package directly to avoid feature unification issues
     args.push("--package=aptos-node");
 
-    #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
+    #[cfg(feature = "sim-types")]
     args.append(&mut vec!["--features", "sim-types"]);
+
+    #[cfg(feature = "force-aptos-types")]
+    args.append(&mut vec!["--features", "force-aptos-types"]);
+
+    #[cfg(feature = "inject-delays")]
+    args.append(&mut vec!["--features", "inject-delays"]);
+
+    #[cfg(feature = "inject-drops")]
+    args.append(&mut vec!["--features", "inject-drops"]);
 
     info!("Compiling with cargo args: {:?}", args);
     let output = Command::new("cargo")

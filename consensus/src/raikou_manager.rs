@@ -1,25 +1,30 @@
 // Copyright (c) Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{
-    network::NetworkSender, network_interface::ConsensusMsg, payload_client::PayloadClient,
-    payload_manager::PayloadManager, transaction_filter::TransactionFilter,
+use std::{
+    collections::HashMap,
+    future::Future,
+    sync::Arc,
 };
-use ::raikou::leader_schedule::round_robin;
-use aptos_config::config::ConsensusConfig;
-use aptos_consensus_types::{
-    common::{Author, PayloadFilter},
-    proof_of_store::BatchInfo,
-};
-use aptos_types::epoch_state::EpochState;
+use std::marker::PhantomData;
+use std::time::Duration;
+
 use futures::StreamExt;
 use futures_channel::oneshot;
+use serde::{Deserialize, Serialize};
+use tokio::time::Instant;
+
+use ::raikou::leader_schedule::round_robin;
+use aptos_config::config::ConsensusConfig;
+use aptos_consensus_types::common::Author;
+use aptos_types::epoch_state::EpochState;
+use aptos_types::on_chain_config::ValidatorSet;
 use raikou::{
     framework::{
-        module_network::{ModuleId, ModuleNetwork, ModuleNetworkService},
+        module_network::{ModuleNetwork, ModuleNetworkService},
         network::{Network, NetworkService},
-        timer::LocalTimerService,
-        NodeId, Protocol,
+        NodeId,
+        Protocol, timer::LocalTimerService,
     },
     metrics,
     raikou::{
@@ -27,17 +32,19 @@ use raikou::{
         RaikouNode,
     },
 };
-use rand::{thread_rng, Rng};
-use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    future::Future,
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+use raikou::framework::injection::{delay_injection, drop_injection};
+use raikou::framework::tcp_network::TcpNetworkService;
+use raikou::framework::udp_network;
+use raikou::framework::udp_network::UdpNetworkService;
+
+use crate::{
+    network::NetworkSender, network_interface::ConsensusMsg, payload_client::PayloadClient,
+    payload_manager::PayloadManager,
 };
-use tokio::time::Instant;
 
 const JOLTEON_TIMEOUT: u32 = 3; // in Deltas
+const CONS_BASE_PORT: u16 = 12000;
+const DISS_BASE_PORT: u16 = 32000;
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct RaikouNetworkMessage {
@@ -78,6 +85,7 @@ impl RaikouManager {
         payload_client: Arc<dyn PayloadClient>,
         payload_manager: Arc<PayloadManager>,
         consensus_config: ConsensusConfig,
+        validator_set: ValidatorSet,
     ) {
         let n_nodes = epoch_state.verifier.len();
         let f = (n_nodes - 1) / 3;
@@ -88,8 +96,58 @@ impl RaikouManager {
         let address_to_index = epoch_state.verifier.address_to_validator_index().clone();
         let node_id = *address_to_index.get(&self_author).unwrap();
 
-        let network_service =
-            RaikouNetworkService::new(epoch_state.clone(), messages_rx, network_sender.clone());
+        // let network_service: RaikouNetworkService<raikou::raikou::Message> =
+        //     RaikouNetworkService::new(epoch_state.clone(), messages_rx, network_sender.clone());
+        //
+        // network_service.multicast(raikou::raikou::Message::AdvanceRound(
+        //     0,
+        //     raikou::raikou::QC::genesis(),
+        //     RoundEnterReason::Genesis
+        // )).await;
+
+        // let network_service = UdpNetworkService::new(
+        //     node_id,
+        //     validator_set.active_validators[node_id].config().find_ip_addr().unwrap(),
+        //     // base_port is chosen to avoid any collisions when running
+        //     // multiple instances on the same machine.
+        //     BASE_PORT + (node_id * n_nodes) as u16,
+        //     udp_network::Config {
+        //         peers: validator_set
+        //             .active_validators
+        //             .iter()
+        //             .enumerate()
+        //             .map(|(peer_id, info)| (
+        //                 info.config().find_ip_addr().unwrap(),
+        //                 BASE_PORT + (peer_id * n_nodes) as u16,
+        //             ))
+        //             .collect(),
+        //         peer_concurrency_level: 4,
+        //     },
+        // ).await;
+
+        let network_service = TcpNetworkService::new(
+            node_id,
+            format!(
+                "{}:{}",
+                validator_set.active_validators[node_id].config().find_ip_addr().unwrap(),
+                CONS_BASE_PORT + node_id as u16,
+            ).parse().unwrap(),
+            raikou::framework::tcp_network::Config {
+                peers: validator_set
+                    .active_validators
+                    .iter()
+                    .enumerate()
+                    .map(|(peer_id, info)| (
+                        format!(
+                            "{}:{}",
+                            info.config().find_ip_addr().unwrap(),
+                            CONS_BASE_PORT + peer_id as u16,
+                        ).parse().unwrap()
+                    ))
+                    .collect(),
+                streams_per_peer: 4,
+            },
+        ).await;
 
         let config = raikou::raikou::Config {
             n_nodes,
@@ -130,6 +188,7 @@ impl RaikouManager {
             epoch_state.clone(),
             diss_rx,
             network_sender.clone(),
+            validator_set,
         )
         .await;
 
@@ -207,9 +266,54 @@ impl RaikouManager {
             (Author, RaikouNetworkMessage),
         >,
         network_sender: Arc<NetworkSender>,
+        validator_set: ValidatorSet,
     ) -> impl DisseminationLayer {
-        let diss_network_service =
-            RaikouDissNetworkService::new(epoch_state, diss_rx, network_sender);
+        // let diss_network_service =
+        //     RaikouDissNetworkService::new(epoch_state, diss_rx, network_sender);
+
+        // let diss_network_service = UdpNetworkService::new(
+        //     node_id,
+        //     validator_set.active_validators[node_id].config().find_ip_addr().unwrap(),
+        //     // base_port is chosen to avoid any collisions when running
+        //     // multiple instances on the same machine.
+        //     27000 + (node_id * n_nodes) as u16,
+        //     udp_network::Config {
+        //         peers: validator_set
+        //             .active_validators
+        //             .iter()
+        //             .enumerate()
+        //             .map(|(peer_id, info)| (
+        //                 info.config().find_ip_addr().unwrap(),
+        //                 27000 + (peer_id * n_nodes) as u16,
+        //             ))
+        //             .collect(),
+        //         peer_concurrency_level: 4,
+        //     },
+        // ).await;
+
+        let diss_network_service = TcpNetworkService::new(
+            node_id,
+            format!(
+                "{}:{}",
+                validator_set.active_validators[node_id].config().find_ip_addr().unwrap(),
+                DISS_BASE_PORT + node_id as u16,
+            ).parse().unwrap(),
+            raikou::framework::tcp_network::Config {
+                peers: validator_set
+                    .active_validators
+                    .iter()
+                    .enumerate()
+                    .map(|(peer_id, info)| (
+                        format!(
+                            "{}:{}",
+                            info.config().find_ip_addr().unwrap(),
+                            DISS_BASE_PORT + peer_id as u16,
+                        ).parse().unwrap()
+                    ))
+                    .collect(),
+                streams_per_peer: 1,
+            },
+        ).await;
 
         let diss_timer = LocalTimerService::new();
 
@@ -228,7 +332,7 @@ impl RaikouManager {
                 f,
                 ac_quorum: 2 * f + 1,
                 delta: Duration::from_secs_f64(delta),
-                batch_interval: Duration::from_secs_f64(delta * 0.1),
+                batch_interval: Duration::from_secs_f64(delta),  // * 0.1),
                 enable_penalty_tracker: true,
                 penalty_tracker_report_delay: Duration::from_secs_f64(delta * 5.),
                 n_sub_blocks: 7,
@@ -255,7 +359,7 @@ impl RaikouManager {
     }
 }
 
-pub struct RaikouNetworkService {
+pub struct RaikouNetworkService<M> {
     epoch: u64,
     n_nodes: usize,
     index_to_address: HashMap<usize, Author>,
@@ -263,9 +367,10 @@ pub struct RaikouNetworkService {
     address_to_index: HashMap<Author, usize>,
     network_sender: Arc<NetworkSender>,
     messages_rx: aptos_channels::aptos_channel::Receiver<Author, (Author, RaikouNetworkMessage)>,
+    _phantom: PhantomData<M>,
 }
 
-impl RaikouNetworkService {
+impl<M> RaikouNetworkService<M> {
     pub fn new(
         epoch_state: Arc<EpochState>,
         messages_rx: aptos_channels::aptos_channel::Receiver<
@@ -288,22 +393,16 @@ impl RaikouNetworkService {
             address_to_index,
             network_sender,
             messages_rx,
+            _phantom: PhantomData,
         }
     }
 }
 
-async fn delay_injection() {
-    // TODO: don't forget to remove before any experiments in real networks.
-    let delay = Duration::from_millis(thread_rng().gen_range(50, 150));
-    tokio::time::sleep(delay).await;
-}
-
-fn drop_injection() -> bool {
-    thread_rng().gen_bool(0.01)
-}
-
-impl NetworkService for RaikouNetworkService {
-    type Message = raikou::raikou::Message;
+impl<M> NetworkService for RaikouNetworkService<M>
+where
+    M: Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static,
+{
+    type Message = M;
 
     async fn unicast(&self, data: Self::Message, target: raikou::framework::NodeId) {
         let epoch = self.epoch;

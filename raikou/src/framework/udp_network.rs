@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::fmt::format;
 use std::future::Future;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use futures::{FutureExt, StreamExt};
@@ -13,21 +13,18 @@ use futures::stream::FuturesUnordered;
 use serde::{Deserialize, Serialize};
 use tokio::join;
 use tokio::net::UdpSocket;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 
 use aptos_channels::aptos_channel;
 use aptos_channels::message_queues::QueueStyle;
-
-use crate::framework::network::NetworkService;
+use crate::framework::injection::{delay_injection, drop_injection};
+use crate::framework::network::{NetworkService, Validate};
 use crate::framework::NodeId;
 
-pub trait Validate {
-    fn validate(&self) -> anyhow::Result<()>;
-}
+pub const MAX_MESSAGE_SIZE: usize = 1024;
 
 pub struct Config {
-    pub peers: Vec<String>,
-    pub base_port: u16,
+    pub peers: Vec<(IpAddr, u16)>,
     pub peer_concurrency_level: usize,
 }
 
@@ -53,7 +50,20 @@ impl<M> UdpNetworkService<M>
 where
     M: Send + Sync + 'static + Serialize + for<'de> Deserialize<'de> + Validate,
 {
-    pub async fn new(node_id: NodeId, addr: String, config: Config) -> Self {
+    pub async fn new(
+        node_id: NodeId,
+        addr: IpAddr,
+        base_port: u16,
+        config: Config,
+    ) -> Self {
+        aptos_logger::info!(
+            "Starting UDP network service for node {} at {}:{}-{}",
+            node_id,
+            addr,
+            base_port,
+            base_port + config.peers.len() as u16 - 1
+        );
+
         let (tx, rx) = aptos_channel::new(
             QueueStyle::LIFO,
             16,
@@ -61,10 +71,11 @@ where
         );
         let mut socks = vec![];
 
-        for (peer_id, peer) in config.peers.iter().cloned().enumerate() {
-            let bind_addr = format!("{}:{}", addr, config.base_port + peer_id as u16);
+        for (peer_id, (peer_addr, peer_base_port)) in config.peers.iter().cloned().enumerate() {
+            let bind_addr = SocketAddr::new(addr, base_port + peer_id as u16);
             let sock = Arc::new(UdpSocket::bind(bind_addr).await.unwrap());
-            let peer_addr = format!("{}:{}", peer, config.base_port + node_id as u16);
+            let peer_addr = SocketAddr::new(peer_addr, peer_base_port + node_id as u16);
+
             sock.connect(peer_addr).await.unwrap();
             socks.push(sock.clone());
             tokio::spawn(Self::recv_loop(
@@ -97,15 +108,27 @@ where
 
             let data = bcs::to_bytes(&msg).unwrap();
 
+            if data.len() > MAX_MESSAGE_SIZE {
+                // Panicking because this is most likely caused by a bug in the code and needs
+                // to be discovered ASAP.
+                panic!("Trying to send a message that is too large: {}", data.len());
+            }
+
             // Bypass the network for self-sends.
             if peers.contains(&sender.node_id) {
                 sender.self_send(msg);
             }
 
+            delay_injection().await;
+
             // TODO: should I use FuturesUnordered instead?
             let mut futures = vec![];
             for peer in peers {
                 if peer != sender.node_id {
+                    if drop_injection() {
+                        aptos_logger::warn!("Dropping a message to {}", peer);
+                        continue;
+                    }
                     futures.push(sender.socks[peer as usize].send(&data).map(|_| ()));
                 }
             }
@@ -121,30 +144,56 @@ where
     ) {
         let mut bufs = Vec::new();
         for _ in 0..concurrency_level {
-            bufs.push(Arc::new(Mutex::new([0; 1024])));
+            bufs.push(Arc::new(Mutex::new([0; MAX_MESSAGE_SIZE])));
         }
 
         let mut cur_buf = 0;
 
         loop {
             let mut buf = bufs[cur_buf].clone().lock_owned().await;
-            let n = recv_socket.recv(&mut *buf).await.unwrap();
-
-            let tx = tx.clone();
-            cur_buf = (cur_buf + 1) % bufs.len();
-
-            tokio::spawn(async move {
-                let data = &*buf;
-                if let Ok(msg) = bcs::from_bytes::<M>(&data[..n]) {
-                    if let Ok(()) = msg.validate() {
-                        tx.push(peer_id, (peer_id, msg)).unwrap();
-                    } else {
-                        aptos_logger::error!("Invalid message from {}", peer_id);
+            match recv_socket.recv(&mut *buf).await {
+                Ok(n) => {
+                    if n == 0 {
+                        aptos_logger::error!("Received empty message from {}", peer_id);
+                        continue;
                     }
-                } else {
-                    aptos_logger::error!("Failed to deserialize message from {}", peer_id);
+                    if n == MAX_MESSAGE_SIZE {
+                        aptos_logger::error!("Received message too large from {}", peer_id);
+                        continue;
+                    }
+
+                    let tx = tx.clone();
+                    cur_buf = (cur_buf + 1) % bufs.len();
+
+                    if concurrency_level == 1 {
+                        Self::process_message(buf, n, peer_id, tx).await;
+                    } else {
+                        tokio::spawn(Self::process_message(buf, n, peer_id, tx));
+                    }
+                },
+                Err(err) => {
+                    aptos_logger::error!("Error receiving message from {}: {}", peer_id, err);
+                    break;
                 }
-            });
+            }
+        }
+    }
+
+    async fn process_message(
+        buf: OwnedMutexGuard<[u8; MAX_MESSAGE_SIZE]>,
+        msg_len: usize,
+        peer_id: NodeId,
+        tx: aptos_channel::Sender<NodeId, (NodeId, M)>
+    ) {
+        let data = &*buf;
+        if let Ok(msg) = bcs::from_bytes::<M>(&data[..msg_len]) {
+            if let Ok(()) = msg.validate() {
+                tx.push(peer_id, (peer_id, msg)).unwrap();
+            } else {
+                aptos_logger::error!("Invalid message from {}", peer_id);
+            }
+        } else {
+            aptos_logger::error!("Failed to deserialize message from {}", peer_id);
         }
     }
 }

@@ -29,6 +29,8 @@ use std::{
     time::Duration,
 };
 use tokio::time::Instant;
+use crate::framework::ContextFor;
+use crate::framework::network::Validate;
 
 #[derive(Clone, Serialize)]
 pub struct Batch {
@@ -41,7 +43,7 @@ pub struct Batch {
 struct BatchData {
     author: NodeId,
     batch_id: BatchId,
-    txns: Vec<Txn>,
+    txns: Arc<Vec<Txn>>,
 }
 
 impl<'de> Deserialize<'de> for Batch {
@@ -93,6 +95,13 @@ pub enum Message {
     AvailabilityCert(AC),
     // Fetch(BatchHash),
     PenaltyTrackerReport(Round, PenaltyTrackerReports),
+}
+
+impl Validate for Message {
+    fn validate(&self) -> anyhow::Result<()> {
+        // TODO: implement validation
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -350,6 +359,22 @@ where
         }
     }
 
+    async fn on_new_batch(&mut self, batch: Batch, ctx: &mut impl ContextFor<Self>) {
+        let digest = batch.digest.clone();
+        let batch_id = batch.batch_id();
+        let author = batch.author();
+
+        self.penalty_tracker.on_new_batch(digest.clone());
+        self.batches.insert(digest.clone(), batch);
+
+        ctx.unicast(Message::BatchStored(batch_id), author).await;
+
+        // Track the list of known uncommitted uncertified batches.
+        if !self.acs.contains_key(&digest) && !self.committed_batches.contains(&digest) {
+            self.new_batches.insert(digest);
+        }
+    }
+
     fn to_deltas(&self, duration: Duration) -> f64 {
         duration.as_secs_f64() / self.config.delta.as_secs_f64()
     }
@@ -387,21 +412,20 @@ where
         // Creating and certifying batches
 
         upon timer [TimerEvent::NewBatch(batch_id)] {
-            let txns = self.txns_iter.next().unwrap();
-            let digest = hash((self.node_id, batch_id, &txns));
-
             // Multicast a new batch
             let batch_data = BatchData {
                 author: self.node_id,
                 batch_id,
-                txns,
+                txns: Arc::new(self.txns_iter.next().unwrap()),
             };
+            let digest = hash(&batch_data);
             let batch = Batch { data: batch_data, digest: digest.clone() };
 
-            ctx.multicast(Message::Batch(batch)).await;
+            ctx.multicast(Message::Batch(batch.clone())).await;
 
             self.batch_created_time[batch_id] = Instant::now();
             self.my_batches.insert(batch_id, digest.clone());
+            self.on_new_batch(batch, ctx).await;
 
             // Reset the timer.
             ctx.set_timer(self.config.batch_interval, TimerEvent::NewBatch(batch_id + 1));
@@ -411,10 +435,11 @@ where
 
         // Upon receiving a batch, store it, reply with a BatchStored message,
         // and execute try_vote.
-        upon receive [Message::Batch(batch)] from node [p] 'handler: {
-            if batch.author() != p {
-                break 'handler;
-            }
+        upon receive [Message::Batch(batch)] from node [p] {
+            // TODO: add it to the message validation.
+            // if batch.author() == p {
+            //     break 'handler;
+            // }
 
             // self.log_detail(format!(
             //     "Received batch #{} from node {} with digest {:#x}",
@@ -423,20 +448,8 @@ where
             //     batch.digest,
             // ));
 
-            let digest = batch.digest.clone();
-            let batch_id = batch.batch_id();
-
-            if !self.batches.contains_key(&digest) {
-                self.penalty_tracker.on_new_batch(digest.clone());
-
-                self.batches.insert(digest.clone(), batch);
-
-                ctx.unicast(Message::BatchStored(batch_id), p).await;
-
-                // Track the list of known uncommitted uncertified batches.
-                if !self.acs.contains_key(&digest) && !self.committed_batches.contains(&digest) {
-                    self.new_batches.insert(digest);
-                }
+            if !self.batches.contains_key(&batch.digest) {
+                self.on_new_batch(batch, ctx).await;
             }
         };
 

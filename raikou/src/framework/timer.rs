@@ -1,3 +1,6 @@
+// Copyright (c) Aptos Foundation
+// SPDX-License-Identifier: Apache-2.0
+
 use std::{collections::BTreeMap, future::Future, task, time::Duration};
 use tokio::time::{sleep_until, Instant};
 
@@ -103,7 +106,7 @@ where
 }
 
 /// NeverExpire is a future that never unblocks
-struct NeverReturn {}
+pub struct NeverReturn {}
 
 impl Future for NeverReturn {
     type Output = ();

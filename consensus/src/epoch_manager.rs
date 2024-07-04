@@ -1192,6 +1192,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
                 rand_config,
                 fast_rand_config,
                 rand_msg_rx,
+                validator_set,
             )
             .await
         }
@@ -1236,6 +1237,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
         rand_config: Option<RandConfig>,
         fast_rand_config: Option<RandConfig>,
         rand_msg_rx: aptos_channel::Receiver<AccountAddress, IncomingRandGenRequest>,
+        validator_set: ValidatorSet,
     ) {
         let epoch = epoch_state.epoch;
         let consensus_key = new_consensus_key_from_storage(&self.config.safety_rules.backend)
@@ -1306,6 +1308,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             payload_client,
             payload_manager,
             self.config.clone(),
+            validator_set,
         ));
     }
 

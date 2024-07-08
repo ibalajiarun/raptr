@@ -118,6 +118,7 @@ pub struct Config {
     pub ac_quorum: usize,
     pub delta: Duration,
     pub batch_interval: Duration,
+    pub enable_optimistic_dissemination: bool,
     pub enable_penalty_tracker: bool,
     pub penalty_tracker_report_delay: Duration,
     pub n_sub_blocks: usize,
@@ -153,6 +154,11 @@ where
         detailed_logging: bool,
         metrics: Metrics,
     ) -> Self {
+        if !config.enable_optimistic_dissemination {
+            assert!(!config.enable_penalty_tracker,
+                    "Optimistic dissemination must be enabled to use the penalty tracker");
+        }
+
         Self {
             config: config.clone(),
             inner: Arc::new(tokio::sync::Mutex::new(
@@ -193,14 +199,20 @@ where
             .map(|batch_hash| inner.acs[batch_hash].clone()) // WARNING: potentially expensive clone
             .collect();
 
-        let batches = inner
-            .new_batches
-            .iter()
-            .filter(|&batch_hash| !exclude.contains(batch_hash))
-            .map(|batch_hash| inner.batches[batch_hash].get_info()) // WARNING: potentially expensive clone
-            .collect();
+        let batches = if inner.config.enable_optimistic_dissemination {
+            let batches = inner
+                .new_batches
+                .iter()
+                .filter(|&batch_hash| !exclude.contains(batch_hash))
+                .map(|batch_hash| inner.batches[batch_hash].get_info())
+                .collect();
 
-        let batches = inner.penalty_tracker.prepare_new_block(round, batches);
+            // If the penalty tracker is disabled, this will sort the batches
+            // by the order they were received.
+            inner.penalty_tracker.prepare_new_block(round, batches)
+        } else {
+            vec![]
+        };
 
         Payload::new(round, inner.node_id, acs, batches)
     }
@@ -421,6 +433,11 @@ where
             let digest = hash(&batch_data);
             let batch = Batch { data: batch_data, digest: digest.clone() };
 
+            self.log_detail(format!(
+                "Creating batch #{} with digest {:#x}",
+                batch_id,
+                digest,
+            ));
             ctx.multicast(Message::Batch(batch.clone())).await;
 
             self.batch_created_time[batch_id] = Instant::now();
@@ -459,6 +476,11 @@ where
             self.batch_stored_votes[batch_id].set(p, true);
 
             if self.batch_stored_votes[batch_id].count_ones() == self.config.ac_quorum {
+                self.log_detail(format!(
+                    "Forming the AC for batch #{} with digest {:#x}",
+                    batch_id,
+                    self.batches[&self.my_batches[&batch_id]].digest,
+                ));
                 ctx.multicast(Message::AvailabilityCert(AC {
                     info: self.batches[&self.my_batches[&batch_id]].get_info(),
                     signers: self.batch_stored_votes[batch_id].clone(),

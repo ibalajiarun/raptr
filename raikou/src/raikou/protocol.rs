@@ -414,7 +414,6 @@ pub struct Config<S> {
     pub leader_schedule: S,
     pub delta: Duration,
     pub enable_commit_votes: bool,
-    pub enable_optimistic_dissemination: bool,
     pub enable_round_entry_permission: bool,
 
     /// The time validator waits after receiving a block before voting for a QC for it

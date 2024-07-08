@@ -157,7 +157,6 @@ impl RaikouManager {
             leader_schedule: round_robin(n_nodes),
             delta: Duration::from_secs_f64(delta),
             end_of_run: Instant::now() + Duration::from_secs_f64(delta) * total_duration_in_delta,
-            enable_optimistic_dissemination,
             extra_wait_before_qc_vote: Duration::from_secs_f64(delta * 0.1),
             extra_wait_before_commit_vote: Duration::from_secs_f64(delta * 0.1),
             enable_round_entry_permission: false,
@@ -189,6 +188,7 @@ impl RaikouManager {
             diss_rx,
             network_sender.clone(),
             validator_set,
+            enable_optimistic_dissemination,
         )
         .await;
 
@@ -267,6 +267,7 @@ impl RaikouManager {
         >,
         network_sender: Arc<NetworkSender>,
         validator_set: ValidatorSet,
+        enable_optimistic_dissemination: bool,
     ) -> impl DisseminationLayer {
         // let diss_network_service =
         //     RaikouDissNetworkService::new(epoch_state, diss_rx, network_sender);
@@ -333,6 +334,7 @@ impl RaikouManager {
                 ac_quorum: 2 * f + 1,
                 delta: Duration::from_secs_f64(delta),
                 batch_interval: Duration::from_secs_f64(delta),  // * 0.1),
+                enable_optimistic_dissemination,
                 enable_penalty_tracker: true,
                 penalty_tracker_report_delay: Duration::from_secs_f64(delta * 5.),
                 n_sub_blocks: 7,

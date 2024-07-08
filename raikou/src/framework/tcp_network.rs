@@ -255,7 +255,9 @@ where
             return Err(anyhow::anyhow!("Message size too large: {}", msg_size));
         }
         stream.read_exact(&mut buf[..msg_size]).await?;
-        Ok(bcs::from_bytes(&buf[..msg_size])?)
+        let msg: M = bcs::from_bytes(&buf[..msg_size])?;
+        msg.validate()?;
+        Ok(msg)
     }
 }
 

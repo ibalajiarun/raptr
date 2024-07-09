@@ -277,7 +277,7 @@ impl RaikouManager {
         //     validator_set.active_validators[node_id].config().find_ip_addr().unwrap(),
         //     // base_port is chosen to avoid any collisions when running
         //     // multiple instances on the same machine.
-        //     27000 + (node_id * n_nodes) as u16,
+        //     DISS_BASE_PORT + (node_id * n_nodes) as u16,
         //     udp_network::Config {
         //         peers: validator_set
         //             .active_validators
@@ -285,7 +285,7 @@ impl RaikouManager {
         //             .enumerate()
         //             .map(|(peer_id, info)| (
         //                 info.config().find_ip_addr().unwrap(),
-        //                 27000 + (peer_id * n_nodes) as u16,
+        //                 DISS_BASE_PORT + (peer_id * n_nodes) as u16,
         //             ))
         //             .collect(),
         //         peer_concurrency_level: 4,
@@ -312,7 +312,7 @@ impl RaikouManager {
                         ).parse().unwrap()
                     ))
                     .collect(),
-                streams_per_peer: 1,
+                streams_per_peer: 4,
             },
         ).await;
 

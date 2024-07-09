@@ -231,7 +231,7 @@ where
         let peer_id = NodeId::from_be_bytes(buf[..size_of::<NodeId>()].try_into().unwrap());
 
         loop {
-            match Self::read_message(&mut stream).await {
+            match Self::read_message(&mut stream, &mut buf).await {
                 Ok(msg) => {
                     self_send.push(peer_id, (peer_id, msg)).unwrap();
                 },
@@ -247,8 +247,7 @@ where
         }
     }
 
-    async fn read_message(stream: &mut TcpStream) -> anyhow::Result<M> {
-        let mut buf = [0; BUF_SIZE];
+    async fn read_message(stream: &mut TcpStream, buf: &mut [u8; BUF_SIZE]) -> anyhow::Result<M> {
         stream.read_exact(&mut buf[..size_of::<MessageSizeTag>()]).await?;
         let msg_size = MessageSizeTag::from_be_bytes(buf[..size_of::<MessageSizeTag>()].try_into().unwrap()) as usize;
         if msg_size > MAX_MESSAGE_SIZE {

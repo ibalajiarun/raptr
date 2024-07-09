@@ -148,15 +148,16 @@ where
 {
     pub fn new(
         node_id: NodeId,
-        config: Config,
+        mut config: Config,
         txns_iter: TI,
         start_time: Instant,
         detailed_logging: bool,
         metrics: Metrics,
     ) -> Self {
-        if !config.enable_optimistic_dissemination {
-            assert!(!config.enable_penalty_tracker,
-                    "Optimistic dissemination must be enabled to use the penalty tracker");
+        if !config.enable_optimistic_dissemination && !config.enable_penalty_tracker {
+            aptos_logger::warn!(
+                "Disabling the penalty tracker because optimistic dissemination is disabled.");
+            config.enable_penalty_tracker = false;
         }
 
         Self {
@@ -460,8 +461,8 @@ where
 
             // self.log_detail(format!(
             //     "Received batch #{} from node {} with digest {:#x}",
-            //     batch.batch_id,
-            //     batch.author,
+            //     batch.batch_id(),
+            //     batch.author(),
             //     batch.digest,
             // ));
 

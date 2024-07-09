@@ -1012,12 +1012,14 @@ where
         upon timer [TimerEvent::QcVote(round)] {
             if round == self.r_cur && self.last_qc_vote.round < round && round > self.r_timeout {
                 let stored_prefix = self.stored_prefix().await;
+                let n_sub_blocks = self.n_sub_blocks_in_proposal(round);
 
                 self.log_detail(format!(
-                    "QC-voting for block {} proposed by node {} by Timer with prefix {}",
+                    "QC-voting for block {} proposed by node {} by Timer with prefix {}/{}",
                     round,
                     self.config.leader(round),
                     stored_prefix,
+                    n_sub_blocks,
                 ));
 
                 self.last_qc_vote = (self.r_cur, stored_prefix).into();
@@ -1025,7 +1027,7 @@ where
                     round,
                     self.leader_proposal[&round].clone(),
                     stored_prefix,
-                    self.n_sub_blocks_in_proposal(round),
+                    n_sub_blocks,
                 )).await;
             }
         };
@@ -1043,6 +1045,13 @@ where
             let round = self.r_cur;
             let digest = self.leader_proposal[&self.r_cur].clone();
             let n_sub_blocks = self.n_sub_blocks_in_proposal(self.r_cur);
+
+            self.log_detail(format!(
+                "QC-voting for block {} proposed by node {} by Full Prefix with prefix {}",
+                round,
+                self.config.leader(round),
+                n_sub_blocks,
+            ));
 
             self.last_qc_vote = (round, n_sub_blocks).into();
             ctx.multicast(Message::QcVote(

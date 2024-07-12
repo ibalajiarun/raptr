@@ -1,30 +1,26 @@
 // Copyright (c) Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    collections::HashMap,
-    future::Future,
-    sync::Arc,
+use crate::{
+    network::NetworkSender, network_interface::ConsensusMsg, payload_client::PayloadClient,
+    payload_manager::PayloadManager,
 };
-use std::marker::PhantomData;
-use std::time::Duration;
-
-use futures::StreamExt;
-use futures_channel::oneshot;
-use serde::{Deserialize, Serialize};
-use tokio::time::Instant;
-
 use ::raikou::leader_schedule::round_robin;
 use aptos_config::config::ConsensusConfig;
-use aptos_consensus_types::common::Author;
-use aptos_types::epoch_state::EpochState;
-use aptos_types::on_chain_config::ValidatorSet;
+use aptos_consensus_types::{common::Author, proof_of_store::BatchInfo};
+use aptos_types::{epoch_state::EpochState, on_chain_config::ValidatorSet};
+use futures::StreamExt;
+use futures_channel::oneshot;
 use raikou::{
     framework::{
-        module_network::{ModuleNetwork, ModuleNetworkService},
+        injection::{delay_injection, drop_injection},
+        module_network::{ModuleId, ModuleNetwork, ModuleNetworkService},
         network::{Network, NetworkService},
-        NodeId,
-        Protocol, timer::LocalTimerService,
+        tcp_network::TcpNetworkService,
+        timer::LocalTimerService,
+        udp_network,
+        udp_network::UdpNetworkService,
+        NodeId, Protocol,
     },
     metrics,
     raikou::{
@@ -32,15 +28,9 @@ use raikou::{
         RaikouNode,
     },
 };
-use raikou::framework::injection::{delay_injection, drop_injection};
-use raikou::framework::tcp_network::TcpNetworkService;
-use raikou::framework::udp_network;
-use raikou::framework::udp_network::UdpNetworkService;
-
-use crate::{
-    network::NetworkSender, network_interface::ConsensusMsg, payload_client::PayloadClient,
-    payload_manager::PayloadManager,
-};
+use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, future::Future, marker::PhantomData, sync::Arc, time::Duration};
+use tokio::time::Instant;
 
 const JOLTEON_TIMEOUT: u32 = 3; // in Deltas
 const CONS_BASE_PORT: u16 = 12000;
@@ -129,25 +119,33 @@ impl RaikouManager {
             node_id,
             format!(
                 "{}:{}",
-                validator_set.active_validators[node_id].config().find_ip_addr().unwrap(),
+                validator_set.active_validators[node_id]
+                    .config()
+                    .find_ip_addr()
+                    .unwrap(),
                 CONS_BASE_PORT + node_id as u16,
-            ).parse().unwrap(),
+            )
+            .parse()
+            .unwrap(),
             raikou::framework::tcp_network::Config {
                 peers: validator_set
                     .active_validators
                     .iter()
                     .enumerate()
-                    .map(|(peer_id, info)| (
-                        format!(
+                    .map(|(peer_id, info)| {
+                        (format!(
                             "{}:{}",
                             info.config().find_ip_addr().unwrap(),
                             CONS_BASE_PORT + peer_id as u16,
-                        ).parse().unwrap()
-                    ))
+                        )
+                        .parse()
+                        .unwrap())
+                    })
                     .collect(),
                 streams_per_peer: 4,
             },
-        ).await;
+        )
+        .await;
 
         let config = raikou::raikou::Config {
             n_nodes,
@@ -296,25 +294,33 @@ impl RaikouManager {
             node_id,
             format!(
                 "{}:{}",
-                validator_set.active_validators[node_id].config().find_ip_addr().unwrap(),
+                validator_set.active_validators[node_id]
+                    .config()
+                    .find_ip_addr()
+                    .unwrap(),
                 DISS_BASE_PORT + node_id as u16,
-            ).parse().unwrap(),
+            )
+            .parse()
+            .unwrap(),
             raikou::framework::tcp_network::Config {
                 peers: validator_set
                     .active_validators
                     .iter()
                     .enumerate()
-                    .map(|(peer_id, info)| (
-                        format!(
+                    .map(|(peer_id, info)| {
+                        (format!(
                             "{}:{}",
                             info.config().find_ip_addr().unwrap(),
                             DISS_BASE_PORT + peer_id as u16,
-                        ).parse().unwrap()
-                    ))
+                        )
+                        .parse()
+                        .unwrap())
+                    })
                     .collect(),
                 streams_per_peer: 4,
             },
-        ).await;
+        )
+        .await;
 
         let diss_timer = LocalTimerService::new();
 
@@ -333,7 +339,7 @@ impl RaikouManager {
                 f,
                 ac_quorum: 2 * f + 1,
                 delta: Duration::from_secs_f64(delta),
-                batch_interval: Duration::from_secs_f64(delta),  // * 0.1),
+                batch_interval: Duration::from_secs_f64(delta), // * 0.1),
                 enable_optimistic_dissemination,
                 enable_penalty_tracker: true,
                 penalty_tracker_report_delay: Duration::from_secs_f64(delta * 5.),
@@ -609,26 +615,28 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
     }
 
     async fn prefetch_payload_data(&self, payload: raikou::raikou::types::Payload) {
-        self.payload_manager.prefetch_payload_data(
-            &payload.inner,
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        );
+        // self.payload_manager.prefetch_payload_data(
+        //     &payload.inner,
+        //     SystemTime::now()
+        //         .duration_since(UNIX_EPOCH)
+        //         .unwrap()
+        //         .as_secs(),
+        // );
+        todo!()
     }
 
     async fn check_stored_all(&self, batches: &[BatchInfo]) -> bool {
         todo!()
     }
 
-    async fn notify_commit(&self, payloads: Vec<raikou::raikou::types::Payload>) {
-        self.payload_manager.notify_commit(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-            payloads.into_iter().map(|p| p.inner).collect(),
-        )
+    async fn notify_commit(&self, payloads: Vec<raikou::raikou::types::aptos_types::Payload>) {
+        // self.payload_manager.notify_commit(
+        //     SystemTime::now()
+        //         .duration_since(UNIX_EPOCH)
+        //         .unwrap()
+        //         .as_secs(),
+        //     payloads.into_iter().map(|p| p.inner).collect(),
+        // )
+        todo!()
     }
 }

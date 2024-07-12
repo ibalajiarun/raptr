@@ -1,27 +1,28 @@
 // Copyright (c) Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
-use std::future::Future;
-use std::mem::size_of;
-use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
-use std::time::Duration;
-use futures::{FutureExt, StreamExt};
-use futures::future::join_all;
-use futures::stream::FuturesUnordered;
+use crate::framework::{
+    injection::{delay_injection, drop_injection},
+    network::{NetworkService, Validate},
+    NodeId,
+};
+use aptos_channels::{aptos_channel, message_queues::QueueStyle};
+use futures::{future::join_all, stream::FuturesUnordered, FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::join;
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::{Mutex, OwnedMutexGuard};
-
-use aptos_channels::aptos_channel;
-use aptos_channels::message_queues::QueueStyle;
-use crate::framework::injection::{delay_injection, drop_injection};
-use crate::framework::network::{NetworkService, Validate};
-use crate::framework::NodeId;
+use std::{
+    collections::HashMap,
+    future::Future,
+    mem::size_of,
+    net::{IpAddr, SocketAddr},
+    sync::{atomic::AtomicUsize, Arc},
+    time::Duration,
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    join,
+    net::{TcpListener, TcpStream, UdpSocket},
+    sync::{Mutex, OwnedMutexGuard},
+};
 
 pub type MessageSizeTag = u32;
 pub const BUF_SIZE: usize = 32 * 1024;
@@ -53,13 +54,18 @@ struct PeerStreams {
 impl PeerStreams {
     async fn next(&self) -> OwnedMutexGuard<TcpStream> {
         let next = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.streams[next % self.streams.len()].clone().lock_owned().await
+        self.streams[next % self.streams.len()]
+            .clone()
+            .lock_owned()
+            .await
     }
 }
 
 impl<M> TcpNetworkServiceSender<M> {
     fn self_send(&self, msg: M) {
-        self.self_send.push(self.node_id, (self.node_id, msg)).unwrap();
+        self.self_send
+            .push(self.node_id, (self.node_id, msg))
+            .unwrap();
     }
 }
 
@@ -67,18 +73,14 @@ impl<M> TcpNetworkService<M>
 where
     M: Send + Sync + 'static + Serialize + for<'de> Deserialize<'de> + Validate,
 {
-    pub async fn new(
-        node_id: NodeId,
-        addr: SocketAddr,
-        config: Config,
-    ) -> Self {
-        aptos_logger::info!("TCPNET: Starting TCP network service for node {} at {}", node_id, addr);
-
-        let (self_send, recv) = aptos_channel::new(
-            QueueStyle::LIFO,
-            16,
-            None,
+    pub async fn new(node_id: NodeId, addr: SocketAddr, config: Config) -> Self {
+        aptos_logger::info!(
+            "TCPNET: Starting TCP network service for node {} at {}",
+            node_id,
+            addr
         );
+
+        let (self_send, recv) = aptos_channel::new(QueueStyle::LIFO, 16, None);
 
         // Start the receiver task
         let listener = Self::create_listener(addr).await;
@@ -127,7 +129,7 @@ where
                         RETRY_MILLIS,
                     );
                     tokio::time::sleep(Duration::from_millis(RETRY_MILLIS)).await;
-                }
+                },
             }
         }
     }
@@ -147,7 +149,7 @@ where
                         RETRY_MILLIS,
                     );
                     tokio::time::sleep(Duration::from_millis(RETRY_MILLIS)).await;
-                }
+                },
             }
         }
     }
@@ -206,7 +208,9 @@ where
         mut stream: OwnedMutexGuard<TcpStream>,
         data: Arc<Vec<u8>>,
     ) -> anyhow::Result<()> {
-        stream.write_all(&(data.len() as MessageSizeTag).to_be_bytes()).await?;
+        stream
+            .write_all(&(data.len() as MessageSizeTag).to_be_bytes())
+            .await?;
         stream.write_all(&data).await?;
         Ok(())
     }
@@ -227,7 +231,10 @@ where
     ) {
         let mut buf = [0; BUF_SIZE];
 
-        stream.read_exact(&mut buf[..size_of::<NodeId>()]).await.unwrap();
+        stream
+            .read_exact(&mut buf[..size_of::<NodeId>()])
+            .await
+            .unwrap();
         let peer_id = NodeId::from_be_bytes(buf[..size_of::<NodeId>()].try_into().unwrap());
 
         loop {
@@ -237,10 +244,10 @@ where
                 },
                 Err(err) => {
                     aptos_logger::error!(
-                            "TCPNET: Failed to read message from peer {}, closing the stream: {}",
-                            peer_id,
-                            err
-                        );
+                        "TCPNET: Failed to read message from peer {}, closing the stream: {}",
+                        peer_id,
+                        err
+                    );
                     break;
                 },
             }
@@ -248,8 +255,12 @@ where
     }
 
     async fn read_message(stream: &mut TcpStream, buf: &mut [u8; BUF_SIZE]) -> anyhow::Result<M> {
-        stream.read_exact(&mut buf[..size_of::<MessageSizeTag>()]).await?;
-        let msg_size = MessageSizeTag::from_be_bytes(buf[..size_of::<MessageSizeTag>()].try_into().unwrap()) as usize;
+        stream
+            .read_exact(&mut buf[..size_of::<MessageSizeTag>()])
+            .await?;
+        let msg_size =
+            MessageSizeTag::from_be_bytes(buf[..size_of::<MessageSizeTag>()].try_into().unwrap())
+                as usize;
         if msg_size > MAX_MESSAGE_SIZE {
             return Err(anyhow::anyhow!("Message size too large: {}", msg_size));
         }
@@ -271,7 +282,8 @@ where
     }
 
     async fn multicast(&self, data: Self::Message) {
-        self.send(0..self.sender.streams.len() as NodeId, data).await
+        self.send(0..self.sender.streams.len() as NodeId, data)
+            .await
     }
 
     async fn recv(&mut self) -> (NodeId, M) {

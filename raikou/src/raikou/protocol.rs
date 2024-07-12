@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    framework::{ContextFor, NodeId, Protocol},
+    framework::{network::Validate, ContextFor, NodeId, Protocol},
     leader_schedule::LeaderSchedule,
     metrics,
     metrics::Sender,
@@ -30,7 +30,6 @@ use std::{
     time::Duration,
 };
 use tokio::time::Instant;
-use crate::framework::network::Validate;
 
 #[derive(Clone, Serialize)]
 pub struct Block {

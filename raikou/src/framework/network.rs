@@ -1,13 +1,11 @@
 // Copyright (c) Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::framework::NodeId;
+use crate::framework::{timer::NeverReturn, NodeId};
 use futures::poll;
 use rand::{distributions::Distribution, Rng};
-use std::{future::Future, task::Poll::Ready, time::Duration};
-use std::marker::PhantomData;
+use std::{future::Future, marker::PhantomData, task::Poll::Ready, time::Duration};
 use tokio::sync::mpsc;
-use crate::framework::timer::NeverReturn;
 
 pub trait Validate {
     fn validate(&self) -> anyhow::Result<()>;

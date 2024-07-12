@@ -1,8 +1,8 @@
 // Copyright (c) Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
+use rand::{thread_rng, Rng};
 use std::time::Duration;
-use rand::{Rng, thread_rng};
 
 pub async fn delay_injection() {
     if cfg!(feature = "inject-delays") {

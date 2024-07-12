@@ -8,12 +8,12 @@ use crate::framework::{
 use std::{any::Any, future::Future, sync::Arc};
 
 pub mod context;
+pub mod injection;
 pub mod module_network;
 pub mod network;
+pub mod tcp_network;
 pub mod timer;
 pub mod udp_network;
-pub mod injection;
-pub mod tcp_network;
 
 pub type NodeId = usize;
 

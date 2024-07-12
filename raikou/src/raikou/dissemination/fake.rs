@@ -3,7 +3,10 @@
 
 use crate::{
     framework::{
-        module_network::ModuleId, network::NetworkService, timer::TimerService, NodeId, Protocol,
+        module_network::ModuleId,
+        network::{NetworkService, Validate},
+        timer::TimerService,
+        ContextFor, NodeId, Protocol,
     },
     metrics,
     metrics::Sender,
@@ -29,8 +32,6 @@ use std::{
     time::Duration,
 };
 use tokio::time::Instant;
-use crate::framework::ContextFor;
-use crate::framework::network::Validate;
 
 #[derive(Clone, Serialize)]
 pub struct Batch {
@@ -156,7 +157,8 @@ where
     ) -> Self {
         if !config.enable_optimistic_dissemination && !config.enable_penalty_tracker {
             aptos_logger::warn!(
-                "Disabling the penalty tracker because optimistic dissemination is disabled.");
+                "Disabling the penalty tracker because optimistic dissemination is disabled."
+            );
             config.enable_penalty_tracker = false;
         }
 

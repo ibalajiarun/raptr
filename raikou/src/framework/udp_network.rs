@@ -1,25 +1,26 @@
 // Copyright (c) Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
-use std::fmt::format;
-use std::future::Future;
-use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
-
-use futures::{FutureExt, StreamExt};
-use futures::future::join_all;
-use futures::stream::FuturesUnordered;
+use crate::framework::{
+    injection::{delay_injection, drop_injection},
+    network::{NetworkService, Validate},
+    NodeId,
+};
+use aptos_channels::{aptos_channel, message_queues::QueueStyle};
+use futures::{future::join_all, stream::FuturesUnordered, FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio::join;
-use tokio::net::UdpSocket;
-use tokio::sync::{Mutex, OwnedMutexGuard};
-
-use aptos_channels::aptos_channel;
-use aptos_channels::message_queues::QueueStyle;
-use crate::framework::injection::{delay_injection, drop_injection};
-use crate::framework::network::{NetworkService, Validate};
-use crate::framework::NodeId;
+use std::{
+    collections::HashMap,
+    fmt::format,
+    future::Future,
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+};
+use tokio::{
+    join,
+    net::UdpSocket,
+    sync::{Mutex, OwnedMutexGuard},
+};
 
 pub const MAX_MESSAGE_SIZE: usize = 1024;
 
@@ -42,7 +43,9 @@ struct UdpNetworkServiceSender<M> {
 
 impl<M> UdpNetworkServiceSender<M> {
     fn self_send(&self, msg: M) {
-        self.self_send.push(self.node_id, (self.node_id, msg)).unwrap();
+        self.self_send
+            .push(self.node_id, (self.node_id, msg))
+            .unwrap();
     }
 }
 
@@ -50,12 +53,7 @@ impl<M> UdpNetworkService<M>
 where
     M: Send + Sync + 'static + Serialize + for<'de> Deserialize<'de> + Validate,
 {
-    pub async fn new(
-        node_id: NodeId,
-        addr: IpAddr,
-        base_port: u16,
-        config: Config,
-    ) -> Self {
+    pub async fn new(node_id: NodeId, addr: IpAddr, base_port: u16, config: Config) -> Self {
         aptos_logger::info!(
             "Starting UDP network service for node {} at {}:{}-{}",
             node_id,
@@ -64,11 +62,7 @@ where
             base_port + config.peers.len() as u16 - 1
         );
 
-        let (tx, rx) = aptos_channel::new(
-            QueueStyle::LIFO,
-            16,
-            None,
-        );
+        let (tx, rx) = aptos_channel::new(QueueStyle::LIFO, 16, None);
         let mut socks = vec![];
 
         for (peer_id, (peer_addr, peer_base_port)) in config.peers.iter().cloned().enumerate() {
@@ -82,7 +76,7 @@ where
                 peer_id,
                 sock,
                 tx.clone(),
-                config.peer_concurrency_level
+                config.peer_concurrency_level,
             ));
         }
 
@@ -174,7 +168,7 @@ where
                 Err(err) => {
                     aptos_logger::error!("Error receiving message from {}: {}", peer_id, err);
                     break;
-                }
+                },
             }
         }
     }
@@ -183,7 +177,7 @@ where
         buf: OwnedMutexGuard<[u8; MAX_MESSAGE_SIZE]>,
         msg_len: usize,
         peer_id: NodeId,
-        tx: aptos_channel::Sender<NodeId, (NodeId, M)>
+        tx: aptos_channel::Sender<NodeId, (NodeId, M)>,
     ) {
         let data = &*buf;
         if let Ok(msg) = bcs::from_bytes::<M>(&data[..msg_len]) {

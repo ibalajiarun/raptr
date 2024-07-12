@@ -2,7 +2,6 @@
 // Parts of the project are originally copyright © Meta Platforms, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::net::IpAddr;
 use crate::network_address::NetworkAddress;
 use aptos_crypto::bls12381;
 use move_core_types::{
@@ -13,6 +12,7 @@ use move_core_types::{
 #[cfg(any(test, feature = "fuzzing"))]
 use proptest_derive::Arbitrary;
 use serde::{Deserialize, Serialize};
+use std::net::IpAddr;
 
 impl MoveStructType for ValidatorConfig {
     const MODULE_NAME: &'static IdentStr = ident_str!("stake");

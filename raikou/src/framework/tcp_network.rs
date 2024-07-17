@@ -8,6 +8,8 @@ use crate::framework::{
 };
 use aptos_channels::{aptos_channel, message_queues::QueueStyle};
 use futures::{future::join_all, stream::FuturesUnordered, FutureExt, StreamExt};
+use aptos_types::validator_verifier::{self, ValidatorVerifier};
+
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -71,20 +73,21 @@ impl<M> TcpNetworkServiceSender<M> {
 
 impl<M> TcpNetworkService<M>
 where
-    M: Send + Sync + 'static + Serialize + for<'de> Deserialize<'de> + Validate,
+    M: Send + Sync + 'static + Serialize + for<'de> Deserialize<'de> + Validate + std::fmt::Debug,
 {
-    pub async fn new(node_id: NodeId, addr: SocketAddr, config: Config) -> Self {
-        aptos_logger::info!(
-            "TCPNET: Starting TCP network service for node {} at {}",
-            node_id,
-            addr
-        );
+    pub async fn new(
+        node_id: NodeId,
+        addr: SocketAddr,
+        config: Config,
+        validator_verifier: Arc<ValidatorVerifier>,
+    ) -> Self {
+        aptos_logger::info!("TCPNET: Starting TCP network service for node {} at {}", node_id, addr);
 
         let (self_send, recv) = aptos_channel::new(QueueStyle::LIFO, 16, None);
 
         // Start the receiver task
         let listener = Self::create_listener(addr).await;
-        tokio::spawn(Self::listen_loop(listener, self_send.clone()));
+        tokio::spawn(Self::listen_loop(listener, self_send.clone(), validator_verifier));
 
         let mut streams = Vec::new();
 
@@ -218,16 +221,18 @@ where
     async fn listen_loop(
         tcp_listener: TcpListener,
         self_send: aptos_channel::Sender<NodeId, (NodeId, M)>,
+        validator_verifier: Arc<ValidatorVerifier>,
     ) {
         loop {
             let (stream, _) = tcp_listener.accept().await.unwrap();
-            tokio::spawn(Self::listen_stream(stream, self_send.clone()));
+            tokio::spawn(Self::listen_stream(stream, self_send.clone(), validator_verifier.clone()));
         }
     }
 
     async fn listen_stream(
         mut stream: TcpStream,
         self_send: aptos_channel::Sender<NodeId, (NodeId, M)>,
+        validator_verifier: Arc<ValidatorVerifier>,
     ) {
         let mut buf = [0; BUF_SIZE];
 
@@ -238,7 +243,7 @@ where
         let peer_id = NodeId::from_be_bytes(buf[..size_of::<NodeId>()].try_into().unwrap());
 
         loop {
-            match Self::read_message(&mut stream, &mut buf).await {
+            match Self::read_message(&mut stream, validator_verifier.clone(), &mut buf).await {
                 Ok(msg) => {
                     self_send.push(peer_id, (peer_id, msg)).unwrap();
                 },
@@ -254,7 +259,7 @@ where
         }
     }
 
-    async fn read_message(stream: &mut TcpStream, buf: &mut [u8; BUF_SIZE]) -> anyhow::Result<M> {
+    async fn read_message(stream: &mut TcpStream, validator_verifier: Arc<ValidatorVerifier>, buf: &mut [u8; BUF_SIZE]) -> anyhow::Result<M> {
         stream
             .read_exact(&mut buf[..size_of::<MessageSizeTag>()])
             .await?;
@@ -266,14 +271,16 @@ where
         }
         stream.read_exact(&mut buf[..msg_size]).await?;
         let msg: M = bcs::from_bytes(&buf[..msg_size])?;
-        msg.validate()?;
-        Ok(msg)
+        match msg.validate(&validator_verifier) {
+            Ok(()) => Ok(msg),
+            Err(err) => Err(anyhow::anyhow!("Failed to validate message {:?} due to error {}", msg, err)),
+        }
     }
 }
 
 impl<M> NetworkService for TcpNetworkService<M>
 where
-    M: Send + Sync + 'static + Serialize + for<'de> Deserialize<'de> + Validate,
+    M: Send + Sync + 'static + Serialize + for<'de> Deserialize<'de> + Validate + std::fmt::Debug,
 {
     type Message = M;
 

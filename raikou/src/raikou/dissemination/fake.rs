@@ -20,6 +20,7 @@ use crate::{
         types::*,
     },
 };
+use aptos_crypto::{bls12381::Signature, hash::CryptoHash, Genesis};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
 use bitvec::prelude::BitVec;
 use defaultmap::DefaultBTreeMap;
@@ -32,6 +33,7 @@ use std::{
     time::Duration,
 };
 use tokio::time::Instant;
+use aptos_types::validator_verifier::ValidatorVerifier;
 
 #[derive(Clone, Serialize)]
 pub struct Batch {
@@ -40,7 +42,7 @@ pub struct Batch {
     digest: BatchHash,
 }
 
-#[derive(Clone, Hash, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
+#[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
 struct BatchData {
     author: NodeId,
     batch_id: BatchId,
@@ -53,7 +55,7 @@ impl<'de> Deserialize<'de> for Batch {
         D: serde::Deserializer<'de>,
     {
         let data = BatchData::deserialize(deserializer)?;
-        let digest = hash(&data);
+        let digest = data.hash();
         Ok(Batch { data, digest })
     }
 
@@ -62,7 +64,7 @@ impl<'de> Deserialize<'de> for Batch {
         D: serde::Deserializer<'de>,
     {
         BatchData::deserialize_in_place(deserializer, &mut place.data)?;
-        place.digest = hash(&place.data);
+        place.digest = place.data.hash();
         Ok(())
     }
 }
@@ -98,8 +100,23 @@ pub enum Message {
     PenaltyTrackerReport(Round, PenaltyTrackerReports),
 }
 
+impl std::fmt::Debug for Message {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Message::Batch(batch) => write!(f, "Batch({})", batch.batch_id()),
+            Message::BatchStored(batch_id) => write!(f, "BatchStored({})", batch_id),
+            Message::AvailabilityCert(ac) => write!(f, "AvailabilityCert({})", ac.info.batch_id),
+            // Message::Fetch(digest) => write!(f, "Fetch({:#x})", digest),
+            Message::PenaltyTrackerReport(round, reports) => {
+                write!(f, "PenaltyTrackerReport({}, {:?})", round, reports)
+            }
+        }
+    }
+
+}
+
 impl Validate for Message {
-    fn validate(&self) -> anyhow::Result<()> {
+    fn validate(&self, validator_verifier: &ValidatorVerifier) -> anyhow::Result<()> {
         // TODO: implement validation
         Ok(())
     }
@@ -433,7 +450,7 @@ where
                 batch_id,
                 txns: Arc::new(self.txns_iter.next().unwrap()),
             };
-            let digest = hash(&batch_data);
+            let digest = batch_data.hash();
             let batch = Batch { data: batch_data, digest: digest.clone() };
 
             self.log_detail(format!(

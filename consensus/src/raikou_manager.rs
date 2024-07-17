@@ -5,6 +5,7 @@ use crate::{
     network::NetworkSender, network_interface::ConsensusMsg, payload_client::PayloadClient,
     payload_manager::PayloadManager,
 };
+use aptos_types::{validator_signer::ValidatorSigner, validator_verifier::ValidatorVerifier};
 use ::raikou::leader_schedule::round_robin;
 use aptos_config::config::ConsensusConfig;
 use aptos_consensus_types::{common::Author, proof_of_store::BatchInfo};
@@ -76,6 +77,7 @@ impl RaikouManager {
         payload_manager: Arc<PayloadManager>,
         consensus_config: ConsensusConfig,
         validator_set: ValidatorSet,
+        validator_signer: Arc<ValidatorSigner>,
     ) {
         let n_nodes = epoch_state.verifier.len();
         let f = (n_nodes - 1) / 3;
@@ -144,8 +146,8 @@ impl RaikouManager {
                     .collect(),
                 streams_per_peer: 4,
             },
-        )
-        .await;
+            Arc::new(epoch_state.verifier.clone()),
+        ).await;
 
         let config = raikou::raikou::Config {
             n_nodes,
@@ -186,6 +188,7 @@ impl RaikouManager {
             diss_rx,
             network_sender.clone(),
             validator_set,
+            Arc::new(epoch_state.verifier.clone()),
             enable_optimistic_dissemination,
         )
         .await;
@@ -212,6 +215,8 @@ impl RaikouManager {
                 batch_consensus_latency: batch_consensus_latency_sender,
                 // indirectly_committed_slots: indirectly_committed_slots_sender,
             },
+            Arc::new(epoch_state.verifier.clone()),
+            validator_signer,
         )));
 
         tokio::select! {
@@ -265,6 +270,7 @@ impl RaikouManager {
         >,
         network_sender: Arc<NetworkSender>,
         validator_set: ValidatorSet,
+        validator_verifier: Arc<ValidatorVerifier>,
         enable_optimistic_dissemination: bool,
     ) -> impl DisseminationLayer {
         // let diss_network_service =
@@ -289,6 +295,8 @@ impl RaikouManager {
         //         peer_concurrency_level: 4,
         //     },
         // ).await;
+
+        use aptos_types::validator_verifier::{self, ValidatorVerifier};
 
         let diss_network_service = TcpNetworkService::new(
             node_id,
@@ -319,8 +327,8 @@ impl RaikouManager {
                     .collect(),
                 streams_per_peer: 4,
             },
-        )
-        .await;
+            validator_verifier,
+        ).await;
 
         let diss_timer = LocalTimerService::new();
 

@@ -8,6 +8,8 @@ use crate::framework::{
 };
 use aptos_channels::{aptos_channel, message_queues::QueueStyle};
 use futures::{future::join_all, stream::FuturesUnordered, FutureExt, StreamExt};
+use aptos_types::validator_verifier::ValidatorVerifier;
+
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -53,7 +55,13 @@ impl<M> UdpNetworkService<M>
 where
     M: Send + Sync + 'static + Serialize + for<'de> Deserialize<'de> + Validate,
 {
-    pub async fn new(node_id: NodeId, addr: IpAddr, base_port: u16, config: Config) -> Self {
+    pub async fn new(
+        node_id: NodeId,
+        addr: IpAddr,
+        base_port: u16,
+        config: Config,
+        validator_verifier: Arc<ValidatorVerifier>,
+    ) -> Self {
         aptos_logger::info!(
             "Starting UDP network service for node {} at {}:{}-{}",
             node_id,
@@ -77,6 +85,7 @@ where
                 sock,
                 tx.clone(),
                 config.peer_concurrency_level,
+                validator_verifier.clone(),
             ));
         }
 
@@ -135,6 +144,7 @@ where
         recv_socket: Arc<UdpSocket>,
         tx: aptos_channel::Sender<NodeId, (NodeId, M)>,
         concurrency_level: usize,
+        validator_verifier: Arc<ValidatorVerifier>,
     ) {
         let mut bufs = Vec::new();
         for _ in 0..concurrency_level {
@@ -160,9 +170,9 @@ where
                     cur_buf = (cur_buf + 1) % bufs.len();
 
                     if concurrency_level == 1 {
-                        Self::process_message(buf, n, peer_id, tx).await;
+                        Self::process_message(buf, n, peer_id, tx, validator_verifier.clone()).await;
                     } else {
-                        tokio::spawn(Self::process_message(buf, n, peer_id, tx));
+                        tokio::spawn(Self::process_message(buf, n, peer_id, tx, validator_verifier.clone()));
                     }
                 },
                 Err(err) => {
@@ -178,10 +188,11 @@ where
         msg_len: usize,
         peer_id: NodeId,
         tx: aptos_channel::Sender<NodeId, (NodeId, M)>,
+        validator_verifier: Arc<ValidatorVerifier>,
     ) {
         let data = &*buf;
         if let Ok(msg) = bcs::from_bytes::<M>(&data[..msg_len]) {
-            if let Ok(()) = msg.validate() {
+            if let Ok(()) = msg.validate(&validator_verifier) {
                 tx.push(peer_id, (peer_id, msg)).unwrap();
             } else {
                 aptos_logger::error!("Invalid message from {}", peer_id);

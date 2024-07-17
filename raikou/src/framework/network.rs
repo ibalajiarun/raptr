@@ -2,13 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::framework::{timer::NeverReturn, NodeId};
+use aptos_types::validator_verifier::{self, ValidatorVerifier};
 use futures::poll;
 use rand::{distributions::Distribution, Rng};
 use std::{future::Future, marker::PhantomData, task::Poll::Ready, time::Duration};
 use tokio::sync::mpsc;
 
 pub trait Validate {
-    fn validate(&self) -> anyhow::Result<()>;
+    fn validate(&self, validator_verifier: &ValidatorVerifier) -> anyhow::Result<()>;
 }
 
 pub trait NetworkService: Send + Sync + 'static {

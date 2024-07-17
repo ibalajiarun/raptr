@@ -1309,6 +1309,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             payload_manager,
             self.config.clone(),
             validator_set,
+            signer,
         ));
     }
 

@@ -2,8 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    network::NetworkSender, network_interface::ConsensusMsg, payload_client::PayloadClient,
-    payload_manager::PayloadManager,
+    network::NetworkSender, network_interface::ConsensusMsg, payload_client::PayloadClient, payload_manager::TPayloadManager,
 };
 use aptos_types::{validator_signer::ValidatorSigner, validator_verifier::ValidatorVerifier};
 use ::raikou::leader_schedule::round_robin;
@@ -74,7 +73,7 @@ impl RaikouManager {
         >,
         mut shutdown_rx: oneshot::Receiver<oneshot::Sender<()>>,
         payload_client: Arc<dyn PayloadClient>,
-        payload_manager: Arc<PayloadManager>,
+        payload_manager: Arc<dyn TPayloadManager>,
         consensus_config: ConsensusConfig,
         validator_set: ValidatorSet,
         validator_signer: Arc<ValidatorSigner>,

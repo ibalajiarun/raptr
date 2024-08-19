@@ -62,11 +62,7 @@ use aptos_config::config::{
     SafetyRulesConfig, SecureBackend,
 };
 use aptos_consensus_types::{
-    common::{Author, Round},
-    delayed_qc_msg::DelayedQcMsg,
-    epoch_retrieval::EpochRetrievalRequest,
-    proof_of_store::ProofCache,
-    utils::PayloadTxnsSize,
+    common::{Author, Round}, delayed_qc_msg::DelayedQcMsg, epoch_retrieval::EpochRetrievalRequest, pipelined_block::OrderedBlocks, proof_of_store::ProofCache, utils::PayloadTxnsSize
 };
 use aptos_crypto::bls12381;
 use aptos_dkg::{
@@ -1335,6 +1331,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             self.config.clone(),
             validator_set,
             signer,
+            self.execution_client.get_execution_channel().expect("unable to get execution channel"),
         ));
     }
 

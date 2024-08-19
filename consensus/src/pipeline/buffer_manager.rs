@@ -69,11 +69,13 @@ pub struct ResetRequest {
     pub signal: ResetSignal,
 }
 
-pub struct OrderedBlocks {
-    pub ordered_blocks: Vec<PipelinedBlock>,
-    pub ordered_proof: LedgerInfoWithSignatures,
-    pub callback: StateComputerCommitCallBackType,
-}
+// pub struct OrderedBlocks {
+//     pub ordered_blocks: Vec<PipelinedBlock>,
+//     pub ordered_proof: LedgerInfoWithSignatures,
+//     pub callback: StateComputerCommitCallBackType,
+// }
+
+pub type OrderedBlocks = aptos_consensus_types::pipelined_block::OrderedBlocks;
 
 pub type BufferItemRootType = Cursor;
 pub type Sender<T> = UnboundedSender<T>;

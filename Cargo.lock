@@ -13674,6 +13674,7 @@ dependencies = [
  "defaultmap",
  "env_logger",
  "futures",
+ "futures-channel",
  "itertools 0.13.0",
  "log",
  "nanovec",

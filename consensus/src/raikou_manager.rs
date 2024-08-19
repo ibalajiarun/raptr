@@ -7,10 +7,10 @@ use crate::{
 use aptos_types::{validator_signer::ValidatorSigner, validator_verifier::ValidatorVerifier};
 use ::raikou::leader_schedule::round_robin;
 use aptos_config::config::ConsensusConfig;
-use aptos_consensus_types::{common::Author, proof_of_store::BatchInfo};
+use aptos_consensus_types::{common::Author, pipelined_block::OrderedBlocks, proof_of_store::BatchInfo};
 use aptos_types::{epoch_state::EpochState, on_chain_config::ValidatorSet};
 use futures::StreamExt;
-use futures_channel::oneshot;
+use futures_channel::{mpsc::UnboundedSender, oneshot};
 use raikou::{
     framework::{
         injection::{delay_injection, drop_injection},
@@ -77,6 +77,7 @@ impl RaikouManager {
         consensus_config: ConsensusConfig,
         validator_set: ValidatorSet,
         validator_signer: Arc<ValidatorSigner>,
+        ordered_nodes_tx: UnboundedSender<OrderedBlocks>,
     ) {
         let n_nodes = epoch_state.verifier.len();
         let f = (n_nodes - 1) / 3;
@@ -216,6 +217,7 @@ impl RaikouManager {
             },
             Arc::new(epoch_state.verifier.clone()),
             validator_signer,
+            ordered_nodes_tx,
         )));
 
         tokio::select! {

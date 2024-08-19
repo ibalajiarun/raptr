@@ -14,12 +14,13 @@ use crate::{
     },
     utils::kth_max_set::KthMaxSet,
 };
-use aptos_consensus_types::common::Author;
+use aptos_consensus_types::{common::Author, pipelined_block::OrderedBlocks};
 use aptos_crypto::{bls12381::Signature, hash::CryptoHash, CryptoMaterialError, Genesis};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
 use aptos_types::{aggregate_signature::{AggregateSignature, PartialSignatures}, validator_signer::{self, ValidatorSigner}, validator_verifier::{self, ValidatorVerifier}};
 use bitvec::vec::BitVec;
 use defaultmap::DefaultBTreeMap;
+use futures_channel::mpsc::UnboundedSender;
 use itertools::Itertools;
 use nanovec::NanoArrayBit;
 use rand::prelude::SliceRandom;
@@ -795,6 +796,7 @@ pub struct RaikouNode<S, DL> {
 
     validator_verifier: Arc<ValidatorVerifier>,
     validator_signer: Arc<ValidatorSigner>,
+    ordered_nodes_tx: UnboundedSender<OrderedBlocks>,
 }
 
 impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
@@ -807,6 +809,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         metrics: Metrics,
         validator_verifier: Arc<ValidatorVerifier>,
         validator_signer: Arc<ValidatorSigner>,
+        ordered_nodes_tx: UnboundedSender<OrderedBlocks>,
     ) -> Self {
         let quorum = config.quorum();
         assert!(config.block_fetch_multiplicity <= quorum);
@@ -843,6 +846,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             tc_votes: Default::default(),
             validator_verifier,
             validator_signer,
+            ordered_nodes_tx,
         }
     }
 

@@ -13,11 +13,7 @@ use aptos_crypto::hash::{HashValue, ACCUMULATOR_PLACEHOLDER_HASH};
 use aptos_executor_types::StateComputeResult;
 use aptos_logger::{error, warn};
 use aptos_types::{
-    block_info::BlockInfo,
-    contract_event::ContractEvent,
-    randomness::Randomness,
-    transaction::{SignedTransaction, TransactionStatus},
-    validator_txn::ValidatorTransaction,
+    block_info::BlockInfo, contract_event::ContractEvent, ledger_info::LedgerInfoWithSignatures, randomness::Randomness, transaction::{SignedTransaction, TransactionStatus}, validator_txn::ValidatorTransaction
 };
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -316,4 +312,13 @@ pub struct ExecutionSummary {
     pub to_retry: u64,
     pub execution_time: Duration,
     pub root_hash: HashValue,
+}
+
+pub type StateComputerCommitCallBackType =
+    Box<dyn FnOnce(&[Arc<PipelinedBlock>], LedgerInfoWithSignatures) + Send + Sync>;
+
+pub struct OrderedBlocks {
+    pub ordered_blocks: Vec<PipelinedBlock>,
+    pub ordered_proof: LedgerInfoWithSignatures,
+    pub callback: StateComputerCommitCallBackType,
 }

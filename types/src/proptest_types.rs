@@ -6,7 +6,9 @@
 
 use crate::{
     account_address::{self, AccountAddress},
-    account_config::{AccountResource, CoinStoreResource},
+    account_config::{
+        AccountResource, CoinStoreResource, NewEpochEvent, NEW_EPOCH_EVENT_V2_MOVE_TYPE_TAG,
+    },
     aggregate_signature::PartialSignatures,
     block_info::{BlockInfo, Round},
     block_metadata::BlockMetadata,
@@ -32,6 +34,7 @@ use crate::{
     validator_verifier::{ValidatorConsensusInfo, ValidatorVerifier},
     vm_status::VMStatus,
     write_set::{WriteOp, WriteSet, WriteSetMut},
+    AptosCoinType,
 };
 use aptos_crypto::{
     bls12381::{self, bls12381_keys},
@@ -54,6 +57,7 @@ use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     iter::Iterator,
+    sync::Arc,
 };
 
 impl WriteOp {
@@ -193,7 +197,7 @@ impl AccountInfoUniverse {
         accounts.sort_by(|a, b| a.address.cmp(&b.address));
         let validator_signer = ValidatorSigner::new(
             accounts[0].address,
-            accounts[0].consensus_private_key.clone(),
+            Arc::new(accounts[0].consensus_private_key.clone()),
         );
         let validator_set_by_epoch = vec![(0, vec![validator_signer])].into_iter().collect();
 
@@ -594,7 +598,7 @@ impl Arbitrary for LedgerInfoWithSignatures {
                 LedgerInfoWithSignatures::new(
                     ledger_info,
                     validator_verifier
-                        .aggregate_signatures(&partial_sig)
+                        .aggregate_signatures(partial_sig.signatures_iter())
                         .unwrap(),
                 )
             })
@@ -659,8 +663,8 @@ pub struct CoinStoreResourceGen {
 }
 
 impl CoinStoreResourceGen {
-    pub fn materialize(self) -> CoinStoreResource {
-        CoinStoreResource::new(
+    pub fn materialize(self) -> CoinStoreResource<AptosCoinType> {
+        CoinStoreResource::<AptosCoinType>::new(
             self.coin,
             false,
             EventHandle::random(0),
@@ -692,7 +696,7 @@ impl AccountStateGen {
                 bcs::to_bytes(&account_resource).unwrap(),
             ),
             (
-                StateKey::resource_typed::<CoinStoreResource>(address).unwrap(),
+                StateKey::resource_typed::<CoinStoreResource<AptosCoinType>>(address).unwrap(),
                 bcs::to_bytes(&balance_resource).unwrap(),
             ),
         ]
@@ -1017,7 +1021,10 @@ impl ValidatorSetGen {
             .get_account_infos_dedup(&self.validators)
             .iter()
             .map(|account| {
-                ValidatorSigner::new(account.address, account.consensus_private_key.clone())
+                ValidatorSigner::new(
+                    account.address,
+                    Arc::new(account.consensus_private_key.clone()),
+                )
             })
             .collect()
     }
@@ -1063,9 +1070,10 @@ impl BlockInfoGen {
                     )
                 })
                 .collect();
+            let verifier: ValidatorVerifier = (&ValidatorSet::new(next_validator_infos)).into();
             let next_epoch_state = EpochState {
                 epoch: current_epoch + 1,
-                verifier: (&ValidatorSet::new(next_validator_infos)).into(),
+                verifier: verifier.into(),
             };
 
             universe.get_and_bump_epoch();
@@ -1157,6 +1165,11 @@ impl BlockGen {
         self,
         universe: &mut AccountInfoUniverse,
     ) -> (Vec<TransactionToCommit>, LedgerInfo) {
+        let num_txns = self.txn_gens.len() + 1;
+
+        // materialize ledger info
+        let ledger_info = self.ledger_info_gen.materialize(universe, num_txns);
+
         let mut txns_to_commit = Vec::new();
 
         // materialize user transactions
@@ -1171,17 +1184,19 @@ impl BlockGen {
                 Some(HashValue::random()),
                 ExecutionStatus::Success,
             ),
-            arr_macro::arr![HashMap::new(); 16],
+            arr![HashMap::new(); 16],
             WriteSet::default(),
-            Vec::new(),
+            if ledger_info.ends_epoch() {
+                vec![ContractEvent::new_v2(
+                    NEW_EPOCH_EVENT_V2_MOVE_TYPE_TAG.clone(),
+                    bcs::to_bytes(&NewEpochEvent::dummy()).unwrap(),
+                )]
+            } else {
+                vec![]
+            },
             false,
             TransactionAuxiliaryData::default(),
         ));
-
-        // materialize ledger info
-        let ledger_info = self
-            .ledger_info_gen
-            .materialize(universe, txns_to_commit.len());
 
         (txns_to_commit, ledger_info)
     }

@@ -575,6 +575,7 @@ spec aptos_framework::account {
         // This function should not abort assuming the result of `sha3_256` is deserializable into an address.
         aborts_if [abstract] false;
         ensures [abstract] result == spec_create_resource_address(source, seed);
+        ensures [abstract] source != result; // We can assume that the derived resource account does not equal to `source`
     }
 
     spec fun spec_create_resource_address(source: address, seed: vector<u8>): address;
@@ -617,7 +618,7 @@ spec aptos_framework::account {
     }
 
     /// The Account existed under the signer.
-    /// The guid_creation_num of the ccount resource is up to MAX_U64.
+    /// The guid_creation_num of the account resource is up to MAX_U64.
     spec create_guid(account_signer: &signer): guid::GUID {
         let addr = signer::address_of(account_signer);
         include NewEventHandleAbortsIf {
@@ -660,6 +661,10 @@ spec aptos_framework::account {
         aborts_if account.sequence_number != 0;
     }
 
+    spec originating_address(auth_key: address): Option<address> {
+        pragma verify=false;
+    }
+
     spec update_auth_key_and_originating_address_table(
         originating_addr: address,
         account_resource: &mut Account,
@@ -680,6 +685,7 @@ spec aptos_framework::account {
         aborts_if table::spec_contains(address_map, curr_auth_key) &&
             table::spec_get(address_map, curr_auth_key) != originating_addr;
         aborts_if !from_bcs::deserializable<address>(new_auth_key_vector);
+        aborts_if curr_auth_key == new_auth_key;
         aborts_if curr_auth_key != new_auth_key && table::spec_contains(address_map, new_auth_key);
 
         ensures table::spec_contains(global<OriginatingAddress>(@aptos_framework).address_map, from_bcs::deserialize<address>(new_auth_key_vector));
@@ -727,5 +733,9 @@ spec aptos_framework::account {
         // );
 
         aborts_if account_scheme != ED25519_SCHEME && account_scheme != MULTI_ED25519_SCHEME;
+    }
+
+    spec set_originating_address(account: &signer) {
+        pragma verify=false;
     }
 }

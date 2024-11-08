@@ -1,7 +1,7 @@
 // Copyright (c) Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
-//! This module contains a fixed window peephole optimizer for the Move bytecode.
+//! This module contains a window peephole optimizer for the Move bytecode.
 //! As with all peephole optimizers here, it assumes that the bytecode is valid.
 //!
 //! We consider fixed windows of size 2 for this optimizer.
@@ -27,8 +27,11 @@
 //!    target.
 //!    - stack is left unaffected (the first instruction pushes a constant, the second
 //!      takes it off).
+//! 6. [`LdTrue`, `BrFalse`] or [`LdFalse`, `BrTrue`]: Remove the pair.
+//!    - stack is left unaffected.
 //!    - locals are unaffected.
-//! 6. [`Not`, `BrFalse`] or [`Not`, `BrTrue`]: Replace with `BrTrue` or `BrFalse`.
+//!    - basic blocks are merged.
+//! 7. [`Not`, `BrFalse`] or [`Not`, `BrTrue`]: Replace with `BrTrue` or `BrFalse`.
 //!    - stack is left unaffected (first instruction negates the top, second takes it
 //!      off, vs. just take off the top).
 //!    - locals are unaffected.
@@ -36,30 +39,35 @@
 //! Finally, note that fixed window optimizations are performed on windows within a basic
 //! block, not spanning across multiple basic blocks.
 
-use crate::file_format_generator::peephole_optimizer::optimizers::FixedWindowOptimizer;
+use crate::file_format_generator::peephole_optimizer::optimizers::WindowOptimizer;
 use move_binary_format::file_format::Bytecode;
 
 pub struct ReduciblePairs;
 
-impl FixedWindowOptimizer for ReduciblePairs {
-    fn fixed_window_size(&self) -> usize {
-        2
-    }
+impl ReduciblePairs {
+    const WINDOW_SIZE: usize = 2;
+}
 
-    fn optimize_fixed_window(&self, window: &[Bytecode]) -> Option<Vec<Bytecode>> {
+impl WindowOptimizer for ReduciblePairs {
+    fn optimize_window(&self, window: &[Bytecode]) -> Option<(Vec<Bytecode>, usize)> {
         use Bytecode::*;
+        if window.len() < Self::WINDOW_SIZE {
+            return None;
+        }
         // See module documentation for the reasoning behind these optimizations.
-        match (&window[0], &window[1]) {
+        let optimized = match (&window[0], &window[1]) {
             (StLoc(u), MoveLoc(v)) | (CopyLoc(u), StLoc(v)) | (MoveLoc(u), StLoc(v))
                 if *u == *v =>
             {
-                Some(vec![])
+                vec![]
             },
-            (CopyLoc(_), Pop) => Some(vec![]),
-            (LdTrue, BrTrue(target)) | (LdFalse, BrFalse(target)) => Some(vec![Branch(*target)]),
-            (Not, BrFalse(target)) => Some(vec![BrTrue(*target)]),
-            (Not, BrTrue(target)) => Some(vec![BrFalse(*target)]),
-            _ => None,
-        }
+            (CopyLoc(_), Pop) => vec![],
+            (LdTrue, BrTrue(target)) | (LdFalse, BrFalse(target)) => vec![Branch(*target)],
+            (LdTrue, BrFalse(_)) | (LdFalse, BrTrue(_)) => vec![],
+            (Not, BrFalse(target)) => vec![BrTrue(*target)],
+            (Not, BrTrue(target)) => vec![BrFalse(*target)],
+            _ => return None,
+        };
+        Some((optimized, Self::WINDOW_SIZE))
     }
 }

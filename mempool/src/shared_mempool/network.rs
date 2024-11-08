@@ -194,11 +194,15 @@ impl<NetworkClient: NetworkClientInterface<MempoolSyncMsg>> MempoolNetworkInterf
     ) -> (Vec<PeerNetworkId>, Vec<PeerNetworkId>) {
         // Get the upstream peers to add or disable, using a read lock
         let (to_add, to_disable) = self.get_upstream_peers_to_add_and_disable(all_connected_peers);
-        info!(
-            "Mempool peers added: {:?}, Mempool peers disabled: {:?}",
-            to_add.iter().map(|(peer, _)| peer).collect::<Vec<_>>(),
-            to_disable
-        );
+
+        if !to_add.is_empty() || !to_disable.is_empty() {
+            info!(
+                "Mempool peers added: {:?}, Mempool peers disabled: {:?}",
+                to_add.iter().map(|(peer, _)| peer).collect::<Vec<_>>(),
+                to_disable
+            );
+        }
+
         // If there are updates, apply using a write lock
         self.add_and_disable_upstream_peers(&to_add, &to_disable);
 
@@ -366,7 +370,7 @@ impl<NetworkClient: NetworkClientInterface<MempoolSyncMsg>> MempoolNetworkInterf
         // If we don't have any info about the node, we shouldn't broadcast to it
         let state = sync_states
             .get_mut(&peer)
-            .ok_or(BroadcastError::PeerNotFound(peer))?;
+            .ok_or_else(|| BroadcastError::PeerNotFound(peer))?;
 
         // If backoff mode is on for this peer, only execute broadcasts that were scheduled as a backoff broadcast.
         // This is to ensure the backoff mode is actually honored (there is a chance a broadcast was scheduled
@@ -603,7 +607,7 @@ impl<NetworkClient: NetworkClientInterface<MempoolSyncMsg>> MempoolNetworkInterf
         let mut sync_states = self.sync_states.write();
         let state = sync_states
             .get_mut(&peer)
-            .ok_or(BroadcastError::PeerNotFound(peer))?;
+            .ok_or_else(|| BroadcastError::PeerNotFound(peer))?;
 
         // Update peer sync state with info from above broadcast.
         state.update(&message_id);

@@ -17,7 +17,11 @@ use crate::{
 use aptos_consensus_types::{common::Author, pipelined_block::OrderedBlocks};
 use aptos_crypto::{bls12381::Signature, hash::CryptoHash, CryptoMaterialError, Genesis};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
-use aptos_types::{aggregate_signature::{AggregateSignature, PartialSignatures}, validator_signer::{self, ValidatorSigner}, validator_verifier::{self, ValidatorVerifier}};
+use aptos_types::{
+    aggregate_signature::{AggregateSignature, PartialSignatures},
+    validator_signer::ValidatorSigner,
+    validator_verifier::ValidatorVerifier,
+};
 use bitvec::vec::BitVec;
 use defaultmap::DefaultBTreeMap;
 use futures_channel::mpsc::UnboundedSender;
@@ -90,9 +94,7 @@ impl<'de> Deserialize<'de> for Block {
     }
 }
 
-#[cfg_attr(
-    all(feature = "sim-types", not(feature = "force-aptos-types")),
-)]
+// #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
 struct BlockData {
     round: Round,
@@ -187,7 +189,8 @@ impl Block {
                 cc.round == self.round() - 1 && parent_qc.sub_block_id() >= cc.highest_qc_id()
             },
             RoundEnterReason::TC(tc) => {
-                tc.timeout_round == self.round() - 1 && parent_qc.sub_block_id() >= tc.highest_qc_id()
+                tc.timeout_round == self.round() - 1
+                    && parent_qc.sub_block_id() >= tc.highest_qc_id()
             },
         }
     }
@@ -196,19 +199,27 @@ impl Block {
         match &self.data.reason {
             RoundEnterReason::Genesis => Ok(()),
             _ => {
-                let signature = self.signature.as_ref().ok_or_else(|| anyhow::anyhow!("Missing signature"))?;
-                let author = self.data.author.ok_or_else(|| anyhow::anyhow!("Missing author"))?;
+                let signature = self
+                    .signature
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Missing signature"))?;
+                let author = self
+                    .data
+                    .author
+                    .ok_or_else(|| anyhow::anyhow!("Missing author"))?;
                 validator_verifier.verify(author, &self.data, &signature)?;
                 Ok(())
-            }
+            },
         }
     }
 }
 
-#[derive(Clone, CryptoHasher, BCSCryptoHash, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Clone, CryptoHasher, BCSCryptoHash, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
+)]
 pub struct CommonData {
-    pub round: Round, 
-    pub hash: BlockHash, 
+    pub round: Round,
+    pub hash: BlockHash,
     pub size: BlockSize,
 }
 
@@ -217,14 +228,11 @@ pub struct VoteData {
     // author of the vote
     pub author: Author,
     pub common_data: CommonData,
-    pub prefix: Prefix, 
+    pub prefix: Prefix,
 }
 
 impl VoteData {
-    pub fn sign(
-        &self,
-        signer: &ValidatorSigner,
-    ) -> Result<Signature, CryptoMaterialError> {
+    pub fn sign(&self, signer: &ValidatorSigner) -> Result<Signature, CryptoMaterialError> {
         signer.sign(&self.signing_format())
     }
 
@@ -239,7 +247,7 @@ impl VoteData {
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
 pub struct VoteDataSigningRepr {
     pub common_data: CommonData,
-    pub prefix: Prefix, 
+    pub prefix: Prefix,
 }
 
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
@@ -252,10 +260,7 @@ pub struct TimeoutData {
 }
 
 impl TimeoutData {
-    pub fn sign(
-        &self,
-        signer: &ValidatorSigner,
-    ) -> Result<Signature, CryptoMaterialError> {
+    pub fn sign(&self, signer: &ValidatorSigner) -> Result<Signature, CryptoMaterialError> {
         signer.sign(&self.signing_format())
     }
 
@@ -272,7 +277,7 @@ impl TimeoutData {
 pub struct TimeoutDataSigningRepr {
     pub timeout_round: Round,
     pub common_data: CommonData,
-    pub prefix: Prefix, 
+    pub prefix: Prefix,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -294,10 +299,7 @@ impl AggregateSignatureWithPrefixes {
         }
     }
 
-    pub fn get_voters(
-        &self,
-        ordered_validator_addresses: &[Author],
-    ) -> Vec<Author> {
+    pub fn get_voters(&self, ordered_validator_addresses: &[Author]) -> Vec<Author> {
         self.sig.get_signers_addresses(ordered_validator_addresses)
     }
 }
@@ -321,15 +323,17 @@ impl AggregateSignatureWithTimeouts {
         }
     }
 
-    pub fn get_voters(
-        &self,
-        ordered_validator_addresses: &[Author],
-    ) -> Vec<Author> {
+    pub fn get_voters(&self, ordered_validator_addresses: &[Author]) -> Vec<Author> {
         self.sig.get_signers_addresses(ordered_validator_addresses)
     }
 
     pub fn max_vote(&self) -> SubBlockId {
-        self.timeouts.iter().map(|timeout| (timeout.common_data.round, timeout.prefix)).max().unwrap().into()
+        self.timeouts
+            .iter()
+            .map(|timeout| (timeout.common_data.round, timeout.prefix))
+            .max()
+            .unwrap()
+            .into()
     }
 }
 
@@ -352,10 +356,7 @@ impl AggregateSignatureWithQCs {
         }
     }
 
-    pub fn get_voters(
-        &self,
-        ordered_validator_addresses: &[Author],
-    ) -> Vec<Author> {
+    pub fn get_voters(&self, ordered_validator_addresses: &[Author]) -> Vec<Author> {
         self.sig.get_signers_addresses(ordered_validator_addresses)
     }
 
@@ -377,25 +378,31 @@ pub struct QC {
 
 impl QC {
     pub fn signers(&self) -> impl Iterator<Item = NodeId> + '_ {
-        self.signatures_with_prefixes.sig.get_signers_bitvec().iter_ones()
+        self.signatures_with_prefixes
+            .sig
+            .get_signers_bitvec()
+            .iter_ones()
     }
 
     pub fn verify(&self, validator_verifier: &ValidatorVerifier) -> anyhow::Result<()> {
-        let vote_datas: Vec<_> = self.signatures_with_prefixes.prefixes.iter().map(|prefix| VoteDataSigningRepr {
-            common_data: self.common_data.clone(),
-            prefix: *prefix,
-        }).collect();
+        let vote_datas: Vec<_> = self
+            .signatures_with_prefixes
+            .prefixes
+            .iter()
+            .map(|prefix| VoteDataSigningRepr {
+                common_data: self.common_data.clone(),
+                prefix: *prefix,
+            })
+            .collect();
         let vote_datas_ref: Vec<_> = vote_datas.iter().collect();
-        validator_verifier.verify_aggregate_signatures(&vote_datas_ref, &self.signatures_with_prefixes.sig)?;
+        validator_verifier
+            .verify_aggregate_signatures(&vote_datas_ref, &self.signatures_with_prefixes.sig)?;
         Ok(())
     }
 }
 
 impl QC {
-    pub fn sign(
-        &self,
-        signer: &ValidatorSigner,
-    ) -> Result<Signature, CryptoMaterialError> {
+    pub fn sign(&self, signer: &ValidatorSigner) -> Result<Signature, CryptoMaterialError> {
         signer.sign(&self.signing_format())
     }
 
@@ -410,11 +417,23 @@ impl QC {
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
 pub struct QCSigningRepr {
     pub common_data: CommonData,
-    pub prefix: Prefix, 
+    pub prefix: Prefix,
 }
 
 #[derive(
-    Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, CryptoHasher, BCSCryptoHash, Serialize, Deserialize,
+    Copy,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Debug,
+    Hash,
+    CryptoHasher,
+    BCSCryptoHash,
+    Serialize,
+    Deserialize,
 )]
 pub struct SubBlockId {
     round: Round,
@@ -494,7 +513,11 @@ pub struct SignedQC {
 
 impl SignedQC {
     pub fn new(qc: QC, author: Author, signature: Signature) -> Self {
-        Self { qc, author, signature }
+        Self {
+            qc,
+            author,
+            signature,
+        }
     }
 }
 
@@ -527,7 +550,12 @@ pub struct CC {
 }
 
 impl CC {
-    pub fn new(round: Round, min_prefix: Prefix, max_prefix: Prefix, signatures_with_qcs: AggregateSignatureWithQCs) -> Self {
+    pub fn new(
+        round: Round,
+        min_prefix: Prefix,
+        max_prefix: Prefix,
+        signatures_with_qcs: AggregateSignatureWithQCs,
+    ) -> Self {
         CC {
             round,
             min_prefix,
@@ -576,7 +604,11 @@ impl TC {
         }
     }
 
-    pub fn new(timeout_round: Round, max_vote: SubBlockId, signatures_with_timeouts: AggregateSignatureWithTimeouts) -> Self {
+    pub fn new(
+        timeout_round: Round,
+        max_vote: SubBlockId,
+        signatures_with_timeouts: AggregateSignatureWithTimeouts,
+    ) -> Self {
         TC {
             timeout_round,
             max_vote,
@@ -590,7 +622,8 @@ impl TC {
 
     pub fn verify(&self, validator_verifier: &ValidatorVerifier) -> anyhow::Result<()> {
         let timeout_data_ref: Vec<_> = self.signatures_with_timeouts.timeouts.iter().collect();
-        validator_verifier.verify_aggregate_signatures(&timeout_data_ref, &self.signatures_with_timeouts.sig)?;
+        validator_verifier
+            .verify_aggregate_signatures(&timeout_data_ref, &self.signatures_with_timeouts.sig)?;
         Ok(())
     }
 }
@@ -635,14 +668,19 @@ impl Debug for Message {
         match self {
             Message::Propose(block) => write!(f, "Propose({})", block.data.round),
             Message::QcVote(vote_data, _) => write!(f, "QcVote({})", vote_data.common_data.round),
-            Message::CommitVote(signed_qc) => write!(f, "CommitVote({})", signed_qc.qc.common_data.round),
-            Message::Timeout(timeout_data, _) => write!(f, "Timeout({})", timeout_data.timeout_round),
-            Message::AdvanceRound(round, _, reason) => write!(f, "AdvanceRound({:?}, {:?})", round, reason),
+            Message::CommitVote(signed_qc) => {
+                write!(f, "CommitVote({})", signed_qc.qc.common_data.round)
+            },
+            Message::Timeout(timeout_data, _) => {
+                write!(f, "Timeout({})", timeout_data.timeout_round)
+            },
+            Message::AdvanceRound(round, _, reason) => {
+                write!(f, "AdvanceRound({:?}, {:?})", round, reason)
+            },
             Message::FetchReq(block_hash) => write!(f, "FetchReq({})", block_hash),
             Message::FetchResp(block) => write!(f, "FetchResp({})", block.data.round),
         }
     }
-
 }
 
 impl Validate for Message {
@@ -650,15 +688,23 @@ impl Validate for Message {
         match self {
             Message::Propose(block) => {
                 block.verify(validator_verifier)?;
-            }
+            },
             Message::QcVote(vote_data, signature) => {
-                validator_verifier.verify(vote_data.author, &vote_data.signing_format(), signature)?;
-            }
+                validator_verifier.verify(
+                    vote_data.author,
+                    &vote_data.signing_format(),
+                    signature,
+                )?;
+            },
             Message::CommitVote(signed_qc) => {
-                let SignedQC { qc, author, signature } = signed_qc;
+                let SignedQC {
+                    qc,
+                    author,
+                    signature,
+                } = signed_qc;
                 qc.verify(validator_verifier)?;
                 validator_verifier.verify(*author, &qc.signing_format(), signature)?;
-            }
+            },
             Message::AdvanceRound(round, qc, reason) => {
                 if *round == 1 && qc.is_genesis() {
                     return Ok(());
@@ -667,14 +713,14 @@ impl Validate for Message {
                 match reason {
                     RoundEnterReason::CC(cc) => {
                         cc.verify(validator_verifier)?;
-                    }
+                    },
                     RoundEnterReason::TC(tc) => {
                         tc.verify(validator_verifier)?;
-                    }
-                    _ => {}
+                    },
+                    _ => {},
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
         // TODO
         Ok(())
@@ -921,10 +967,13 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         // If new_qc.round > r_commit_vote and new_qc.round > r_timeout,
         // multicast a commit vote and update r_commit_vote.
         if self.config.enable_commit_votes {
-            if new_qc.common_data.round > self.last_commit_vote.round && new_qc.common_data.round > self.r_timeout {
+            if new_qc.common_data.round > self.last_commit_vote.round
+                && new_qc.common_data.round > self.r_timeout
+            {
                 self.last_commit_vote = new_qc.sub_block_id();
                 let signature = new_qc.sign(&self.validator_signer).unwrap();
-                let signed_qc = SignedQC::new(new_qc.clone(), self.validator_signer.author(), signature);
+                let signed_qc =
+                    SignedQC::new(new_qc.clone(), self.validator_signer.author(), signature);
                 ctx.multicast(Message::CommitVote(signed_qc)).await;
             }
         }
@@ -932,8 +981,12 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         if new_qc.is_full() {
             // If form or receive a qc for the largest possible prefix of a round,
             // advance to the next round after that.
-            self.advance_r_ready(new_qc.common_data.round + 1, RoundEnterReason::FullPrefixQC, ctx)
-                .await;
+            self.advance_r_ready(
+                new_qc.common_data.round + 1,
+                RoundEnterReason::FullPrefixQC,
+                ctx,
+            )
+            .await;
         }
 
         self.known_qcs.insert(new_qc.sub_block_id());
@@ -1008,13 +1061,20 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             return vec![];
         }
 
-        let parent = self.blocks[&qc.common_data.hash].parent_qc().unwrap().clone();
+        let parent = self.blocks[&qc.common_data.hash]
+            .parent_qc()
+            .unwrap()
+            .clone();
 
         // Check for safety violations:
-        if qc.common_data.round > self.committed_qc.common_data.round && parent.common_data.round < self.committed_qc.common_data.round {
+        if qc.common_data.round > self.committed_qc.common_data.round
+            && parent.common_data.round < self.committed_qc.common_data.round
+        {
             panic!("Safety violation: committed block was rolled back");
         }
-        if parent.common_data.round == self.committed_qc.common_data.round && parent.prefix < self.committed_qc.prefix {
+        if parent.common_data.round == self.committed_qc.common_data.round
+            && parent.prefix < self.committed_qc.prefix
+        {
             panic!("Safety violation: optimistically committed transactions were rolled back");
         }
 
@@ -1049,9 +1109,10 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             let now = Instant::now();
             if self.config.leader(qc.common_data.round) == self.node_id {
                 for _ in 0..(qc.prefix - self.committed_qc.prefix) {
-                    self.metrics
-                        .batch_consensus_latency
-                        .push((now, self.to_deltas(now - self.block_create_time[&qc.common_data.round])));
+                    self.metrics.batch_consensus_latency.push((
+                        now,
+                        self.to_deltas(now - self.block_create_time[&qc.common_data.round]),
+                    ));
                 }
             }
         } else {
@@ -1081,13 +1142,15 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             // Record the metrics
             let now = Instant::now();
             if self.config.leader(qc.common_data.round) == self.node_id {
-                self.metrics
-                    .block_consensus_latency
-                    .push((now, self.to_deltas(now - self.block_create_time[&qc.common_data.round])));
+                self.metrics.block_consensus_latency.push((
+                    now,
+                    self.to_deltas(now - self.block_create_time[&qc.common_data.round]),
+                ));
                 for _ in 0..(block.acs().len() + qc.prefix) {
-                    self.metrics
-                        .batch_consensus_latency
-                        .push((now, self.to_deltas(now - self.block_create_time[&qc.common_data.round])));
+                    self.metrics.batch_consensus_latency.push((
+                        now,
+                        self.to_deltas(now - self.block_create_time[&qc.common_data.round]),
+                    ));
                 }
             }
         }
@@ -1444,7 +1507,7 @@ where
                                 signature.clone(),
                             );
                         }
-                        let aggregated_signature = self.validator_verifier.aggregate_signatures(&partial_sigs).unwrap();
+                        let aggregated_signature = self.validator_verifier.aggregate_signatures(partial_sigs.signatures_iter()).unwrap();
                         let ordered_prefixes = votes.iter().map(|(_, (prefix, _))| *prefix).collect();
                         let signatures_with_prefixes = AggregateSignatureWithPrefixes::new(aggregated_signature, ordered_prefixes);
 
@@ -1501,7 +1564,7 @@ where
                                 signed_qc.signature.clone(),
                             );
                         }
-                        let aggregated_signature = self.validator_verifier.aggregate_signatures(&partial_sigs).unwrap();
+                        let aggregated_signature = self.validator_verifier.aggregate_signatures(partial_sigs.signatures_iter()).unwrap();
                         let qcs = signed_qcs.iter().map(|signed_qc| signed_qc.qc.signing_format()).collect();
                         let signatures_with_qcs = AggregateSignatureWithQCs::new(aggregated_signature, qcs);
                         let min_prefix = signatures_with_qcs.min_prefix();
@@ -1563,7 +1626,7 @@ where
                         signature.clone(),
                     );
                 }
-                let aggregated_signature = self.validator_verifier.aggregate_signatures(&partial_sigs).unwrap();
+                let aggregated_signature = self.validator_verifier.aggregate_signatures(partial_sigs.signatures_iter()).unwrap();
                 let timeouts = self.tc_votes[round].iter().map(|(_, (timeout_data, _))| timeout_data.signing_format()).collect();
                 let signatures_with_timeouts = AggregateSignatureWithTimeouts::new(aggregated_signature, timeouts);
 

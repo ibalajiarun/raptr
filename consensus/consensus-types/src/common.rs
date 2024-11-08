@@ -6,7 +6,6 @@ use crate::{
     payload::{OptQuorumStorePayload, PayloadExecutionLimit},
     proof_of_store::{BatchInfo, ProofCache, ProofOfStore},
 };
-use anyhow::bail;
 use aptos_crypto::{
     hash::{CryptoHash, CryptoHasher},
     HashValue,
@@ -25,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     fmt::{self, Write},
-    ops::Range, sync::Arc,
+    sync::Arc,
     u64,
 };
 use tokio::sync::oneshot;
@@ -418,22 +417,16 @@ impl Payload {
                 Payload::QuorumStoreInlineHybrid(b2, p3, m3)
             },
             (
-                Payload::QuorumStoreInlineHybrid(inline_batches, proofs, limit),
-                Payload::OptQuorumStore(opt_qs),
+                Payload::QuorumStoreInlineHybrid(_inline_batches, _proofs, _limit),
+                Payload::OptQuorumStore(_opt_qs),
             )
             | (
-                Payload::OptQuorumStore(opt_qs),
-                Payload::QuorumStoreInlineHybrid(inline_batches, proofs, limit),
+                Payload::OptQuorumStore(_opt_qs),
+                Payload::QuorumStoreInlineHybrid(_inline_batches, _proofs, _limit),
             ) => {
-                let execution_limits = PayloadExecutionLimit::max_txns_to_execute(limit);
-                let converted_payload = OptQuorumStorePayload::new(
-                    inline_batches.into(),
-                    Vec::new().into(),
-                    proofs.into(),
-                    execution_limits,
-                );
-                let opt_qs3 = opt_qs.extend(converted_payload);
-                Payload::OptQuorumStore(opt_qs3)
+                unimplemented!(
+                    "Cannot extend OptQuorumStore with QuorumStoreInlineHybrid or viceversa"
+                )
             },
             (Payload::OptQuorumStore(opt_qs1), Payload::OptQuorumStore(opt_qs2)) => {
                 let opt_qs3 = opt_qs1.extend(opt_qs2);
@@ -526,8 +519,7 @@ impl Payload {
             (true, Payload::OptQuorumStore(opt_quorum_store)) => {
                 let proof_with_data = opt_quorum_store.proof_with_data();
                 Self::verify_with_cache(&proof_with_data.batch_summary, validator, proof_cache)?;
-                // TODO(ibalajiarun): Remove this log when OptQS is enabled.
-                bail!("OptQuorumStore Payload is not expected yet");
+                Ok(())
             },
             (_, _) => Err(anyhow::anyhow!(
                 "Wrong payload type. Expected Payload::InQuorumStore {} got {} ",
@@ -654,41 +646,44 @@ impl From<&Vec<&Payload>> for PayloadFilter {
             }
             PayloadFilter::DirectMempool(exclude_txns)
         } else {
-            let mut exclude_proofs = HashSet::new();
+            let mut exclude_batches = HashSet::new();
             for payload in exclude_payloads {
                 match payload {
                     Payload::InQuorumStore(proof_with_status) => {
                         for proof in &proof_with_status.proofs {
-                            exclude_proofs.insert(proof.info().clone());
+                            exclude_batches.insert(proof.info().clone());
                         }
                     },
                     Payload::InQuorumStoreWithLimit(proof_with_status) => {
                         for proof in &proof_with_status.proof_with_data.proofs {
-                            exclude_proofs.insert(proof.info().clone());
+                            exclude_batches.insert(proof.info().clone());
                         }
                     },
                     Payload::QuorumStoreInlineHybrid(inline_batches, proof_with_data, _) => {
                         for proof in &proof_with_data.proofs {
-                            exclude_proofs.insert(proof.info().clone());
+                            exclude_batches.insert(proof.info().clone());
                         }
                         for (batch_info, _) in inline_batches {
-                            exclude_proofs.insert(batch_info.clone());
+                            exclude_batches.insert(batch_info.clone());
                         }
                     },
                     Payload::DirectMempool(_) => {
                         error!("DirectMempool payload in InQuorumStore filter");
                     },
                     Payload::OptQuorumStore(opt_qs_payload) => {
+                        for batch in opt_qs_payload.inline_batches().iter() {
+                            exclude_batches.insert(batch.info().clone());
+                        }
                         for batch_info in &opt_qs_payload.opt_batches().batch_summary {
-                            exclude_proofs.insert(batch_info.clone());
+                            exclude_batches.insert(batch_info.clone());
                         }
                         for proof in &opt_qs_payload.proof_with_data().batch_summary {
-                            exclude_proofs.insert(proof.info().clone());
+                            exclude_batches.insert(proof.info().clone());
                         }
                     },
                 }
             }
-            PayloadFilter::InQuorumStore(exclude_proofs)
+            PayloadFilter::InQuorumStore(exclude_batches)
         }
     }
 }

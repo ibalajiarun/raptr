@@ -34,9 +34,10 @@ fn run_tests_for_pkg(path_to_pkg: impl Into<String>) {
         &pkg_path,
         build_config.clone(),
         // TODO(Gas): double check if this is correct
-        UnitTestingConfig::default_with_bound(Some(100_000)),
+        UnitTestingConfig::default(),
         aptos_test_natives(),
         aptos_test_feature_flags_genesis(),
+        /* gas limit */ Some(100_000),
         /* cost_table */ None,
         /* compute_coverage */ false,
         &mut std::io::stdout(),
@@ -47,14 +48,15 @@ fn run_tests_for_pkg(path_to_pkg: impl Into<String>) {
     }
     if get_move_compiler_v2_from_env() {
         // Run test against v2 when MOVE_COMPILER_V2 is set
-        compiler_config.compiler_version = Some(CompilerVersion::V2_0);
+        compiler_config.compiler_version = Some(CompilerVersion::latest_stable());
         build_config.compiler_config = compiler_config;
         ok = run_move_unit_tests(
             &pkg_path,
             build_config,
-            UnitTestingConfig::default_with_bound(Some(100_000)),
+            UnitTestingConfig::default(),
             aptos_test_natives(),
             aptos_test_feature_flags_genesis(),
+            /* gas_limit */ Some(100_000),
             /* cost_table */ None,
             /* compute_coverage */ false,
             &mut std::io::stdout(),

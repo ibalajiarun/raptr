@@ -19,6 +19,7 @@ use aptos_consensus_types::{
     pipeline::{commit_decision::CommitDecision, commit_vote::CommitVote},
     proof_of_store::{ProofOfStoreMsg, SignedBatchInfoMsg},
     proposal_msg::ProposalMsg,
+    round_timeout::RoundTimeoutMsg,
     sync_info::SyncInfo,
     vote_msg::VoteMsg,
 };
@@ -83,6 +84,8 @@ pub enum ConsensusMsg {
     OrderVoteMsg(Box<OrderVoteMsg>),
     RaikouMessage(RaikouNetworkMessage),
     RaikouDissMessage(RaikouNetworkMessage),
+    /// RoundTimeoutMsg is broadcasted by a validator once it decides to timeout the current round.
+    RoundTimeoutMsg(Box<RoundTimeoutMsg>),
 }
 
 /// Network type for consensus
@@ -112,6 +115,7 @@ impl ConsensusMsg {
             ConsensusMsg::BatchResponseV2(_) => "BatchResponseV2",
             ConsensusMsg::RaikouMessage(_) => "RaikouMessage",
             ConsensusMsg::RaikouDissMessage(_) => "RaikouDissMessage",
+            ConsensusMsg::RoundTimeoutMsg(_) => "RoundTimeoutV2",
         }
     }
 }

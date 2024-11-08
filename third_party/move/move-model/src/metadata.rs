@@ -7,6 +7,7 @@ use move_command_line_common::{
     env,
     env::{get_move_compiler_v2_from_env, read_bool_env_var},
 };
+use move_compiler::shared::LanguageVersion as CompilerLanguageVersion;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -16,6 +17,8 @@ use std::{
 };
 
 const UNSTABLE_MARKER: &str = "-unstable";
+pub const LATEST_STABLE_LANGUAGE_VERSION: &str = "2.1";
+pub const LATEST_STABLE_COMPILER_VERSION: &str = "2.0";
 
 pub static COMPILATION_METADATA_KEY: &[u8] = "compilation_metadata".as_bytes();
 
@@ -81,6 +84,8 @@ pub enum CompilerVersion {
     /// The v2 compiler, starting with 2.0-unstable. Each new released version of the compiler
     /// should get an enum entry here.
     V2_0,
+    /// Upcoming Version 2.1 of the compiler
+    V2_1,
 }
 
 impl Default for CompilerVersion {
@@ -107,6 +112,7 @@ impl FromStr for CompilerVersion {
             // For legacy reasons, also support v1 and v2
             "1" | "v1" => Ok(Self::V1),
             "2" | "v2" | "2.0" => Ok(Self::V2_0),
+            "2.1" => Ok(Self::V2_1),
             _ => bail!(
                 "unrecognized compiler version `{}` (supported versions: `1`, `2`, `2.0`)",
                 s
@@ -123,6 +129,7 @@ impl Display for CompilerVersion {
             match self {
                 CompilerVersion::V1 => "1",
                 CompilerVersion::V2_0 => "2.0",
+                CompilerVersion::V2_1 => "2.1",
             },
             if self.unstable() { UNSTABLE_MARKER } else { "" }
         )
@@ -135,8 +142,19 @@ impl CompilerVersion {
     pub fn unstable(self) -> bool {
         match self {
             CompilerVersion::V1 => false,
-            CompilerVersion::V2_0 => true,
+            CompilerVersion::V2_0 => false,
+            CompilerVersion::V2_1 => true,
         }
+    }
+
+    /// The latest compiler version.
+    pub fn latest() -> Self {
+        CompilerVersion::V2_1
+    }
+
+    /// The latest stable compiler version.
+    pub fn latest_stable() -> Self {
+        CompilerVersion::from_str(LATEST_STABLE_COMPILER_VERSION).expect("valid version")
     }
 
     /// Check whether the compiler version supports the given language version,
@@ -150,7 +168,7 @@ impl CompilerVersion {
                     Ok(())
                 }
             },
-            CompilerVersion::V2_0 => Ok(()),
+            _ => Ok(()),
         }
     }
 }
@@ -172,19 +190,19 @@ pub enum LanguageVersion {
     /// functions with lambda parameters, as well as a simple form of `for`
     /// loops.
     V1,
-    /// The upcoming (currently unstable) 2.0 version of Move. The following
-    /// experimental language features are supported so far:
-    ///
-    /// - Access control specifiers as described in AIP-56.
-    /// - Receiver style (method) function calls with auto-referencing
+    /// The 2.0 version of Move.
     V2_0,
+    /// The 2.1 version of Move,
+    V2_1,
+    /// The currently unstable 2.2 version of Move
+    V2_2,
 }
 
 impl Default for LanguageVersion {
     fn default() -> Self {
         static MOVE_LANGUAGE_V2: Lazy<bool> = Lazy::new(|| read_bool_env_var("MOVE_LANGUAGE_V2"));
         if *MOVE_LANGUAGE_V2 {
-            Self::V2_0
+            Self::latest_stable()
         } else {
             Self::V1
         }
@@ -201,11 +219,23 @@ impl FromStr for LanguageVersion {
         let s1 = s.replace(UNSTABLE_MARKER, "");
         match s1.as_str() {
             "1" => Ok(Self::V1),
-            "2" | "2.0" => Ok(Self::V2_0),
+            "2.0" => Ok(Self::V2_0),
+            "2" | "2.1" => Ok(Self::V2_1),
             _ => bail!(
-                "unrecognized language version `{}` (supported versions: `1`, `2`, `2.0`)",
+                "unrecognized language version `{}` (supported versions: `1`, `2`, `2.0`, `2.1`)",
                 s
             ),
+        }
+    }
+}
+
+impl From<LanguageVersion> for CompilerLanguageVersion {
+    fn from(val: LanguageVersion) -> Self {
+        match val {
+            LanguageVersion::V1 => CompilerLanguageVersion::V1,
+            LanguageVersion::V2_0 => CompilerLanguageVersion::V2_0,
+            LanguageVersion::V2_1 => CompilerLanguageVersion::V2_1,
+            LanguageVersion::V2_2 => CompilerLanguageVersion::V2_2,
         }
     }
 }
@@ -214,10 +244,21 @@ impl LanguageVersion {
     /// Whether the language version is unstable. An unstable version
     /// should not be allowed on production networks.
     pub fn unstable(self) -> bool {
+        use LanguageVersion::*;
         match self {
-            LanguageVersion::V1 => false,
-            LanguageVersion::V2_0 => true,
+            V1 | V2_0 | V2_1 => false,
+            V2_2 => true,
         }
+    }
+
+    /// The latest language version.
+    pub fn latest() -> Self {
+        LanguageVersion::V2_2
+    }
+
+    /// The latest stable language version.
+    pub fn latest_stable() -> Self {
+        LanguageVersion::from_str(LATEST_STABLE_LANGUAGE_VERSION).expect("valid version")
     }
 
     /// Whether the language version is equal to greater than `ver`
@@ -231,6 +272,8 @@ impl LanguageVersion {
         env::get_bytecode_version_from_env(version).unwrap_or(match self {
             LanguageVersion::V1 => VERSION_DEFAULT,
             LanguageVersion::V2_0 => VERSION_DEFAULT_LANG_V2,
+            LanguageVersion::V2_1 => VERSION_DEFAULT_LANG_V2,
+            LanguageVersion::V2_2 => VERSION_DEFAULT_LANG_V2, // Update once we have v8 bytecode
         })
     }
 }
@@ -243,6 +286,8 @@ impl Display for LanguageVersion {
             match self {
                 LanguageVersion::V1 => "1",
                 LanguageVersion::V2_0 => "2.0",
+                LanguageVersion::V2_1 => "2.1",
+                LanguageVersion::V2_2 => "2.2",
             },
             if self.unstable() { UNSTABLE_MARKER } else { "" }
         )

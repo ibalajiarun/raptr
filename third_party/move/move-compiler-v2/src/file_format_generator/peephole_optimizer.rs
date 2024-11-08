@@ -5,16 +5,16 @@
 //! Peephole optimizations assume that the bytecode is valid, and all user-facing
 //! error checks have already been performed.
 
-pub mod inefficient_binops;
+pub mod inefficient_loads;
 pub mod optimizers;
 pub mod reducible_pairs;
 
-use inefficient_binops::TransformInefficientBinops;
+use inefficient_loads::InefficientLoads;
 use move_binary_format::{
     control_flow_graph::{ControlFlowGraph, VMControlFlowGraph},
     file_format::{Bytecode, CodeOffset, CodeUnit},
 };
-use optimizers::{BasicBlockOptimizer, FixedWindowProcessor};
+use optimizers::{BasicBlockOptimizer, WindowProcessor};
 use reducible_pairs::ReduciblePairs;
 use std::{collections::BTreeMap, mem};
 
@@ -36,22 +36,42 @@ impl BasicBlockOptimizerPipeline {
     pub fn default() -> Self {
         Self {
             optimizers: vec![
-                Box::new(FixedWindowProcessor::new(ReduciblePairs)),
-                Box::new(FixedWindowProcessor::new(TransformInefficientBinops)),
+                Box::new(WindowProcessor::new(ReduciblePairs)),
+                Box::new(WindowProcessor::new(InefficientLoads)),
             ],
         }
     }
 
     /// Run the basic block optimization pipeline on the given `code`,
     /// returning new (possibly optimized) code.
-    pub fn optimize(&self, code: Vec<Bytecode>) -> Vec<Bytecode> {
-        Self::flatten_blocks(self.get_optimized_blocks(&code))
+    pub fn optimize(&self, mut code: Vec<Bytecode>) -> Vec<Bytecode> {
+        let mut cfg = VMControlFlowGraph::new(&code);
+        loop {
+            let optimized_blocks = self.get_optimized_blocks(&code, &cfg);
+            let optimized_code = Self::flatten_blocks(optimized_blocks);
+            let optimized_cfg = VMControlFlowGraph::new(&optimized_code);
+            if optimized_cfg.num_blocks() == cfg.num_blocks() {
+                // Proxy for convergence of basic block optimizations.
+                // This is okay for peephole optimizations that merge basic blocks.
+                // But may need to revisit if we have peephole optimizations that can
+                // split a basic block.
+                return optimized_code;
+            } else {
+                // Number of basic blocks changed, re-run the basic-block
+                // optimization pipeline again on the new basic blocks.
+                cfg = optimized_cfg;
+                code = optimized_code;
+            }
+        }
     }
 
     /// Returns a mapping from the original code's basic block start offsets to the optimized
     /// basic blocks.
-    fn get_optimized_blocks(&self, code: &[Bytecode]) -> BTreeMap<CodeOffset, Vec<Bytecode>> {
-        let cfg = VMControlFlowGraph::new(code);
+    fn get_optimized_blocks(
+        &self,
+        code: &[Bytecode],
+        cfg: &VMControlFlowGraph,
+    ) -> BTreeMap<CodeOffset, Vec<Bytecode>> {
         let mut optimized_blocks = BTreeMap::new();
         for block_id in cfg.blocks() {
             let start = cfg.block_start(block_id);

@@ -27,6 +27,7 @@ pub struct StateProgressThreshold {
 pub enum LatencyType {
     Average,
     P50,
+    P70,
     P90,
     P99,
 }
@@ -78,7 +79,7 @@ impl MetricsThreshold {
         }
 
         if metrics.is_empty() {
-            bail!("Empty metrics provided");
+            bail!("Empty metrics provided for {}", metrics_name);
         }
         let breach_count = metrics
             .iter()
@@ -149,7 +150,9 @@ impl LatencyBreakdownThreshold {
         traffic_name_addition: &String,
     ) -> anyhow::Result<()> {
         for (slice, threshold) in &self.thresholds {
-            let samples = metrics.get_samples(slice);
+            let samples = metrics
+                .get_samples(slice)
+                .expect("Could not get metric samples");
             threshold.ensure_metrics_threshold(
                 &format!("{:?}{}", slice, traffic_name_addition),
                 samples.get(),
@@ -531,6 +534,7 @@ impl SuccessCriteriaChecker {
             let latency = Duration::from_millis(match latency_type {
                 LatencyType::Average => stats_rate.latency as u64,
                 LatencyType::P50 => stats_rate.p50_latency,
+                LatencyType::P70 => stats_rate.p70_latency,
                 LatencyType::P90 => stats_rate.p90_latency,
                 LatencyType::P99 => stats_rate.p99_latency,
             });

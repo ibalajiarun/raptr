@@ -406,9 +406,12 @@ impl<'env> Generator<'env> {
                         ),
                     );
                 }
-                self.emit_call(*id, targets, BytecodeOperation::WriteRef, vec![
-                    lhs_temp, rhs_temp,
-                ])
+                self.emit_call(
+                    *id,
+                    targets,
+                    BytecodeOperation::WriteRef,
+                    vec![lhs_temp, rhs_temp],
+                )
             },
             ExpData::Assign(id, lhs, rhs) => self.gen_assign(*id, lhs, rhs, None),
             ExpData::Return(id, exp) => {
@@ -447,11 +450,11 @@ impl<'env> Generator<'env> {
                 self.emit_with(*id, |attr| Bytecode::Jump(attr, continue_label));
                 self.emit_with(*id, |attr| Bytecode::Label(attr, break_label));
             },
-            ExpData::LoopCont(id, do_continue) => {
+            ExpData::LoopCont(id, nest, do_continue) => {
                 if let Some(LoopContext {
                     continue_label,
                     break_label,
-                }) = self.loops.last()
+                }) = self.loops.iter().rev().nth(*nest)
                 {
                     let target = if *do_continue {
                         *continue_label
@@ -476,9 +479,16 @@ impl<'env> Generator<'env> {
                     .rewrite_spec_descent(&SpecBlockTarget::Inline, spec);
                 self.emit_with(*id, |attr| Bytecode::SpecBlock(attr, spec));
             },
-            ExpData::Invoke(id, _, _) | ExpData::Lambda(id, _, _) => {
-                self.internal_error(*id, format!("not yet implemented: {:?}", exp))
-            },
+            // TODO(LAMBDA)
+            ExpData::Lambda(id, _, _) => self.error(
+                *id,
+                "Function-typed values not yet supported except as parameters to calls to inline functions",
+            ),
+            // TODO(LAMBDA)
+            ExpData::Invoke(_, exp, _) => self.error(
+                exp.as_ref().node_id(),
+                "Calls to function values other than inline function parameters not yet supported",
+            ),
             ExpData::Quant(id, _, _, _, _, _) => {
                 self.internal_error(*id, "unsupported specification construct")
             },
@@ -564,16 +574,42 @@ impl<'env> Generator<'env> {
 impl<'env> Generator<'env> {
     fn gen_local(&mut self, targets: Vec<TempIndex>, id: NodeId, name: Symbol) {
         let target = self.require_unary_target(id, targets);
-        let attr = self.new_loc_attr(id);
         let temp = self.find_local(id, name);
-        self.emit(Bytecode::Assign(attr, target, temp, AssignKind::Inferred));
+        self.emit_assign_with_convert(id, target, temp, AssignKind::Inferred)
     }
 
     fn gen_temporary(&mut self, targets: Vec<TempIndex>, id: NodeId, temp: TempIndex) {
         let target = self.require_unary_target(id, targets);
-        self.emit_with(id, |attr| {
-            Bytecode::Assign(attr, target, temp, AssignKind::Inferred)
-        })
+        self.emit_assign_with_convert(id, target, temp, AssignKind::Inferred)
+    }
+
+    fn emit_assign_with_convert(
+        &mut self,
+        id: NodeId,
+        target: TempIndex,
+        mut temp: TempIndex,
+        kind: AssignKind,
+    ) {
+        let temp_ty = self.temp_type(temp).clone();
+        let target_ty = self.temp_type(target).clone();
+        if let Some((new_temp, oper)) = self.get_conversion(&target_ty, &temp_ty) {
+            self.emit_call(id, vec![new_temp], oper, vec![temp]);
+            temp = new_temp
+        }
+        self.emit_with(id, |attr| Bytecode::Assign(attr, target, temp, kind))
+    }
+
+    fn get_conversion(
+        &mut self,
+        expected_type: &Type,
+        actual_type: &Type,
+    ) -> Option<(TempIndex, BytecodeOperation)> {
+        if actual_type.is_mutable_reference() && expected_type.is_immutable_reference() {
+            let new_temp = self.new_temp(actual_type.clone());
+            Some((new_temp, BytecodeOperation::FreezeRef(false)))
+        } else {
+            None
+        }
     }
 }
 
@@ -725,7 +761,7 @@ impl<'env> Generator<'env> {
                 } else {
                     AssignKind::Move
                 };
-                self.emit_with(id, |attr| Bytecode::Assign(attr, target, arg, assign_kind))
+                self.emit_assign_with_convert(id, target, arg, assign_kind)
             },
             Operation::Borrow(kind) => {
                 let target = self.require_unary_target(id, targets);
@@ -765,17 +801,23 @@ impl<'env> Generator<'env> {
             Operation::Shr => self.gen_op_call(targets, id, BytecodeOperation::Shr, args),
             Operation::And => self.gen_logical_shortcut(true, targets, id, args),
             Operation::Or => self.gen_logical_shortcut(false, targets, id, args),
-            Operation::Eq => self.gen_op_call(targets, id, BytecodeOperation::Eq, args),
-            Operation::Neq => self.gen_op_call(targets, id, BytecodeOperation::Neq, args),
-            Operation::Lt => self.gen_op_call(targets, id, BytecodeOperation::Lt, args),
-            Operation::Gt => self.gen_op_call(targets, id, BytecodeOperation::Gt, args),
-            Operation::Le => self.gen_op_call(targets, id, BytecodeOperation::Le, args),
-            Operation::Ge => self.gen_op_call(targets, id, BytecodeOperation::Ge, args),
+            Operation::Eq => self.gen_op_call_auto_freeze(targets, id, BytecodeOperation::Eq, args),
+            Operation::Neq => {
+                self.gen_op_call_auto_freeze(targets, id, BytecodeOperation::Neq, args)
+            },
+            Operation::Lt => self.gen_op_call_auto_freeze(targets, id, BytecodeOperation::Lt, args),
+            Operation::Gt => self.gen_op_call_auto_freeze(targets, id, BytecodeOperation::Gt, args),
+            Operation::Le => self.gen_op_call_auto_freeze(targets, id, BytecodeOperation::Le, args),
+            Operation::Ge => self.gen_op_call_auto_freeze(targets, id, BytecodeOperation::Ge, args),
             Operation::Not => self.gen_op_call(targets, id, BytecodeOperation::Not, args),
 
             Operation::NoOp => {}, // do nothing
 
-            Operation::Closure(..) => self.internal_error(id, "closure not yet implemented"),
+            // TODO(LAMBDA)
+            Operation::Closure(..) => self.error(
+                id,
+                "Function-typed values not yet supported except as parameters to calls to inline functions",
+            ),
 
             // Non-supported specification related operations
             Operation::Exists(Some(_))
@@ -870,6 +912,28 @@ impl<'env> Generator<'env> {
         self.gen_op_call(targets, id, bytecode_op, args)
     }
 
+    fn gen_op_call_auto_freeze(
+        &mut self,
+        targets: Vec<TempIndex>,
+        id: NodeId,
+        op: BytecodeOperation,
+        args: &[Exp],
+    ) {
+        // Freeze arguments if needed
+        let args = args
+            .iter()
+            .map(|e| {
+                let ty = self.env().get_node_type(e.node_id());
+                if let Type::Reference(ReferenceKind::Mutable, elem_ty) = ty {
+                    self.maybe_convert(e, &Type::Reference(ReferenceKind::Immutable, elem_ty))
+                } else {
+                    e.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        self.gen_op_call(targets, id, op, &args)
+    }
+
     fn gen_op_call(
         &mut self,
         targets: Vec<TempIndex>,
@@ -943,9 +1007,8 @@ impl<'env> Generator<'env> {
             .unwrap_or_default();
         // Function calls can have implicit conversion of &mut to &, need to compute implicit
         // conversions.
-        let param_types: Vec<Type> = self
-            .env()
-            .get_function(fun)
+        let fun_env = self.env().get_function(fun);
+        let param_types: Vec<Type> = fun_env
             .get_parameters()
             .into_iter()
             .map(|Parameter(_, ty, _)| ty.instantiate(&type_args))
@@ -960,19 +1023,36 @@ impl<'env> Generator<'env> {
             .map(|(e, t)| self.maybe_convert(e, &t))
             .collect::<Vec<_>>();
         let args = self.gen_arg_list(&args);
+        // Targets may need conversion as well.
+        let fun_env = self.env().get_function(fun);
+        let mut actual_targets = vec![];
+        let mut conversion_ops = vec![];
+        for (target, actual_type) in targets.iter().zip(fun_env.get_result_type().flatten()) {
+            let target_ty = self.temp_type(*target).clone();
+            if let Some((new_target, oper)) = self.get_conversion(&target_ty, &actual_type) {
+                // Conversion required
+                actual_targets.push(new_target);
+                conversion_ops.push((*target, oper, new_target))
+            } else {
+                actual_targets.push(*target)
+            }
+        }
         self.emit_with(id, |attr| {
             Bytecode::Call(
                 attr,
-                targets,
+                actual_targets,
                 BytecodeOperation::Function(fun.module_id, fun.id, type_args),
                 args,
                 None,
             )
-        })
+        });
+        for (target, oper, new_target) in conversion_ops {
+            self.emit_call(id, vec![target], oper, vec![new_target])
+        }
     }
 
     /// Convert the expression so it matches the expected type. This is currently only needed
-    /// for `&mut` to `&` conversion, in which case we need to to introduce a Freeze operation.
+    /// for `&mut` to `&` conversion, in which case we need to introduce a Freeze operation.
     fn maybe_convert(&self, exp: &Exp, expected_ty: &Type) -> Exp {
         let id = exp.node_id();
         let exp_ty = self.get_node_type(id);
@@ -1023,7 +1103,9 @@ impl<'env> Generator<'env> {
         match exp.as_ref() {
             ExpData::Temporary(_, temp) if !with_forced_temp => *temp,
             ExpData::LocalVar(id, sym) if !with_forced_temp => self.find_local(*id, *sym),
-            ExpData::Call(id, Operation::Select(..), _) if self.reference_mode() => {
+            ExpData::Call(id, Operation::Select(..) | Operation::SelectVariants(..), _)
+                if self.reference_mode() =>
+            {
                 // In reference mode, a selection is interpreted as selecting a reference to the
                 // field.
                 let ty =
@@ -1730,17 +1812,13 @@ impl<'env> Generator<'env> {
                 let pat_ty = self.env().get_node_type(*id);
                 if !match_mode.is_probing() {
                     let temp = self.new_temp(pat_ty);
-                    self.emit_with(*id, |attr| {
-                        Bytecode::Assign(attr, temp, values[0], AssignKind::Inferred)
-                    })
+                    self.emit_assign_with_convert(*id, temp, values[0], AssignKind::Inferred)
                 }
             },
             Pattern::Var(var_id, sym) => {
                 if match_mode.shall_bind_var(*sym) {
                     let local = self.find_local_for_pattern(*var_id, *sym, next_scope);
-                    self.emit_with(id, |attr| {
-                        Bytecode::Assign(attr, local, values[0], AssignKind::Inferred)
-                    })
+                    self.emit_assign_with_convert(id, local, values[0], AssignKind::Inferred)
                 }
             },
             Pattern::Struct(id, str, variant, args) => {

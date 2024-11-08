@@ -2,13 +2,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    network::NetworkSender, network_interface::ConsensusMsg, payload_client::PayloadClient, payload_manager::TPayloadManager,
+    network::NetworkSender,
+    network_interface::ConsensusMsg,
+    payload_client::PayloadClient,
+    payload_manager::{QuorumStorePayloadManager, TPayloadManager},
+    pipeline::buffer_manager::OrderedBlocks,
 };
-use aptos_types::{validator_signer::ValidatorSigner, validator_verifier::ValidatorVerifier};
 use ::raikou::leader_schedule::round_robin;
 use aptos_config::config::ConsensusConfig;
-use aptos_consensus_types::{common::Author, pipelined_block::OrderedBlocks, proof_of_store::BatchInfo};
-use aptos_types::{epoch_state::EpochState, on_chain_config::ValidatorSet};
+use aptos_consensus_types::{common::Author, proof_of_store::BatchInfo};
+use aptos_types::{
+    epoch_state::EpochState, on_chain_config::ValidatorSet, validator_signer::ValidatorSigner,
+    validator_verifier::ValidatorVerifier,
+};
 use futures::StreamExt;
 use futures_channel::{mpsc::UnboundedSender, oneshot};
 use raikou::{
@@ -146,8 +152,9 @@ impl RaikouManager {
                     .collect(),
                 streams_per_peer: 4,
             },
-            Arc::new(epoch_state.verifier.clone()),
-        ).await;
+            epoch_state.verifier.clone(),
+        )
+        .await;
 
         let config = raikou::raikou::Config {
             n_nodes,
@@ -215,9 +222,9 @@ impl RaikouManager {
                 batch_consensus_latency: batch_consensus_latency_sender,
                 // indirectly_committed_slots: indirectly_committed_slots_sender,
             },
-            Arc::new(epoch_state.verifier.clone()),
+            epoch_state.verifier.clone(),
             validator_signer,
-            ordered_nodes_tx,
+            // ordered_nodes_tx,
         )));
 
         tokio::select! {
@@ -235,7 +242,7 @@ impl RaikouManager {
     async fn spawn_qs_dissemination_layer(
         payload_client: Arc<dyn PayloadClient>,
         consensus_config: ConsensusConfig,
-        payload_manager: Arc<PayloadManager>,
+        payload_manager: Arc<dyn TPayloadManager>,
         module_network: ModuleNetworkService,
     ) -> impl DisseminationLayer {
         let dissemination = RaikouQSDisseminationLayer {
@@ -329,7 +336,8 @@ impl RaikouManager {
                 streams_per_peer: 4,
             },
             validator_verifier,
-        ).await;
+        )
+        .await;
 
         let diss_timer = LocalTimerService::new();
 
@@ -586,7 +594,7 @@ impl NetworkService for RaikouDissNetworkService {
 struct RaikouQSDisseminationLayer {
     payload_client: Arc<dyn PayloadClient>,
     config: ConsensusConfig,
-    payload_manager: Arc<PayloadManager>,
+    payload_manager: Arc<dyn TPayloadManager>,
     module_id: ModuleId,
 }
 
@@ -638,7 +646,7 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
         todo!()
     }
 
-    async fn notify_commit(&self, payloads: Vec<raikou::raikou::types::aptos_types::Payload>) {
+    async fn notify_commit(&self, payloads: Vec<raikou::raikou::types::Payload>) {
         // self.payload_manager.notify_commit(
         //     SystemTime::now()
         //         .duration_since(UNIX_EPOCH)

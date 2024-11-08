@@ -79,14 +79,11 @@ pub struct ResetRequest {
     pub signal: ResetSignal,
 }
 
-// pub struct OrderedBlocks {
-//     pub ordered_blocks: Vec<PipelinedBlock>,
-//     pub ordered_proof: LedgerInfoWithSignatures,
-//     pub callback: StateComputerCommitCallBackType,
-// }
-
-pub type OrderedBlocks = aptos_consensus_types::pipelined_block::OrderedBlocks;
-
+pub struct OrderedBlocks {
+    pub ordered_blocks: Vec<PipelinedBlock>,
+    pub ordered_proof: LedgerInfoWithSignatures,
+    pub callback: StateComputerCommitCallBackType,
+}
 impl OrderedBlocks {
     pub fn latest_round(&self) -> Round {
         self.ordered_blocks

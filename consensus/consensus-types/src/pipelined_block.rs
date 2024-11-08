@@ -15,7 +15,12 @@ use aptos_executor_types::{state_compute_result::StateComputeResult, ExecutorRes
 use aptos_infallible::Mutex;
 use aptos_logger::{error, warn};
 use aptos_types::{
-    block_info::BlockInfo, contract_event::ContractEvent, ledger_info::LedgerInfoWithSignatures, randomness::Randomness, transaction::{SignedTransaction, TransactionStatus}, validator_txn::ValidatorTransaction
+    block_info::BlockInfo,
+    contract_event::ContractEvent,
+    ledger_info::LedgerInfoWithSignatures,
+    randomness::Randomness,
+    transaction::{SignedTransaction, TransactionStatus},
+    validator_txn::ValidatorTransaction,
 };
 use derivative::Derivative;
 use futures::future::BoxFuture;
@@ -340,9 +345,3 @@ pub struct ExecutionSummary {
 
 pub type StateComputerCommitCallBackType =
     Box<dyn FnOnce(&[Arc<PipelinedBlock>], LedgerInfoWithSignatures) + Send + Sync>;
-
-pub struct OrderedBlocks {
-    pub ordered_blocks: Vec<PipelinedBlock>,
-    pub ordered_proof: LedgerInfoWithSignatures,
-    pub callback: StateComputerCommitCallBackType,
-}

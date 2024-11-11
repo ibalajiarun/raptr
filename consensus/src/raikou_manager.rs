@@ -83,7 +83,6 @@ impl RaikouManager {
         consensus_config: ConsensusConfig,
         validator_set: ValidatorSet,
         validator_signer: Arc<ValidatorSigner>,
-        ordered_nodes_tx: UnboundedSender<OrderedBlocks>,
     ) {
         let n_nodes = epoch_state.verifier.len();
         let f = (n_nodes - 1) / 3;

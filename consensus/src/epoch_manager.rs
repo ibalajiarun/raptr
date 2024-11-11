@@ -1348,27 +1348,22 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
         let total_duration_in_delta = 1000;
         let enable_optimistic_dissemination = true;
 
-        tokio::spawn(
-            bootstrapper.run(
-                self.author,
-                epoch_state,
-                network_sender_arc,
-                delta,
-                total_duration_in_delta,
-                enable_optimistic_dissemination,
-                raikou_message_rx,
-                diss_rx,
-                raikou_shutdown_rx,
-                payload_client,
-                payload_manager,
-                self.config.clone(),
-                validator_set,
-                signer,
-                self.execution_client
-                    .get_execution_channel()
-                    .expect("unable to get execution channel"),
-            ),
-        );
+        tokio::spawn(bootstrapper.run(
+            self.author,
+            epoch_state,
+            network_sender_arc,
+            delta,
+            total_duration_in_delta,
+            enable_optimistic_dissemination,
+            raikou_message_rx,
+            diss_rx,
+            raikou_shutdown_rx,
+            payload_client,
+            payload_manager,
+            self.config.clone(),
+            validator_set,
+            signer,
+        ));
     }
 
     async fn start_new_epoch_with_joltean(

@@ -7,6 +7,7 @@
 mod consensus;
 mod indexer;
 mod logger;
+mod mempool;
 mod network;
 mod services;
 mod state_sync;
@@ -1042,6 +1043,9 @@ pub fn consensus_only_setup_environment_and_start_node(
     //         peers_and_metadata,
     //     );
 
+    let (mempool_runtime, consensus_to_mempool_sender, consensus_notifier) =
+        mempool::create_mempool_runtime(&node_config);
+
     // Create the DKG runtime and get the VTxn pool
     // let (vtxn_pool, dkg_runtime) =
     //     consensus::create_dkg_runtime(&mut node_config, dkg_subscriptions, dkg_network_interfaces);
@@ -1074,11 +1078,6 @@ pub fn consensus_only_setup_environment_and_start_node(
         .subscribe_to_reconfigurations()
         .ok();
 
-    let (consensus_notifier, listener) = new_consensus_notifier_listener_pair(5000);
-
-    let (consensus_to_mempool_sender, consensus_to_mempool_receiver) =
-        futures::channel::mpsc::channel(500);
-
     let vtxn_pool = aptos_validator_transaction_pool::VTxnPoolState::default();
 
     // Create the consensus runtime (if enabled)
@@ -1109,14 +1108,14 @@ pub fn consensus_only_setup_environment_and_start_node(
         _indexer_runtime: None,
         _indexer_table_info_runtime: None,
         _jwk_consensus_runtime: None,
-        _mempool_runtime: None,
+        _mempool_runtime: Some(mempool_runtime),
         _network_runtimes: network_runtimes,
         _peer_monitoring_service_runtime: None,
         _state_sync_runtimes: None,
         _telemetry_runtime: telemetry_runtime,
         _indexer_db_runtime: None,
-        _consensus_notif_listener: Some(listener),
-        _consensus_to_mempool_receiver: Some(consensus_to_mempool_receiver),
+        _consensus_notif_listener: None,
+        _consensus_to_mempool_receiver: None,
         _event_subscription_service: Some(event_subscription_service),
     })
 }

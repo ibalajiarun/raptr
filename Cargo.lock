@@ -3211,11 +3211,13 @@ dependencies = [
  "aptos-vm",
  "aptos-vm-environment",
  "bcs 0.1.4",
+ "bytes",
  "clap 4.4.14",
  "either",
  "fail",
  "futures",
  "hex",
+ "itertools 0.13.0",
  "jemallocator",
  "num_cpus",
  "rand 0.7.3",
@@ -3226,6 +3228,7 @@ dependencies = [
  "serde_yaml 0.8.26",
  "tokio",
  "url",
+ "warp",
 ]
 
 [[package]]

@@ -119,6 +119,7 @@ impl Block {
                 Payload::OptQuorumStore(opt_quorum_store_payload) => {
                     opt_quorum_store_payload.num_txns()
                 },
+                Payload::Raikou(raikou_payload) => raikou_payload.num_txns(),
             },
         }
     }

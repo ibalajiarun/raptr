@@ -478,7 +478,8 @@ impl BlockStore {
     }
 
     pub fn check_payload(&self, proposal: &Block) -> Result<(), BitVec> {
-        self.payload_manager.check_payload_availability(proposal)
+        self.payload_manager
+            .check_payload_availability(proposal.payload().unwrap())
     }
 
     pub fn get_block_for_round(&self, round: Round) -> Option<Arc<PipelinedBlock>> {

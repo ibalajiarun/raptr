@@ -22,6 +22,7 @@ use crate::{
 };
 use aptos_crypto::{bls12381::Signature, hash::CryptoHash, Genesis};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
+use aptos_types::validator_verifier::ValidatorVerifier;
 use bitvec::prelude::BitVec;
 use defaultmap::DefaultBTreeMap;
 use itertools::Itertools;
@@ -33,7 +34,6 @@ use std::{
     time::Duration,
 };
 use tokio::time::Instant;
-use aptos_types::validator_verifier::ValidatorVerifier;
 
 #[derive(Clone, Serialize)]
 pub struct Batch {
@@ -109,10 +109,9 @@ impl std::fmt::Debug for Message {
             // Message::Fetch(digest) => write!(f, "Fetch({:#x})", digest),
             Message::PenaltyTrackerReport(round, reports) => {
                 write!(f, "PenaltyTrackerReport({}, {:?})", round, reports)
-            }
+            },
         }
     }
-
 }
 
 impl Validate for Message {
@@ -237,7 +236,7 @@ where
         Payload::new(round, inner.node_id, acs, batches)
     }
 
-    async fn prefetch_payload_data(&self, payload: Payload) {
+    async fn prefetch_payload_data(&self, payload: &Payload) {
         let new_acs = payload
             .acs()
             .into_iter()

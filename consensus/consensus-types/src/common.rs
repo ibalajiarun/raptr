@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    payload::{OptQuorumStorePayload, PayloadExecutionLimit},
+    payload::{OptQuorumStorePayload, PayloadExecutionLimit, RaikouPayload},
     proof_of_store::{BatchInfo, ProofCache, ProofOfStore},
 };
 use aptos_crypto::{
@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     fmt::{self, Write},
+    ops::Deref,
     sync::Arc,
     u64,
 };
@@ -260,9 +261,17 @@ pub enum Payload {
         Option<u64>,
     ),
     OptQuorumStore(OptQuorumStorePayload),
+    Raikou(RaikouPayload),
 }
 
 impl Payload {
+    pub fn as_raikou_payload(&self) -> &RaikouPayload {
+        match self {
+            Payload::Raikou(raikou_payload) => raikou_payload,
+            _ => unreachable!(),
+        }
+    }
+
     pub fn transform_to_quorum_store_v2(self, max_txns_to_execute: Option<u64>) -> Self {
         match self {
             Payload::InQuorumStore(proof_with_status) => Payload::InQuorumStoreWithLimit(
@@ -287,6 +296,7 @@ impl Payload {
                 ));
                 Payload::OptQuorumStore(opt_qs_payload)
             },
+            payload @ Payload::Raikou(_) => payload,
         }
     }
 
@@ -319,6 +329,7 @@ impl Payload {
                         .sum::<usize>()
             },
             Payload::OptQuorumStore(opt_qs_payload) => opt_qs_payload.num_txns(),
+            Payload::Raikou(raikou_payload) => raikou_payload.num_txns(),
         }
     }
 
@@ -345,6 +356,7 @@ impl Payload {
             Payload::OptQuorumStore(opt_qs_payload) => {
                 opt_qs_payload.max_txns_to_execute().unwrap_or(u64::MAX)
             },
+            Payload::Raikou(raikou_payload) => u64::MAX,
         }
     }
 
@@ -359,6 +371,7 @@ impl Payload {
                 proof_with_data.proofs.is_empty() && inline_batches.is_empty()
             },
             Payload::OptQuorumStore(opt_qs_payload) => opt_qs_payload.is_empty(),
+            Payload::Raikou(raikou_payload) => raikou_payload.is_empty(),
         }
     }
 
@@ -464,6 +477,7 @@ impl Payload {
                         .sum::<usize>()
             },
             Payload::OptQuorumStore(opt_qs_payload) => opt_qs_payload.num_bytes(),
+            Payload::Raikou(raikou_payload) => raikou_payload.num_bytes(),
         }
     }
 
@@ -560,6 +574,7 @@ impl fmt::Display for Payload {
             Payload::OptQuorumStore(opt_quorum_store) => {
                 write!(f, "{}", opt_quorum_store)
             },
+            Payload::Raikou(raikou_payload) => write!(f, "{}", raikou_payload),
         }
     }
 }
@@ -678,6 +693,16 @@ impl From<&Vec<&Payload>> for PayloadFilter {
                             exclude_batches.insert(batch_info.clone());
                         }
                         for proof in &opt_qs_payload.proof_with_data().batch_summary {
+                            exclude_batches.insert(proof.info().clone());
+                        }
+                    },
+                    Payload::Raikou(raikou_payload) => {
+                        for sub_block in raikou_payload.sub_blocks() {
+                            for batch_info in sub_block.deref() {
+                                exclude_batches.insert(batch_info.clone());
+                            }
+                        }
+                        for proof in &raikou_payload.proof_with_data().batch_summary {
                             exclude_batches.insert(proof.info().clone());
                         }
                     },

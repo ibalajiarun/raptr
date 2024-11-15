@@ -15,6 +15,7 @@ use std::{
     fmt::Debug,
     ops::{Deref, DerefMut},
     sync::Arc,
+    usize,
 };
 
 pub type OptBatches = BatchPointer<BatchInfo>;
@@ -288,6 +289,94 @@ impl OptQuorumStorePayloadV1 {
     }
 }
 
+pub type SubBlocks = Vec<BatchPointer<BatchInfo>>;
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct RaikouPayload {
+    sub_blocks: SubBlocks,
+    proofs: ProofBatches,
+}
+
+impl RaikouPayload {
+    pub fn new(sub_blocks: SubBlocks, proofs: ProofBatches) -> Self {
+        Self { sub_blocks, proofs }
+    }
+
+    pub fn new_empty() -> Self {
+        RaikouPayload {
+            sub_blocks: Vec::new(),
+            proofs: Vec::new().into(),
+        }
+    }
+
+    pub fn num_sub_block_txns(&self) -> usize {
+        self.sub_blocks
+            .iter()
+            .map(|inner| inner.num_txns())
+            .sum::<usize>()
+    }
+
+    pub(crate) fn num_txns(&self) -> usize {
+        self.num_sub_block_txns() + self.proofs.num_txns()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.sub_blocks.iter().all(|inner| inner.is_empty()) && self.proofs.is_empty()
+    }
+
+    pub(crate) fn extend(mut self, other: Self) -> Self {
+        unreachable!()
+    }
+
+    pub(crate) fn num_sub_block_batches(&self) -> usize {
+        self.sub_blocks.iter().map(|inner| inner.len()).sum()
+    }
+
+    pub(crate) fn num_bytes(&self) -> usize {
+        self.sub_blocks
+            .iter()
+            .map(|inner| inner.num_bytes())
+            .sum::<usize>()
+            + self.proofs.num_bytes()
+    }
+
+    pub fn proof_with_data(&self) -> &BatchPointer<ProofOfStore> {
+        &self.proofs
+    }
+
+    pub fn sub_blocks(&self) -> &[BatchPointer<BatchInfo>] {
+        &self.sub_blocks
+    }
+
+    pub fn all_sub_block_batches(&self) -> Vec<BatchInfo> {
+        self.sub_blocks
+            .iter()
+            .flat_map(|inner| inner.deref())
+            .cloned()
+            .collect()
+    }
+
+    pub fn get_all_batch_infos(&self) -> Vec<BatchInfo> {
+        self.sub_blocks
+            .iter()
+            .flat_map(|inner| inner.deref())
+            .chain(self.proofs.iter().map(|p| p.info()))
+            .cloned()
+            .collect()
+    }
+}
+
+impl fmt::Display for RaikouPayload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "RaikouPayload(sub_blocks: {}, proofs: {})",
+            self.num_sub_block_txns(),
+            self.proofs.num_txns(),
+        )
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum OptQuorumStorePayload {
     V1(OptQuorumStorePayloadV1),
@@ -308,6 +397,15 @@ impl OptQuorumStorePayload {
         })
     }
 
+    pub fn new_empty() -> Self {
+        Self::V1(OptQuorumStorePayloadV1 {
+            inline_batches: Vec::<InlineBatch>::new().into(),
+            opt_batches: Vec::new().into(),
+            proofs: Vec::new().into(),
+            execution_limits: PayloadExecutionLimit::None,
+        })
+    }
+
     pub(crate) fn num_txns(&self) -> usize {
         self.opt_batches.num_txns() + self.proofs.num_txns() + self.inline_batches.num_txns()
     }
@@ -323,6 +421,10 @@ impl OptQuorumStorePayload {
         self.proofs.extend(other.proofs);
         self.execution_limits.extend(other.execution_limits);
         self
+    }
+
+    pub(crate) fn num_opt_batches(&self) -> usize {
+        self.opt_batches.len()
     }
 
     pub(crate) fn num_bytes(&self) -> usize {

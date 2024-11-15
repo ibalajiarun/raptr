@@ -10,12 +10,20 @@ use crate::{
 };
 use ::raikou::leader_schedule::round_robin;
 use aptos_config::config::ConsensusConfig;
-use aptos_consensus_types::{common::Author, proof_of_store::BatchInfo};
+use aptos_consensus_types::{
+    block::Block,
+    common::{Author, PayloadFilter},
+    payload::{InlineBatches, OptQuorumStorePayload},
+    payload_pull_params::{OptQSPayloadPullParams, PayloadPullParameters},
+    proof_of_store::BatchInfo,
+    utils::PayloadTxnsSize,
+};
 use aptos_types::{
     epoch_state::EpochState, on_chain_config::ValidatorSet, validator_signer::ValidatorSigner,
     validator_verifier::ValidatorVerifier,
 };
-use futures::StreamExt;
+use aptos_validator_transaction_pool::TransactionFilter;
+use futures::{future::BoxFuture, FutureExt, StreamExt};
 use futures_channel::{mpsc::UnboundedSender, oneshot};
 use raikou::{
     framework::{
@@ -34,8 +42,15 @@ use raikou::{
         RaikouNode,
     },
 };
+use rayon::slice::ParallelSlice;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, future::Future, marker::PhantomData, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    future::Future,
+    marker::PhantomData,
+    sync::Arc,
+    time::Duration,
+};
 use tokio::time::Instant;
 
 const JOLTEON_TIMEOUT: u32 = 3; // in Deltas
@@ -169,7 +184,7 @@ impl RaikouManager {
             enable_commit_votes: true,
             status_interval: Duration::from_secs_f64(delta * 10.),
             round_sync_interval: Duration::from_secs_f64(delta * 15.),
-            block_fetch_multiplicity: 2,
+            block_fetch_multiplicity: 1,
         };
 
         let mut module_network = ModuleNetwork::new();
@@ -201,6 +216,7 @@ impl RaikouManager {
 
         #[cfg(any(feature = "force-aptos-types", not(feature = "sim-types")))]
         let dissemination = Self::spawn_qs_dissemination_layer(
+            node_id,
             payload_client,
             consensus_config,
             payload_manager,
@@ -239,12 +255,14 @@ impl RaikouManager {
 
     #[cfg(any(feature = "force-aptos-types", not(feature = "sim-types")))]
     async fn spawn_qs_dissemination_layer(
+        node_id: NodeId,
         payload_client: Arc<dyn PayloadClient>,
         consensus_config: ConsensusConfig,
         payload_manager: Arc<dyn TPayloadManager>,
         module_network: ModuleNetworkService,
     ) -> impl DisseminationLayer {
         let dissemination = RaikouQSDisseminationLayer {
+            node_id,
             payload_client,
             config: consensus_config,
             payload_manager,
@@ -591,6 +609,7 @@ impl NetworkService for RaikouDissNetworkService {
 
 #[cfg(any(feature = "force-aptos-types", not(feature = "sim-types")))]
 struct RaikouQSDisseminationLayer {
+    node_id: usize,
     payload_client: Arc<dyn PayloadClient>,
     config: ConsensusConfig,
     payload_manager: Arc<dyn TPayloadManager>,
@@ -603,7 +622,7 @@ impl RaikouQSDisseminationLayer {}
 #[cfg(any(feature = "force-aptos-types", not(feature = "sim-types")))]
 impl DisseminationLayer for RaikouQSDisseminationLayer {
     fn module_id(&self) -> raikou::framework::module_network::ModuleId {
-        todo!()
+        self.module_id
     }
 
     async fn prepare_block(
@@ -611,48 +630,66 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
         round: raikou::raikou::types::Round,
         exclude: std::collections::HashSet<raikou::raikou::types::BatchHash>,
     ) -> raikou::raikou::types::Payload {
-        // // TODO: Fix the payload filter
-        // let payload_filter = PayloadFilter::Empty;
-        // self.payload_client.pull_payload(
-        //     Duration::from_millis(50),
-        //     self.config.max_sending_block_txns,
-        //     self.config.max_sending_block_bytes,
-        //     0,
-        //     0,
-        //     TransactionFilter::empty(),
-        //     payload_filter,
-        //     Box::pin(async {}),
-        //     false,
-        //     0,
-        //     0.0,
-        // )
+        // TODO: Fix the payload filter
+        let (_, payload) = self
+            .payload_client
+            .pull_payload(
+                PayloadPullParameters {
+                    max_poll_time: Duration::from_millis(self.config.quorum_store_poll_time_ms),
+                    max_txns: PayloadTxnsSize::new(
+                        self.config.max_sending_block_txns,
+                        self.config.max_sending_block_bytes,
+                    ),
+                    max_txns_after_filtering: self.config.max_sending_block_txns,
+                    soft_max_txns_after_filtering: self.config.max_sending_block_txns,
+                    max_inline_txns: PayloadTxnsSize::new(
+                        self.config.max_sending_inline_txns,
+                        self.config.max_sending_inline_bytes,
+                    ),
+                    user_txn_filter: PayloadFilter::Empty,
+                    pending_ordering: false,
+                    pending_uncommitted_blocks: 0,
+                    recent_max_fill_fraction: 0.0,
+                    block_timestamp: aptos_infallible::duration_since_epoch(),
+                    maybe_optqs_payload_pull_params: Some(OptQSPayloadPullParams {
+                        exclude_authors: HashSet::new(),
+                        minimum_batch_age_usecs: 0,
+                    }),
+                },
+                TransactionFilter::no_op(),
+                async {}.boxed(),
+            )
+            .await
+            .unwrap();
 
-        todo!()
+        raikou::raikou::types::Payload::new(round, self.node_id, payload)
     }
 
-    async fn prefetch_payload_data(&self, payload: raikou::raikou::types::Payload) {
-        // self.payload_manager.prefetch_payload_data(
-        //     &payload.inner,
-        //     SystemTime::now()
-        //         .duration_since(UNIX_EPOCH)
-        //         .unwrap()
-        //         .as_secs(),
-        // );
-        todo!()
+    async fn prefetch_payload_data(&self, payload: &raikou::raikou::types::Payload) {
+        self.payload_manager.prefetch_payload_data(
+            &payload.data,
+            aptos_infallible::duration_since_epoch().as_micros() as u64,
+        );
     }
 
-    async fn check_stored_all(&self, batches: &[BatchInfo]) -> bool {
-        todo!()
+    async fn check_stored_all(&self, payload: &raikou::raikou::types::Payload) -> bool {
+        self.payload_manager
+            .check_payload_availability(&payload.data)
+            .is_ok()
     }
 
     async fn notify_commit(&self, payloads: Vec<raikou::raikou::types::Payload>) {
-        // self.payload_manager.notify_commit(
-        //     SystemTime::now()
-        //         .duration_since(UNIX_EPOCH)
-        //         .unwrap()
-        //         .as_secs(),
-        //     payloads.into_iter().map(|p| p.inner).collect(),
-        // )
-        todo!()
+        let payloads = payloads
+            .iter()
+            .map(|payload| {
+                aptos_consensus_types::common::Payload::Raikou(
+                    payload.data.as_raikou_payload().clone(),
+                )
+            })
+            .collect();
+        self.payload_manager.notify_commit(
+            aptos_infallible::duration_since_epoch().as_micros() as u64,
+            payloads,
+        );
     }
 }

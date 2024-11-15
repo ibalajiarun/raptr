@@ -50,7 +50,7 @@ pub trait TPayloadManager: Send + Sync {
     /// Check if the transactions corresponding are available. This is specific to payload
     /// manager implementations. For optimistic quorum store, we only check if optimistic
     /// batches are available locally.
-    fn check_payload_availability(&self, block: &Block) -> Result<(), BitVec>;
+    fn check_payload_availability(&self, payload: &Payload) -> Result<(), BitVec>;
 
     /// Get the transactions in a block's payload. This function returns a vector of transactions.
     async fn get_transactions(
@@ -74,7 +74,7 @@ impl TPayloadManager for DirectMempoolPayloadManager {
 
     fn prefetch_payload_data(&self, _payload: &Payload, _timestamp: u64) {}
 
-    fn check_payload_availability(&self, _block: &Block) -> Result<(), BitVec> {
+    fn check_payload_availability(&self, payload: &Payload) -> Result<(), BitVec> {
         Ok(())
     }
 
@@ -195,6 +195,7 @@ impl TPayloadManager for QuorumStorePayloadManager {
                 Payload::OptQuorumStore(opt_quorum_store_payload) => {
                     opt_quorum_store_payload.into_inner().get_all_batch_infos()
                 },
+                Payload::Raikou(raikou_payload) => raikou_payload.get_all_batch_infos(),
             })
             .collect();
 
@@ -296,14 +297,26 @@ impl TPayloadManager for QuorumStorePayloadManager {
                     &self.ordered_authors,
                 )
             },
+            Payload::Raikou(raikou_payload) => {
+                for sub_block in raikou_payload.sub_blocks() {
+                    prefetch_helper(
+                        sub_block,
+                        self.batch_reader.clone(),
+                        timestamp,
+                        &self.ordered_authors,
+                    );
+                }
+                prefetch_helper(
+                    raikou_payload.proof_with_data(),
+                    self.batch_reader.clone(),
+                    timestamp,
+                    &self.ordered_authors,
+                )
+            },
         };
     }
 
-    fn check_payload_availability(&self, block: &Block) -> Result<(), BitVec> {
-        let Some(payload) = block.payload() else {
-            return Ok(());
-        };
-
+    fn check_payload_availability(&self, payload: &Payload) -> Result<(), BitVec> {
         match payload {
             Payload::DirectMempool(_) => {
                 unreachable!("QuorumStore doesn't support DirectMempool payload")
@@ -361,6 +374,27 @@ impl TPayloadManager for QuorumStorePayloadManager {
             Payload::OptQuorumStore(opt_qs_payload) => {
                 let mut missing_authors = BitVec::with_num_bits(self.ordered_authors.len() as u16);
                 for batch in opt_qs_payload.opt_batches().deref() {
+                    if self.batch_reader.exists(batch.digest()).is_none() {
+                        let index = *self
+                            .address_to_validator_index
+                            .get(&batch.author())
+                            .expect("Payload author should have been verified");
+                        missing_authors.set(index as u16);
+                    }
+                }
+                if missing_authors.all_zeros() {
+                    Ok(())
+                } else {
+                    Err(missing_authors)
+                }
+            },
+            Payload::Raikou(raikout_payload) => {
+                let mut missing_authors = BitVec::with_num_bits(self.ordered_authors.len() as u16);
+                for batch in raikout_payload
+                    .sub_blocks()
+                    .iter()
+                    .flat_map(|inner| inner.deref())
+                {
                     if self.batch_reader.exists(batch.digest()).is_none() {
                         let index = *self
                             .address_to_validator_index
@@ -473,6 +507,34 @@ impl TPayloadManager for QuorumStorePayloadManager {
                         opt_qs_payload.inline_batches().batch_infos(),
                     ]
                     .concat(),
+                )
+            },
+            Payload::Raikou(raikou_payload) => {
+                let mut sub_blocks_txns = Vec::new();
+
+                for sub_block in raikou_payload.sub_blocks() {
+                    sub_blocks_txns.extend(
+                        process_payload_helper(
+                            sub_block,
+                            self.batch_reader.clone(),
+                            block,
+                            &self.ordered_authors,
+                        )
+                        .await?,
+                    )
+                }
+                let proof_batch_txns = process_payload_helper(
+                    raikou_payload.proof_with_data(),
+                    self.batch_reader.clone(),
+                    block,
+                    &self.ordered_authors,
+                )
+                .await?;
+                let all_txns = [proof_batch_txns, sub_blocks_txns].concat();
+                BlockTransactionPayload::new_raikou_payload(
+                    all_txns,
+                    raikou_payload.proof_with_data().deref().clone(),
+                    raikou_payload.all_sub_block_batches(),
                 )
             },
             _ => unreachable!(
@@ -746,7 +808,7 @@ impl TPayloadManager for ConsensusObserverPayloadManager {
         // noop
     }
 
-    fn check_payload_availability(&self, _block: &Block) -> Result<(), BitVec> {
+    fn check_payload_availability(&self, _payload: &Payload) -> Result<(), BitVec> {
         unreachable!("this method isn't used in ConsensusObserver")
     }
 

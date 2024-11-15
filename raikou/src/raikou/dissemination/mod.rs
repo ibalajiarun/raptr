@@ -55,9 +55,9 @@ pub trait DisseminationLayer: Send + Sync + 'static {
         exclude: HashSet<BatchHash>,
     ) -> impl Future<Output = Payload> + Send;
 
-    fn prefetch_payload_data(&self, payload: Payload) -> impl Future<Output = ()> + Send;
+    fn prefetch_payload_data(&self, payload: &Payload) -> impl Future<Output = ()> + Send;
 
-    fn check_stored_all(&self, batches: &[BatchInfo]) -> impl Future<Output = bool> + Send;
+    fn check_stored_all(&self, payload: &Payload) -> impl Future<Output = bool> + Send;
 
     fn notify_commit(&self, payloads: Vec<Payload>) -> impl Future<Output = ()> + Send;
 }

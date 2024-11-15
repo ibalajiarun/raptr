@@ -14,7 +14,7 @@ use crate::{
     },
     utils::kth_max_set::KthMaxSet,
 };
-use aptos_consensus_types::common::Author;
+use aptos_consensus_types::{common::Author, payload::BatchPointer};
 use aptos_crypto::{bls12381::Signature, hash::CryptoHash, CryptoMaterialError, Genesis};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
 use aptos_types::{
@@ -34,6 +34,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     fmt::{Debug, Formatter},
     num::NonZeroU8,
+    ops::Deref,
     sync::Arc,
     time::Duration,
 };
@@ -154,7 +155,7 @@ impl Block {
         self.payload().acs()
     }
 
-    pub fn sub_blocks(&self) -> &[Vec<BatchInfo>] {
+    pub fn sub_blocks(&self) -> &[BatchPointer<BatchInfo>] {
         self.payload().sub_blocks()
     }
 
@@ -1040,10 +1041,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         }
 
         while self.stored_prefix_cache.prefix < block.n_sub_blocks()
-            && self
-                .dissemination
-                .check_stored_all(block.sub_block(self.stored_prefix_cache.prefix))
-                .await
+            && self.dissemination.check_stored_all(block.payload()).await
         {
             self.stored_prefix_cache.prefix += 1;
         }
@@ -1189,8 +1187,8 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                     .sub_blocks()
                     .iter()
                     .take(cur.prefix)
-                    .flatten()
-                    .map(|batch| batch.digest.clone()),
+                    .flat_map(|batch| batch.deref())
+                    .map(|batch| batch.digest()),
             );
             cur = block.parent_qc().unwrap();
         }
@@ -1203,8 +1201,8 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                     .iter()
                     .take(cur.prefix)
                     .skip(self.committed_qc.prefix)
-                    .flatten()
-                    .map(|batch| batch.digest.clone()),
+                    .flat_map(|batch| batch.deref())
+                    .map(|batch| batch.digest()),
             );
         }
 

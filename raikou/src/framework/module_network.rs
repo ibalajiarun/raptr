@@ -1,3 +1,6 @@
+// Copyright (c) Aptos Foundation
+// SPDX-License-Identifier: Apache-2.0
+
 use std::{
     collections::{btree_map::Entry, BTreeMap},
     sync::Arc,
@@ -63,6 +66,11 @@ pub struct ModuleNetworkService {
     receive: mpsc::Receiver<(ModuleId, ModuleEvent)>,
 }
 
+pub struct ModuleNetworkSender {
+    module_id: ModuleId,
+    send: Arc<RwLock<BTreeMap<ModuleId, mpsc::Sender<(ModuleId, ModuleEvent)>>>>,
+}
+
 impl ModuleNetworkService {
     pub fn module_id(&self) -> ModuleId {
         self.module_id
@@ -77,5 +85,21 @@ impl ModuleNetworkService {
 
     pub async fn recv(&mut self) -> (ModuleId, ModuleEvent) {
         self.receive.recv().await.unwrap()
+    }
+
+    pub fn new_sender(&self) -> ModuleNetworkSender {
+        ModuleNetworkSender {
+            module_id: self.module_id,
+            send: self.send.clone(),
+        }
+    }
+}
+
+impl ModuleNetworkSender {
+    pub async fn send(&self, module: ModuleId, event: ModuleEvent) {
+        self.send.read().await[&module]
+            .send((self.module_id, event))
+            .await
+            .unwrap();
     }
 }

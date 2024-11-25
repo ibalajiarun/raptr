@@ -11,8 +11,8 @@ pub mod multichain;
 pub mod raikou;
 pub mod utils;
 
-// #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
-// pub mod simulation_test;
+#[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
+pub mod simulation_test;
 
 pub type Slot = i64;
 

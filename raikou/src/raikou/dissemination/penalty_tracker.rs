@@ -144,7 +144,7 @@ impl PenaltyTracker {
         let mut missing = vec![None; self.config.n_nodes];
         let mut has_batches = vec![false; self.config.n_nodes];
 
-        for (batch_num, batch_info) in payload.sub_blocks().iter().flatten().enumerate() {
+        for (batch_num, batch_info) in payload.sub_blocks().flatten().enumerate() {
             has_batches[batch_info.author] = true;
 
             if let Some(batch_receive_time) =

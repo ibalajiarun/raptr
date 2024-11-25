@@ -264,6 +264,12 @@ pub enum Payload {
     Raikou(RaikouPayload),
 }
 
+impl From<RaikouPayload> for Payload {
+    fn from(raikou_payload: RaikouPayload) -> Self {
+        Payload::Raikou(raikou_payload)
+    }
+}
+
 impl Payload {
     pub fn as_raikou_payload(&self) -> &RaikouPayload {
         match self {

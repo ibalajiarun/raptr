@@ -51,7 +51,9 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use std::any::TypeId;
 use tokio::time::Instant;
+use raikou::raikou::types as raikou_types;
 
 const JOLTEON_TIMEOUT: u32 = 3; // in Deltas
 const CONS_BASE_PORT: u16 = 12000;
@@ -209,7 +211,7 @@ impl RaikouManager {
             diss_rx,
             network_sender.clone(),
             validator_set,
-            Arc::new(epoch_state.verifier.clone()),
+            epoch_state.verifier.clone(),
             enable_optimistic_dissemination,
         )
         .await;
@@ -259,21 +261,55 @@ impl RaikouManager {
         payload_client: Arc<dyn PayloadClient>,
         consensus_config: ConsensusConfig,
         payload_manager: Arc<dyn TPayloadManager>,
-        module_network: ModuleNetworkService,
+        mut module_network: ModuleNetworkService,
     ) -> impl DisseminationLayer {
         let dissemination = RaikouQSDisseminationLayer {
             node_id,
             payload_client,
             config: consensus_config,
-            payload_manager,
+            payload_manager: payload_manager.clone(),
             module_id: module_network.module_id(),
         };
 
-        // Ignore all module network messages.
         tokio::spawn(async move {
-            let mut module_network = module_network;
             loop {
-                let _ = module_network.recv().await;
+                let (consensus_module, msg) = module_network.recv().await;
+
+                if msg.type_id() == TypeId::of::<dissemination::BlockReceived>() {
+                    let msg: Box<_> = msg.downcast::<dissemination::BlockReceived>().ok().unwrap();
+                    let dissemination::BlockReceived { payload, .. } = *msg;
+
+                    payload_manager.prefetch_payload_data(
+                        &payload.inner,
+                        aptos_infallible::duration_since_epoch().as_micros() as u64,
+                    );
+
+                    // TODO: add FullBlockAvailable notification.
+                    // let module_network_sender = module_network.new_sender();
+                    // tokio::spawn(async move {
+                    //     let raikou_types::BlockData { round, author, payload, .. } = block_data;
+                    //     let block_data = BlockData::new_proposal(
+                    //         payload.inner,
+                    //         author.unwrap(),
+                    //         vec![], // failed_authors
+                    //         round,
+                    //         // Timestamp is only used to check batch expiration,
+                    //         // which is not supported by this prototype.
+                    //         0,
+                    //         QuorumCert::dummy(),
+                    //     );
+                    //     if let Ok(_) = payload_manager.get_transactions(&block_data).await {
+                    //         module_network_sender.send(
+                    //             consensus_module,
+                    //             FullBlockAvailable { round },
+                    //         ).await;
+                    //     }
+                    // });
+                } else if msg.type_id() == TypeId::of::<dissemination::Kill>() {
+                    break;
+                } else {
+                    unreachable!();
+                }
             }
         });
 
@@ -320,8 +356,6 @@ impl RaikouManager {
         //         peer_concurrency_level: 4,
         //     },
         // ).await;
-
-        use aptos_types::validator_verifier::{self, ValidatorVerifier};
 
         let diss_network_service = TcpNetworkService::new(
             node_id,
@@ -621,15 +655,15 @@ impl RaikouQSDisseminationLayer {}
 
 #[cfg(any(feature = "force-aptos-types", not(feature = "sim-types")))]
 impl DisseminationLayer for RaikouQSDisseminationLayer {
-    fn module_id(&self) -> raikou::framework::module_network::ModuleId {
+    fn module_id(&self) -> ModuleId {
         self.module_id
     }
 
     async fn prepare_block(
         &self,
-        round: raikou::raikou::types::Round,
-        exclude: std::collections::HashSet<raikou::raikou::types::BatchHash>,
-    ) -> raikou::raikou::types::Payload {
+        round: raikou_types::Round,
+        exclude: HashSet<raikou_types::BatchHash>,
+    ) -> raikou_types::Payload {
         // TODO: Fix the payload filter
         let (_, payload) = self
             .payload_client
@@ -662,31 +696,20 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
             .await
             .unwrap();
 
-        raikou::raikou::types::Payload::new(round, self.node_id, payload)
+        raikou_types::Payload::new(round, self.node_id, payload)
     }
 
-    async fn prefetch_payload_data(&self, payload: &raikou::raikou::types::Payload) {
-        self.payload_manager.prefetch_payload_data(
-            &payload.data,
-            aptos_infallible::duration_since_epoch().as_micros() as u64,
-        );
-    }
-
-    async fn check_stored_all(&self, payload: &raikou::raikou::types::Payload) -> bool {
+    async fn available_prefix(
+        &self,
+        payload: &raikou_types::Payload,
+        cached_value: usize,
+    ) -> usize {
         self.payload_manager
-            .check_payload_availability(&payload.data)
-            .is_ok()
+            .available_prefix(payload.inner.as_raikou_payload(), cached_value)
     }
 
-    async fn notify_commit(&self, payloads: Vec<raikou::raikou::types::Payload>) {
-        let payloads = payloads
-            .iter()
-            .map(|payload| {
-                aptos_consensus_types::common::Payload::Raikou(
-                    payload.data.as_raikou_payload().clone(),
-                )
-            })
-            .collect();
+    async fn notify_commit(&self, payloads: Vec<raikou_types::Payload>) {
+        let payloads = payloads.into_iter().map(|payload| payload.inner).collect();
         self.payload_manager.notify_commit(
             aptos_infallible::duration_since_epoch().as_micros() as u64,
             payloads,

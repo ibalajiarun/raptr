@@ -7,9 +7,8 @@ use crate::framework::{
     NodeId,
 };
 use aptos_channels::{aptos_channel, message_queues::QueueStyle};
-use futures::{future::join_all, stream::FuturesUnordered, FutureExt, StreamExt};
 use aptos_types::validator_verifier::ValidatorVerifier;
-
+use futures::{future::join_all, stream::FuturesUnordered, FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -170,9 +169,16 @@ where
                     cur_buf = (cur_buf + 1) % bufs.len();
 
                     if concurrency_level == 1 {
-                        Self::process_message(buf, n, peer_id, tx, validator_verifier.clone()).await;
+                        Self::process_message(buf, n, peer_id, tx, validator_verifier.clone())
+                            .await;
                     } else {
-                        tokio::spawn(Self::process_message(buf, n, peer_id, tx, validator_verifier.clone()));
+                        tokio::spawn(Self::process_message(
+                            buf,
+                            n,
+                            peer_id,
+                            tx,
+                            validator_verifier.clone(),
+                        ));
                     }
                 },
                 Err(err) => {

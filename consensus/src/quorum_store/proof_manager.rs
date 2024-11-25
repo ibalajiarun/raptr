@@ -184,7 +184,7 @@ impl ProofManager {
 
         let response = if request.maybe_optqs_payload_pull_params.is_some() {
             Payload::Raikou(RaikouPayload::new(
-                vec![opt_batches.into()],
+                vec![opt_batches.into()], // TODO
                 proof_block.into(),
             ))
         } else if proof_block.is_empty() && inline_block.is_empty() {

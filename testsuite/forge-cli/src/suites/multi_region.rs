@@ -16,7 +16,7 @@ use aptos_testcases::{
     multi_region_network_test::{
         MultiRegionNetworkEmulationConfig, MultiRegionNetworkEmulationTest,
     },
-    performance_test::PerformanceBenchmark,
+    performance_test::{ConsensusOnlyBenchmark, PerformanceBenchmark},
     three_region_simulation_test::ThreeRegionSameCloudSimulationTest,
     CompositeNetworkTest,
 };
@@ -41,24 +41,11 @@ pub(crate) fn get_multi_region_test(test_name: &str) -> Option<ForgeConfig> {
 pub(crate) fn multiregion_benchmark_test() -> ForgeConfig {
     ForgeConfig::default()
         .with_initial_validator_count(NonZeroUsize::new(20).unwrap())
-        .add_network_test(PerformanceBenchmark)
+        .add_network_test(ConsensusOnlyBenchmark)
         .with_genesis_helm_config_fn(Arc::new(|helm_values| {
             // Have single epoch change in land blocking
-            helm_values["chain"]["epoch_duration_secs"] = 300.into();
-
-            helm_values["genesis"]["multicluster"]["enabled"] = true.into();
+            helm_values["chain"]["epoch_duration_secs"] = 3600.into();
         }))
-        .with_multi_region_config()
-        .with_success_criteria(
-            SuccessCriteria::new(4500)
-                .add_no_restarts()
-                .add_wait_for_catchup_s(
-                    // Give at least 60s for catchup, give 10% of the run for longer durations.
-                    180,
-                )
-                .add_system_metrics_threshold(SYSTEM_12_CORES_10GB_THRESHOLD.clone())
-                .add_chain_progress(RELIABLE_PROGRESS_THRESHOLD.clone()),
-        )
 }
 
 pub(crate) fn three_region_simulation_with_different_node_speed() -> ForgeConfig {

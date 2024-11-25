@@ -3,8 +3,21 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::NetworkLoadTest;
-use aptos_forge::{NetworkContextSynchronizer, NetworkTest, Result, Test};
+use anyhow::anyhow;
+use aptos_forge::{NetworkContextSynchronizer, NetworkTest, NodeExt, Result, Test};
+use aptos_types::{
+    chain_id::ChainId,
+    transaction::{
+        authenticator::AccountAuthenticator, EntryFunction, RawTransaction, Script,
+        SignedTransaction, TransactionPayload,
+    },
+    PeerId,
+};
 use async_trait::async_trait;
+use balter::{prelude::ConfigurableScenario, scenario, transaction};
+use rand::{thread_rng, RngCore};
+use reqwest::Url;
+use std::{cell::OnceCell, sync::OnceLock, time::Duration};
 
 pub struct PerformanceBenchmark;
 
@@ -21,4 +34,99 @@ impl NetworkTest for PerformanceBenchmark {
     async fn run<'a>(&self, ctx: NetworkContextSynchronizer<'a>) -> Result<()> {
         <dyn NetworkLoadTest>::run(self, ctx).await
     }
+}
+
+pub struct ConsensusOnlyBenchmark;
+
+impl Test for ConsensusOnlyBenchmark {
+    fn name(&self) -> &'static str {
+        "consensus-only benchmark"
+    }
+}
+
+#[async_trait]
+impl NetworkTest for ConsensusOnlyBenchmark {
+    async fn run<'a>(&self, ctx: NetworkContextSynchronizer<'a>) -> Result<()> {
+        let ctx = ctx.ctx.lock().await;
+
+        // Get all URLs
+        let clients = ctx
+            .swarm
+            .read()
+            .await
+            .validators()
+            .map(|val| val.rest_client())
+            .collect();
+
+        // Create Balter
+        BALTER_CONTEXT
+            .set(BalterContext { clients })
+            .map_err(|_| anyhow!("couldn't set context"))
+            .unwrap();
+
+        let result = load_test().tps(100).duration(Duration::from_secs(60)).await;
+
+        println!("{:?}", result);
+
+        Ok(())
+    }
+}
+
+static BALTER_CONTEXT: OnceLock<BalterContext> = OnceLock::new();
+
+pub struct BalterContext {
+    clients: Vec<aptos_rest_client::Client>,
+}
+
+impl BalterContext {
+    fn new(clients: Vec<aptos_rest_client::Client>) -> Self {
+        Self { clients }
+    }
+
+    fn next_client(&self) -> aptos_rest_client::Client {
+        let idx = thread_rng().next_u32() as usize % self.clients.len();
+        self.clients[idx].clone()
+    }
+}
+
+#[scenario]
+async fn load_test() {
+    let client = { BALTER_CONTEXT.get().unwrap().next_client() };
+    let (txn_tx, mut txn_rx) = tokio::sync::mpsc::channel(100);
+    tokio::spawn(async move {
+        loop {
+            let txn = SignedTransaction::new_single_sender(
+                RawTransaction::new(
+                    PeerId::random(),
+                    0,
+                    TransactionPayload::Script(Script::new(Vec::new(), Vec::new(), Vec::new())),
+                    0,
+                    0,
+                    0,
+                    ChainId::test(),
+                ),
+                AccountAuthenticator::NoAccountAuthenticator,
+            );
+            txn_tx.send(txn).await.ok();
+        }
+    });
+    while let Some(txn) = txn_rx.recv().await {
+        let txn_payload = bcs::to_bytes(&txn).unwrap();
+        transaction(&client, txn_payload).await.unwrap();
+    }
+}
+
+#[transaction]
+async fn transaction(
+    client: &aptos_rest_client::Client,
+    txn_payload: Vec<u8>,
+) -> anyhow::Result<()> {
+    client
+        .post(client.build_path("submit_txn").unwrap())
+        .body(txn_payload)
+        .send()
+        .await
+        .unwrap();
+
+    Ok(())
 }

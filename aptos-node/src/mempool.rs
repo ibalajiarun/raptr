@@ -4,6 +4,7 @@ use aptos_consensus_notifications::{
 };
 use aptos_crypto::HashValue;
 use aptos_infallible::Mutex;
+use aptos_logger::info;
 use aptos_mempool::{QuorumStoreRequest, QuorumStoreResponse};
 use aptos_mempool_notifications::{
     CommittedTransaction, MempoolCommitNotification, MempoolNotificationListener, MempoolNotifier,
@@ -78,6 +79,7 @@ impl SimpleMempool {
             self.pending_tracker.register(&txn, tx);
             pulled_txns.push(txn);
         }
+        info!("pulled txns: {}", pulled_txns.len());
         drop(store);
         sender
             .send(Ok(QuorumStoreResponse::GetBatchResponse(pulled_txns)))

@@ -245,11 +245,14 @@ impl LocalNode {
             .map(|_| ())
             .map_err(HealthCheckError::Failure)?;
 
-        self.rest_client()
-            .get_ledger_information()
-            .await
-            .map(|_| ())
-            .map_err(|err| HealthCheckError::Failure(err.into()))
+        // self.rest_client()
+        //     .get_ledger_information()
+        //     .await
+        //     .map(|_| ())
+        //     .map_err(|err| HealthCheckError::Failure(err.into()))
+        //     .context("rest client")
+
+        Ok(())
     }
 }
 

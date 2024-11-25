@@ -236,29 +236,23 @@ where
         Payload::new(round, inner.node_id, acs, batches)
     }
 
-    async fn prefetch_payload_data(&self, payload: &Payload) {
-        let new_acs = payload
-            .acs()
-            .into_iter()
-            .cloned()
-            .map(|ac| (ac.info.digest.clone(), ac));
-        self.inner.lock().await.acs.extend(new_acs);
-    }
-
-    async fn check_stored_all(&self, batches: &[BatchInfo]) -> bool {
+    async fn available_prefix(&self, payload: &Payload, cached_value: usize) -> Prefix {
         let inner = self.inner.lock().await;
-        if let Some(_missing) = batches
-            .into_iter()
-            .find(|batch| !inner.batches.contains_key(&batch.digest))
-        {
-            // inner.log_detail(format!(
-            //     "Missing batch #{} from node {} with digest {:#x}",
-            //     _missing.batch_id, _missing.author, _missing.digest,
-            // ));
-            false
-        } else {
-            true
+
+        let mut available_prefix = cached_value;
+        while available_prefix < payload.sub_blocks().len() {
+            let sub_block = payload.sub_block(available_prefix);
+            if !sub_block
+                .iter()
+                .all(|batch| inner.batches.contains_key(&batch.digest))
+            {
+                return available_prefix;
+            }
+
+            available_prefix += 1;
         }
+
+        available_prefix
     }
 
     async fn notify_commit(&self, payloads: Vec<Payload>) {
@@ -288,7 +282,7 @@ where
         // Only track queueing time and penalties for the committed batches.
         // At the moment, they are only tracked for optimistically committed batches.
         for payload in &payloads {
-            for batch in payload.sub_blocks().iter().flatten() {
+            for batch in payload.sub_blocks().flatten() {
                 if payload.leader() == inner.node_id {
                     let block_prepare_time =
                         inner.penalty_tracker.block_prepare_time(payload.round());
@@ -522,6 +516,16 @@ where
 
         upon event of type [BlockReceived] from [_any_module] {
             upon [BlockReceived { leader, round, payload }] {
+                let new_acs = payload
+                    .acs()
+                    .into_iter()
+                    .cloned()
+                    .map(|ac| (ac.info.digest.clone(), ac));
+
+                self.acs.extend(new_acs);
+
+                // TODO: add FullBlockAvailable notification.
+
                 if self.config.enable_penalty_tracker {
                     ctx.set_timer(
                         self.config.penalty_tracker_report_delay,

@@ -59,6 +59,20 @@ pub struct BatchInfo {
     pub digest: BatchHash,
 }
 
+impl BatchInfo {
+    pub fn author(&self) -> NodeId {
+        self.author
+    }
+
+    pub fn batch_id(&self) -> BatchId {
+        self.batch_id
+    }
+
+    pub fn digest(&self) -> &BatchHash {
+        &self.digest
+    }
+}
+
 impl std::fmt::Debug for BatchInfo {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -155,18 +169,26 @@ impl Payload {
     }
 
     pub fn acs(&self) -> &Vec<AC> {
-        &self.data.acs
+        if self.include_acs {
+            &self.data.acs
+        } else {
+            static EMPTY: Vec<AC> = Vec::new();
+            &EMPTY
+        }
     }
 
-    pub fn sub_blocks(&self) -> &[Vec<BatchInfo>] {
-        &self.data.batches[self.sub_blocks.clone()]
+    pub fn sub_blocks(&self) -> impl ExactSizeIterator<Item = &Vec<BatchInfo>> {
+        (&self.data.batches[self.sub_blocks.clone()]).into_iter()
+    }
+
+    pub fn sub_block(&self, index: usize) -> &Vec<BatchInfo> {
+        &self.data.batches[index]
     }
 
     pub fn all(&self) -> impl Iterator<Item = &BatchInfo> {
-        self.data
-            .acs
+        self.acs()
             .iter()
             .map(|ac| &ac.info)
-            .chain(self.sub_blocks().iter().flatten())
+            .chain(self.sub_blocks().flatten())
     }
 }

@@ -13,8 +13,14 @@ use crate::{
     metrics, raikou,
     raikou::{dissemination, dissemination::fake::FakeDisseminationLayer, RaikouNode},
 };
+use aptos_crypto::bls12381::{PrivateKey, PublicKey};
+use aptos_types::{
+    account_address::AccountAddress,
+    validator_signer::ValidatorSigner,
+    validator_verifier::{ValidatorConsensusInfo, ValidatorVerifier},
+};
 use rand::{thread_rng, Rng};
-use std::{iter, sync::Arc, time::Duration};
+use std::{iter, ops::Deref, sync::Arc, time::Duration};
 use tokio::{spawn, time, time::Instant};
 
 type Slot = i64;
@@ -662,11 +668,38 @@ async fn test_raikou(
     let mut batch_consensus_latency = metrics::UnorderedBuilder::new();
     // let mut indirectly_committed_slots = metrics::UnorderedBuilder::new();
 
+    let account_addresses: Vec<_> = (0..n_nodes)
+        .map(|node_id| AccountAddress::new([node_id as u8; 32]))
+        .collect();
+
+    let private_keys: Vec<_> = (0..n_nodes)
+        .map(|node_id| {
+            use aptos_crypto::traits::Uniform;
+            Arc::new(PrivateKey::generate(&mut thread_rng()))
+        })
+        .collect();
+
+    let validator_infos: Vec<_> = (0..n_nodes)
+        .map(|node_id| {
+            ValidatorConsensusInfo::new(
+                account_addresses[node_id],
+                PublicKey::from(private_keys[node_id].deref()),
+                1,
+            )
+        })
+        .collect();
+
     let start_time = Instant::now();
     for node_id in 0..n_nodes {
         let config = config.clone();
         let mut diss_network_service = diss_network.service(node_id);
         let mut network_service = network.service(node_id);
+
+        let validator_verifier = Arc::new(ValidatorVerifier::new(validator_infos.clone()));
+        let validator_signer = Arc::new(ValidatorSigner::new(
+            account_addresses[node_id],
+            private_keys[node_id].clone(),
+        ));
 
         let clock_speed = { thread_rng().sample(clock_speed_distr) };
 
@@ -748,6 +781,8 @@ async fn test_raikou(
                     // enter_time: enter_time_sender,
                     // indirectly_committed_slots: indirectly_committed_slots_sender,
                 },
+                validator_verifier,
+                validator_signer,
             )));
 
             semaphore.add_permits(1);

@@ -14,7 +14,7 @@ use aptos_bitvec::BitVec;
 use aptos_consensus_types::{
     block::Block,
     common::{DataStatus, Payload, ProofWithData, Round},
-    payload::{BatchPointer, DataFetchFut, TDataInfo},
+    payload::{BatchPointer, DataFetchFut, RaikouPayload, TDataInfo},
     proof_of_store::BatchInfo,
 };
 use aptos_crypto::HashValue;
@@ -51,6 +51,12 @@ pub trait TPayloadManager: Send + Sync {
     /// manager implementations. For optimistic quorum store, we only check if optimistic
     /// batches are available locally.
     fn check_payload_availability(&self, payload: &Payload) -> Result<(), BitVec>;
+
+    /// Returns the number of optimistic sub-blocks that are fully available locally.
+    /// The caller guarantees that the result is at least `cached_value`.
+    fn available_prefix(&self, payload: &RaikouPayload, cached_value: usize) -> usize {
+        unimplemented!()
+    }
 
     /// Get the transactions in a block's payload. This function returns a vector of transactions.
     async fn get_transactions(
@@ -195,7 +201,9 @@ impl TPayloadManager for QuorumStorePayloadManager {
                 Payload::OptQuorumStore(opt_quorum_store_payload) => {
                     opt_quorum_store_payload.into_inner().get_all_batch_infos()
                 },
-                Payload::Raikou(raikou_payload) => raikou_payload.get_all_batch_infos(),
+                Payload::Raikou(raikou_payload) => {
+                    raikou_payload.get_all_batch_infos().cloned().collect()
+                },
             })
             .collect();
 
@@ -410,6 +418,22 @@ impl TPayloadManager for QuorumStorePayloadManager {
                 }
             },
         }
+    }
+
+    fn available_prefix(&self, payload: &RaikouPayload, cached_value: usize) -> usize {
+        let mut prefix = cached_value;
+        while prefix < payload.sub_blocks().len() {
+            let sub_block = &payload.sub_blocks()[prefix];
+            if !sub_block
+                .batch_summary
+                .iter()
+                .all(|batch| self.batch_reader.exists(&batch.digest).is_some())
+            {
+                break;
+            }
+            prefix += 1;
+        }
+        prefix
     }
 
     async fn get_transactions(

@@ -13,8 +13,8 @@ use futures::{
 use serde::{Deserialize, Serialize};
 use std::{
     fmt::Debug,
-    ops::{Deref, DerefMut},
-    sync::Arc,
+    ops::{Deref, DerefMut, Range},
+    sync::{Arc, OnceLock},
     usize,
 };
 
@@ -293,76 +293,130 @@ pub type SubBlocks = Vec<BatchPointer<BatchInfo>>;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct RaikouPayload {
+    data: Arc<RaikouPayloadData>,
+    include_proofs: bool,
+    sub_blocks: Range<usize>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+struct RaikouPayloadData {
     sub_blocks: SubBlocks,
     proofs: ProofBatches,
 }
 
-impl RaikouPayload {
-    pub fn new(sub_blocks: SubBlocks, proofs: ProofBatches) -> Self {
+impl RaikouPayloadData {
+    fn new(sub_blocks: SubBlocks, proofs: ProofBatches) -> Self {
         Self { sub_blocks, proofs }
     }
 
-    pub fn new_empty() -> Self {
-        RaikouPayload {
+    fn new_empty() -> Self {
+        Self {
             sub_blocks: Vec::new(),
             proofs: Vec::new().into(),
         }
     }
+}
+
+impl RaikouPayload {
+    pub fn new(sub_blocks: SubBlocks, proofs: ProofBatches) -> Self {
+        let sub_blocks_range = 0..sub_blocks.len();
+        Self {
+            data: Arc::new(RaikouPayloadData::new(sub_blocks, proofs)),
+            include_proofs: true,
+            sub_blocks: sub_blocks_range,
+        }
+    }
+
+    pub fn new_empty() -> Self {
+        RaikouPayload {
+            data: Arc::new(RaikouPayloadData::new_empty()),
+            include_proofs: true,
+            sub_blocks: 0..0,
+        }
+    }
+
+    pub fn sub_blocks(&self) -> &[BatchPointer<BatchInfo>] {
+        &self.data.sub_blocks[self.sub_blocks.clone()]
+    }
+
+    pub fn proofs(&self) -> &ProofBatches {
+        if self.include_proofs {
+            &self.data.proofs
+        } else {
+            static EMPTY_BATCH_POINTER: OnceLock<ProofBatches> = OnceLock::new();
+            &EMPTY_BATCH_POINTER.get_or_init(|| BatchPointer::new(vec![]))
+        }
+    }
+
+    pub fn with_prefix(&self, prefix: usize) -> Self {
+        assert!(prefix <= self.data.sub_blocks.len());
+        assert!(self.include_proofs);
+
+        Self {
+            data: self.data.clone(),
+            include_proofs: true,
+            sub_blocks: 0..prefix,
+        }
+    }
+
+    pub fn take_sub_blocks(&self, range: Range<usize>) -> Self {
+        assert!(range.end <= self.data.sub_blocks.len());
+
+        Self {
+            data: self.data.clone(),
+            include_proofs: false,
+            sub_blocks: range,
+        }
+    }
 
     pub fn num_sub_block_txns(&self) -> usize {
-        self.sub_blocks
+        self.sub_blocks()
             .iter()
             .map(|inner| inner.num_txns())
             .sum::<usize>()
     }
 
     pub(crate) fn num_txns(&self) -> usize {
-        self.num_sub_block_txns() + self.proofs.num_txns()
+        self.num_sub_block_txns() + self.proofs().num_txns()
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.sub_blocks.iter().all(|inner| inner.is_empty()) && self.proofs.is_empty()
+        self.sub_blocks().iter().all(|inner| inner.is_empty()) && self.proofs().is_empty()
     }
 
     pub(crate) fn extend(mut self, other: Self) -> Self {
-        unreachable!()
+        unreachable!() // TODO: remove?
     }
 
     pub(crate) fn num_sub_block_batches(&self) -> usize {
-        self.sub_blocks.iter().map(|inner| inner.len()).sum()
+        self.sub_blocks().iter().map(|inner| inner.len()).sum()
     }
 
     pub(crate) fn num_bytes(&self) -> usize {
-        self.sub_blocks
+        self.sub_blocks()
             .iter()
             .map(|inner| inner.num_bytes())
             .sum::<usize>()
-            + self.proofs.num_bytes()
+            + self.proofs().num_bytes()
     }
 
     pub fn proof_with_data(&self) -> &BatchPointer<ProofOfStore> {
-        &self.proofs
-    }
-
-    pub fn sub_blocks(&self) -> &[BatchPointer<BatchInfo>] {
-        &self.sub_blocks
+        &self.proofs()
     }
 
     pub fn all_sub_block_batches(&self) -> Vec<BatchInfo> {
-        self.sub_blocks
+        self.sub_blocks()
             .iter()
             .flat_map(|inner| inner.deref())
             .cloned()
             .collect()
     }
 
-    pub fn get_all_batch_infos(&self) -> Vec<BatchInfo> {
-        self.sub_blocks
+    pub fn get_all_batch_infos(&self) -> impl Iterator<Item = &BatchInfo> {
+        self.proofs()
             .iter()
-            .flat_map(|inner| inner.deref())
-            .chain(self.proofs.iter().map(|p| p.info()))
-            .cloned()
-            .collect()
+            .map(|p| p.info())
+            .chain(self.sub_blocks().iter().flat_map(|sb| &sb.batch_summary))
     }
 }
 
@@ -372,7 +426,7 @@ impl fmt::Display for RaikouPayload {
             f,
             "RaikouPayload(sub_blocks: {}, proofs: {})",
             self.num_sub_block_txns(),
-            self.proofs.num_txns(),
+            self.proofs().num_txns(),
         )
     }
 }

@@ -15,7 +15,7 @@ use crate::{
         dissemination::{
             penalty_tracker,
             penalty_tracker::{PenaltyTracker, PenaltyTrackerReports},
-            BlockReceived, DisseminationLayer, Kill,
+            DisseminationLayer, Kill, ProposalReceived,
         },
         types::*,
     },
@@ -212,15 +212,15 @@ where
         let mut inner = self.inner.lock().await;
 
         let acs = inner
-            .new_acs
+            .uncommitted_acs
             .iter()
-            .filter(|&batch_hash| !exclude.contains(batch_hash))
-            .map(|batch_hash| inner.acs[batch_hash].clone()) // WARNING: potentially expensive clone
+            .filter(|&(batch_hash, _ac)| !exclude.contains(batch_hash))
+            .map(|(_batch_hash, ac)| ac.clone())
             .collect();
 
         let batches = if inner.config.enable_optimistic_dissemination {
             let batches = inner
-                .new_batches
+                .uncommitted_batches
                 .iter()
                 .filter(|&batch_hash| !exclude.contains(batch_hash))
                 .map(|batch_hash| inner.batches[batch_hash].get_info())
@@ -255,20 +255,26 @@ where
         available_prefix
     }
 
-    async fn notify_commit(&self, payloads: Vec<Payload>) {
+    async fn notify_commit(&self, payloads: Vec<Payload>, _signers: Vec<Vec<Prefix>>) {
         let mut inner = self.inner.lock().await;
         let now = Instant::now();
+
+        // TODO: actually pull the data.
 
         for payload in &payloads {
             for batch in payload.all() {
                 if inner.committed_batches.contains(&batch.digest) {
-                    // TODO: add a metric for batch duplication.
+                    aptos_logger::warn!(
+                        "Duplicate commit for batch {} (hash: {:#x})",
+                        batch.batch_id,
+                        batch.digest,
+                    );
                     continue;
                 }
 
                 inner.committed_batches.insert(batch.digest.clone());
-                inner.new_acs.remove(&batch.digest);
-                inner.new_batches.remove(&batch.digest);
+                inner.uncommitted_acs.remove(&batch.digest);
+                inner.uncommitted_batches.remove(&batch.digest);
 
                 if batch.author == inner.node_id {
                     let commit_time =
@@ -322,14 +328,12 @@ pub struct FakeDisseminationLayerProtocol<TI> {
     // Storage for all received batches and the time when they were.
     batches: BTreeMap<BatchHash, Batch>,
     my_batches: BTreeMap<BatchId, BatchHash>,
-    // Storage of all received ACs.
-    acs: BTreeMap<BatchHash, AC>,
     // Set of committed batches.
     committed_batches: BTreeSet<BatchHash>,
     // Set of known ACs that are not yet committed.
-    new_acs: BTreeSet<BatchHash>,
+    uncommitted_acs: BTreeMap<BatchHash, AC>,
     // Set of known uncertified batches that are not yet committed.
-    new_batches: BTreeSet<BatchHash>,
+    uncommitted_batches: BTreeSet<BatchHash>,
 
     // The set of nodes that have stored this node's batch with the given sequence number.
     batch_stored_votes: DefaultBTreeMap<BatchId, BitVec>,
@@ -371,10 +375,9 @@ where
             penalty_tracker: PenaltyTracker::new(node_id, penalty_tracker_config, detailed_logging),
             batches: BTreeMap::new(),
             my_batches: Default::default(),
-            acs: BTreeMap::new(),
             committed_batches: BTreeSet::new(),
-            new_acs: BTreeSet::new(),
-            new_batches: BTreeSet::new(),
+            uncommitted_acs: BTreeMap::new(),
+            uncommitted_batches: BTreeSet::new(),
             batch_stored_votes: DefaultBTreeMap::new(BitVec::repeat(false, n_nodes)),
             batch_created_time: DefaultBTreeMap::new(Instant::now()),
             detailed_logging,
@@ -395,8 +398,9 @@ where
         ctx.unicast(Message::BatchStored(batch_id), author).await;
 
         // Track the list of known uncommitted uncertified batches.
-        if !self.acs.contains_key(&digest) && !self.committed_batches.contains(&digest) {
-            self.new_batches.insert(digest);
+        if !self.uncommitted_acs.contains_key(&digest) && !self.committed_batches.contains(&digest)
+        {
+            self.uncommitted_batches.insert(digest);
         }
     }
 
@@ -505,26 +509,30 @@ where
             // Track the list of known uncommitted ACs
             // and the list of known uncommitted uncertified batches.
             if !self.committed_batches.contains(&ac.info.digest) {
-                self.new_acs.insert(ac.info.digest.clone());
-                self.new_batches.remove(&ac.info.digest);
+                self.uncommitted_batches.remove(&ac.info.digest);
+                self.uncommitted_acs.insert(ac.info.digest.clone(), ac);
             }
-
-            self.acs.insert(ac.info.digest.clone(), ac.clone());
         };
 
         // Penalty tracking
 
-        upon event of type [BlockReceived] from [_any_module] {
-            upon [BlockReceived { leader, round, payload }] {
+        upon event of type [ProposalReceived] from [_any_module] {
+            upon [ProposalReceived { leader, round, payload, .. }] {
                 let new_acs = payload
                     .acs()
                     .into_iter()
+                    .filter(|&ac| {
+                        !self.uncommitted_acs.contains_key(&ac.info.digest)
+                            && !self.committed_batches.contains(&ac.info.digest)
+                    })
                     .cloned()
-                    .map(|ac| (ac.info.digest.clone(), ac));
+                    .map(|ac| (ac.info.digest.clone(), ac))
+                    .collect::<BTreeMap<BatchHash, AC>>();
 
-                self.acs.extend(new_acs);
-
-                // TODO: add FullBlockAvailable notification.
+                for (digest, ac) in &new_acs {
+                    self.uncommitted_batches.remove(digest);
+                }
+                self.uncommitted_acs.extend(new_acs);
 
                 if self.config.enable_penalty_tracker {
                     ctx.set_timer(

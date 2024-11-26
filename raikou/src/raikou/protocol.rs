@@ -9,7 +9,7 @@ use crate::{
     protocol,
     raikou::{
         dissemination,
-        dissemination::{BlockReceived, DisseminationLayer},
+        dissemination::{DisseminationLayer, FullBlockAvailable, ProposalReceived},
         types::*,
     },
     utils::kth_max_set::KthMaxSet,
@@ -437,13 +437,17 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
     }
 
     async fn commit_qc(&mut self, qc: QC, commit_reason: CommitReason) {
-        let committed = self.commit_qc_impl(qc, commit_reason);
-        self.dissemination.notify_commit(committed).await;
+        let (payloads, signers) = self.commit_qc_impl(qc, commit_reason);
+        self.dissemination.notify_commit(payloads, signers).await;
     }
 
-    fn commit_qc_impl(&mut self, qc: QC, commit_reason: CommitReason) -> Vec<Payload> {
+    fn commit_qc_impl(
+        &mut self,
+        qc: QC,
+        commit_reason: CommitReason,
+    ) -> (Vec<Payload>, Vec<Vec<Prefix>>) {
         if qc <= self.committed_qc {
-            return vec![];
+            return (vec![], vec![]);
         }
 
         let parent = self.blocks[&qc.common_data.hash]
@@ -484,11 +488,12 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                 commit_reason,
             ));
 
-            res.push(
+            res.extend([(
                 block
                     .payload()
                     .take_sub_blocks(self.committed_qc.prefix..qc.prefix),
-            );
+                qc.signatures_with_prefixes.prefixes.clone(),
+            )]);
 
             // Record the metrics
             let now = Instant::now();
@@ -521,7 +526,10 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                 commit_reason,
             ));
 
-            res.push(block.payload().with_prefix(qc.prefix));
+            res.extend([(
+                block.payload().with_prefix(qc.prefix),
+                qc.signatures_with_prefixes.prefixes.clone(),
+            )]);
 
             // Record the metrics
             let now = Instant::now();
@@ -726,12 +734,13 @@ where
                 self.leader_proposal.insert(block.round(), block.digest.clone());
                 self.on_new_block(&block, ctx).await;
 
-                let BlockData { round, payload, reason, .. } = block.data;
+                let BlockData { round, payload, author, reason, .. } = block.data;
                 self.advance_r_ready(round, reason, ctx).await;
 
+                let leader_account = author;
                 ctx.notify(
                     self.dissemination.module_id(),
-                    BlockReceived { leader, round, payload },
+                    ProposalReceived { leader, leader_account, round, payload },
                 ).await;
 
                 if round < self.r_cur {
@@ -796,43 +805,38 @@ where
             }
         };
 
-        upon [
-            self.r_cur > self.r_timeout
-            && self.leader_proposal.contains_key(&self.r_cur)
-            && {
-                let available_prefix = self.available_prefix().await;
+        upon event of type [FullBlockAvailable] from [_dissemination_module] {
+            upon [FullBlockAvailable { round }] {
+                if round == self.r_cur {
+                    let round = self.r_cur;
+                    let digest = self.leader_proposal[&self.r_cur].clone();
+                    let n_sub_blocks = self.n_sub_blocks_in_proposal(self.r_cur);
 
-                available_prefix == self.n_sub_blocks_in_proposal(self.r_cur)
-                && self.last_qc_vote < (self.r_cur, available_prefix).into()
-            }
-        ] {
-            let round = self.r_cur;
-            let digest = self.leader_proposal[&self.r_cur].clone();
-            let n_sub_blocks = self.n_sub_blocks_in_proposal(self.r_cur);
+                    self.log_detail(format!(
+                        "QC-voting for block {} proposed by node {} by Full Prefix with prefix {}",
+                        round,
+                        self.config.leader(round),
+                        n_sub_blocks,
+                    ));
+                    self.last_qc_vote = (round, n_sub_blocks).into();
 
-            self.log_detail(format!(
-                "QC-voting for block {} proposed by node {} by Full Prefix with prefix {}",
-                round,
-                self.config.leader(round),
-                n_sub_blocks,
-            ));
-            self.last_qc_vote = (round, n_sub_blocks).into();
+                    let common_data = CommonData {
+                        round,
+                        hash: digest.clone(),
+                        size: n_sub_blocks,
+                    };
 
-            let common_data = CommonData {
-                round,
-                hash: digest.clone(),
-                size: n_sub_blocks,
+                    let vote_data = VoteData {
+                        author: self.validator_signer.author(),
+                        common_data,
+                        prefix: n_sub_blocks,
+                    };
+
+                    let signature = vote_data.sign(&self.validator_signer).unwrap();
+
+                    ctx.multicast(Message::QcVote(vote_data, signature)).await;
+                }
             };
-
-            let vote_data = VoteData {
-                author: self.validator_signer.author(),
-                common_data,
-                prefix: n_sub_blocks,
-            };
-
-            let signature = vote_data.sign(&self.validator_signer).unwrap();
-
-            ctx.multicast(Message::QcVote(vote_data, signature)).await;
         };
 
         // Upon receiving the block for round r_cur and a quorum of qc-votes for this block,

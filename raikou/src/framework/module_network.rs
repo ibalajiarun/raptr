@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
+    any::Any,
     collections::{btree_map::Entry, BTreeMap},
     sync::Arc,
 };
@@ -51,8 +52,10 @@ impl ModuleNetwork {
                 entry.insert(send);
 
                 ModuleNetworkService {
-                    module_id: module,
-                    send: self.send.clone(),
+                    sender: ModuleNetworkSender {
+                        module_id: module,
+                        send: self.send.clone(),
+                    },
                     receive: recv,
                 }
             },
@@ -60,27 +63,28 @@ impl ModuleNetwork {
     }
 }
 
-pub struct ModuleNetworkService {
-    module_id: ModuleId,
-    send: Arc<RwLock<BTreeMap<ModuleId, mpsc::Sender<(ModuleId, ModuleEvent)>>>>,
-    receive: mpsc::Receiver<(ModuleId, ModuleEvent)>,
-}
-
+#[derive(Clone)]
 pub struct ModuleNetworkSender {
     module_id: ModuleId,
     send: Arc<RwLock<BTreeMap<ModuleId, mpsc::Sender<(ModuleId, ModuleEvent)>>>>,
 }
 
+pub struct ModuleNetworkService {
+    sender: ModuleNetworkSender,
+    receive: mpsc::Receiver<(ModuleId, ModuleEvent)>,
+}
+
 impl ModuleNetworkService {
     pub fn module_id(&self) -> ModuleId {
-        self.module_id
+        self.sender.module_id
     }
 
-    pub async fn send(&self, module: ModuleId, event: ModuleEvent) {
-        self.send.read().await[&module]
-            .send((self.module_id, event))
-            .await
-            .unwrap();
+    pub async fn notify_boxed(&self, module: ModuleId, event: ModuleEvent) {
+        self.sender.notify_boxed(module, event).await;
+    }
+
+    pub async fn notify<E: Send + 'static>(&self, module: ModuleId, event: E) {
+        self.notify_boxed(module, Box::new(event)).await;
     }
 
     pub async fn recv(&mut self) -> (ModuleId, ModuleEvent) {
@@ -88,18 +92,19 @@ impl ModuleNetworkService {
     }
 
     pub fn new_sender(&self) -> ModuleNetworkSender {
-        ModuleNetworkSender {
-            module_id: self.module_id,
-            send: self.send.clone(),
-        }
+        self.sender.clone()
     }
 }
 
 impl ModuleNetworkSender {
-    pub async fn send(&self, module: ModuleId, event: ModuleEvent) {
+    pub async fn notify_boxed(&self, module: ModuleId, event: ModuleEvent) {
         self.send.read().await[&module]
             .send((self.module_id, event))
             .await
             .unwrap();
+    }
+
+    pub async fn notify<E: Send + 'static>(&self, module: ModuleId, event: E) {
+        self.notify_boxed(module, Box::new(event)).await;
     }
 }

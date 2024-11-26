@@ -13,7 +13,8 @@ use crate::{
 use aptos_bitvec::BitVec;
 use aptos_consensus_types::{
     block::Block,
-    common::{DataStatus, Payload, ProofWithData, Round},
+    block_data::BlockData,
+    common::{Author, DataStatus, Payload, ProofWithData, Round},
     payload::{BatchPointer, DataFetchFut, RaikouPayload, TDataInfo},
     proof_of_store::BatchInfo,
 };
@@ -32,6 +33,7 @@ use std::{
     collections::{btree_map::Entry, BTreeMap, HashMap},
     ops::Deref,
     sync::Arc,
+    time::Duration,
 };
 use tokio::sync::oneshot;
 
@@ -55,6 +57,17 @@ pub trait TPayloadManager: Send + Sync {
     /// Returns the number of optimistic sub-blocks that are fully available locally.
     /// The caller guarantees that the result is at least `cached_value`.
     fn available_prefix(&self, payload: &RaikouPayload, cached_value: usize) -> usize {
+        unimplemented!()
+    }
+
+    async fn wait_for_payload(
+        &self,
+        payload: &Payload,
+        signers: Option<&Vec<raikou::raikou::types::Prefix>>,
+        block_author: Option<Author>,
+        block_timestamp: u64,
+        timeout: Duration,
+    ) -> anyhow::Result<()> {
         unimplemented!()
     }
 
@@ -436,6 +449,52 @@ impl TPayloadManager for QuorumStorePayloadManager {
         prefix
     }
 
+    async fn wait_for_payload(
+        &self,
+        payload: &Payload,
+        opt_signers: Option<&Vec<raikou::raikou::types::Prefix>>,
+        block_author: Option<Author>,
+        block_timestamp: u64,
+        timeout: Duration,
+    ) -> anyhow::Result<()> {
+        tokio::time::timeout(timeout, async move {
+            let Payload::Raikou(payload) = payload else {
+                unreachable!("Only Raikou payload is supported");
+            };
+
+            for (sub_block_id, sub_block) in payload.numbered_sub_blocks() {
+                let sub_block_signers: Option<BitVec> = opt_signers.map(|signers| {
+                    signers
+                        .iter()
+                        .map(|&prefix| prefix > sub_block_id)
+                        .collect()
+                });
+
+                // TODO: pass `sub_block_signers` to the helper.
+                process_payload_helper(
+                    sub_block,
+                    self.batch_reader.clone(),
+                    block_author,
+                    block_timestamp,
+                    &self.ordered_authors,
+                )
+                .await?;
+            }
+
+            process_payload_helper(
+                payload.proof_with_data(),
+                self.batch_reader.clone(),
+                block_author,
+                block_timestamp,
+                &self.ordered_authors,
+            )
+            .await?;
+
+            Ok(())
+        })
+        .await?
+    }
+
     async fn get_transactions(
         &self,
         block: &Block,
@@ -509,14 +568,16 @@ impl TPayloadManager for QuorumStorePayloadManager {
                 let opt_batch_txns = process_payload_helper(
                     opt_qs_payload.opt_batches(),
                     self.batch_reader.clone(),
-                    block,
+                    block.author(),
+                    block.timestamp_usecs(),
                     &self.ordered_authors,
                 )
                 .await?;
                 let proof_batch_txns = process_payload_helper(
                     opt_qs_payload.proof_with_data(),
                     self.batch_reader.clone(),
-                    block,
+                    block.author(),
+                    block.timestamp_usecs(),
                     &self.ordered_authors,
                 )
                 .await?;
@@ -541,7 +602,8 @@ impl TPayloadManager for QuorumStorePayloadManager {
                         process_payload_helper(
                             sub_block,
                             self.batch_reader.clone(),
-                            block,
+                            block.author(),
+                            block.timestamp_usecs(),
                             &self.ordered_authors,
                         )
                         .await?,
@@ -550,7 +612,8 @@ impl TPayloadManager for QuorumStorePayloadManager {
                 let proof_batch_txns = process_payload_helper(
                     raikou_payload.proof_with_data(),
                     self.batch_reader.clone(),
-                    block,
+                    block.author(),
+                    block.timestamp_usecs(),
                     &self.ordered_authors,
                 )
                 .await?;
@@ -670,7 +733,8 @@ async fn request_txns_from_quorum_store(
 async fn process_payload_helper<T: TDataInfo>(
     data_ptr: &BatchPointer<T>,
     batch_reader: Arc<dyn BatchReader>,
-    block: &Block,
+    block_author: Option<Author>,
+    block_timestamp: u64,
     ordered_authors: &[PeerId],
 ) -> ExecutorResult<Vec<SignedTransaction>> {
     let (iteration, fut) = {
@@ -691,7 +755,7 @@ async fn process_payload_helper<T: TDataInfo>(
                 .iter()
                 .map(|proof| {
                     let mut signers = proof.signers(ordered_authors);
-                    if let Some(author) = block.author() {
+                    if let Some(author) = block_author {
                         signers.push(author);
                     }
                     (proof.info().clone(), signers)
@@ -699,7 +763,7 @@ async fn process_payload_helper<T: TDataInfo>(
                 .collect();
             data_fut.fut = request_txns_from_quorum_store(
                 batches_and_responders,
-                block.timestamp_usecs(),
+                block_timestamp,
                 batch_reader,
             )
             .boxed()

@@ -152,7 +152,7 @@ impl Client {
     }
 
     pub fn build_path(&self, path: &str) -> AptosResult<Url> {
-        Ok(self.base_url.join(&self.version_path_base)?.join(path)?)
+        Ok(self.base_url.join(path)?)
     }
 
     pub fn get_prover_url(&self) -> Url {

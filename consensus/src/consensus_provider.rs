@@ -114,6 +114,7 @@ pub fn start_consensus(
         vtxn_pool,
         rand_storage,
         consensus_publisher,
+        state_sync_notifier,
     );
 
     let (network_task, network_receiver) = NetworkTask::new(network_service_events, self_receiver);

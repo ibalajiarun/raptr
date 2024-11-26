@@ -59,6 +59,7 @@ use anyhow::{anyhow, bail, ensure, Context};
 use aptos_bounded_executor::BoundedExecutor;
 use aptos_channels::{aptos_channel, message_queues::QueueStyle};
 use aptos_config::config::{ConsensusConfig, DagConsensusConfig, ExecutionConfig, NodeConfig};
+use aptos_consensus_notifications::ConsensusNotificationSender;
 use aptos_consensus_types::{
     common::{Author, Round},
     epoch_retrieval::EpochRetrievalRequest,
@@ -178,6 +179,7 @@ pub struct EpochManager<P: OnChainConfigProvider> {
     diss_tx: Option<aptos_channel::Sender<AccountAddress, (Author, RaikouNetworkMessage)>>,
     raikou_shutdown_tx: Option<oneshot::Sender<oneshot::Sender<()>>>,
     key_storage: PersistentSafetyStorage,
+    state_sync_notifier: Arc<dyn ConsensusNotificationSender>,
 }
 
 impl<P: OnChainConfigProvider> EpochManager<P> {
@@ -198,6 +200,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
         vtxn_pool: VTxnPoolState,
         rand_storage: Arc<dyn RandStorage<AugmentedData>>,
         consensus_publisher: Option<Arc<ConsensusPublisher>>,
+        state_sync_notifier: Arc<dyn ConsensusNotificationSender>,
     ) -> Self {
         let author = node_config.validator_network.as_ref().unwrap().peer_id();
         let config = node_config.consensus.clone();
@@ -252,6 +255,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             raikou_shutdown_tx: None,
             diss_tx: None,
             key_storage,
+            state_sync_notifier,
         }
     }
 
@@ -1363,6 +1367,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             self.config.clone(),
             validator_set,
             signer,
+            self.state_sync_notifier.clone(),
         ));
     }
 

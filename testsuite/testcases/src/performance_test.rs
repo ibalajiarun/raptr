@@ -5,6 +5,7 @@
 use crate::NetworkLoadTest;
 use anyhow::anyhow;
 use aptos_forge::{NetworkContextSynchronizer, NetworkTest, NodeExt, Result, Test};
+use aptos_logger::debug;
 use aptos_types::{
     chain_id::ChainId,
     transaction::{
@@ -64,7 +65,12 @@ impl NetworkTest for ConsensusOnlyBenchmark {
             .map_err(|_| anyhow!("couldn't set context"))
             .unwrap();
 
-        let result = load_test().tps(100).duration(Duration::from_secs(60)).await;
+        let result = load_test()
+            .tps(10)
+            .duration(Duration::from_secs(60))
+            .error_rate(0.0)
+            .hint(balter::Hint::Concurrency(1))
+            .await;
 
         println!("{:?}", result);
 
@@ -94,20 +100,23 @@ async fn load_test() {
     let client = { BALTER_CONTEXT.get().unwrap().next_client() };
     let (txn_tx, mut txn_rx) = tokio::sync::mpsc::channel(100);
     tokio::spawn(async move {
+        let mut seq_num = 0;
+        let sender = PeerId::random();
         loop {
             let txn = SignedTransaction::new_single_sender(
                 RawTransaction::new(
-                    PeerId::random(),
-                    0,
+                    sender,
+                    seq_num,
                     TransactionPayload::Script(Script::new(Vec::new(), Vec::new(), Vec::new())),
                     0,
                     0,
-                    0,
+                    Duration::from_secs(60).as_secs(),
                     ChainId::test(),
                 ),
                 AccountAuthenticator::NoAccountAuthenticator,
             );
             txn_tx.send(txn).await.ok();
+            seq_num = seq_num + 1;
         }
     });
     while let Some(txn) = txn_rx.recv().await {
@@ -121,12 +130,15 @@ async fn transaction(
     client: &aptos_rest_client::Client,
     txn_payload: Vec<u8>,
 ) -> anyhow::Result<()> {
-    client
+    let response = client
         .post(client.build_path("submit_txn").unwrap())
         .body(txn_payload)
+        .timeout(Duration::from_secs(120))
         .send()
         .await
         .unwrap();
+
+    response.error_for_status().unwrap();
 
     Ok(())
 }

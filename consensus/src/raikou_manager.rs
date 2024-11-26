@@ -9,18 +9,24 @@ use crate::{
     pipeline::buffer_manager::OrderedBlocks,
 };
 use ::raikou::leader_schedule::round_robin;
+use aptos_bitvec::BitVec;
 use aptos_config::config::ConsensusConfig;
+use aptos_consensus_notifications::ConsensusNotificationSender;
 use aptos_consensus_types::{
     block::Block,
+    block_data::{BlockData, BlockType},
     common::{Author, PayloadFilter},
     payload::{InlineBatches, OptQuorumStorePayload},
     payload_pull_params::{OptQSPayloadPullParams, PayloadPullParameters},
     proof_of_store::BatchInfo,
+    quorum_cert::QuorumCert,
     utils::PayloadTxnsSize,
 };
+use aptos_crypto::HashValue;
+use aptos_logger::error;
 use aptos_types::{
-    epoch_state::EpochState, on_chain_config::ValidatorSet, validator_signer::ValidatorSigner,
-    validator_verifier::ValidatorVerifier,
+    epoch_state::EpochState, on_chain_config::ValidatorSet, transaction::Transaction,
+    validator_signer::ValidatorSigner, validator_verifier::ValidatorVerifier, PeerId,
 };
 use aptos_validator_transaction_pool::TransactionFilter;
 use futures::{future::BoxFuture, FutureExt, StreamExt};
@@ -39,21 +45,20 @@ use raikou::{
     metrics,
     raikou::{
         dissemination::{self, DisseminationLayer},
-        RaikouNode,
+        types as raikou_types, RaikouNode,
     },
 };
 use rayon::slice::ParallelSlice;
 use serde::{Deserialize, Serialize};
 use std::{
+    any::TypeId,
     collections::{HashMap, HashSet},
     future::Future,
     marker::PhantomData,
     sync::Arc,
     time::Duration,
 };
-use std::any::TypeId;
 use tokio::time::Instant;
-use raikou::raikou::types as raikou_types;
 
 const JOLTEON_TIMEOUT: u32 = 3; // in Deltas
 const CONS_BASE_PORT: u16 = 12000;
@@ -100,6 +105,7 @@ impl RaikouManager {
         consensus_config: ConsensusConfig,
         validator_set: ValidatorSet,
         validator_signer: Arc<ValidatorSigner>,
+        state_sync_notifier: Arc<dyn ConsensusNotificationSender>,
     ) {
         let n_nodes = epoch_state.verifier.len();
         let f = (n_nodes - 1) / 3;
@@ -223,6 +229,7 @@ impl RaikouManager {
             consensus_config,
             payload_manager,
             diss_module_network,
+            state_sync_notifier,
         )
         .await;
 
@@ -262,6 +269,7 @@ impl RaikouManager {
         consensus_config: ConsensusConfig,
         payload_manager: Arc<dyn TPayloadManager>,
         mut module_network: ModuleNetworkService,
+        state_sync_notifier: Arc<dyn aptos_consensus_notifications::ConsensusNotificationSender>,
     ) -> impl DisseminationLayer {
         let dissemination = RaikouQSDisseminationLayer {
             node_id,
@@ -269,6 +277,7 @@ impl RaikouManager {
             config: consensus_config,
             payload_manager: payload_manager.clone(),
             module_id: module_network.module_id(),
+            state_sync_notifier,
         };
 
         tokio::spawn(async move {
@@ -648,6 +657,7 @@ struct RaikouQSDisseminationLayer {
     config: ConsensusConfig,
     payload_manager: Arc<dyn TPayloadManager>,
     module_id: ModuleId,
+    state_sync_notifier: Arc<dyn ConsensusNotificationSender>,
 }
 
 #[cfg(any(feature = "force-aptos-types", not(feature = "sim-types")))]
@@ -709,10 +719,36 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
     }
 
     async fn notify_commit(&self, payloads: Vec<raikou_types::Payload>) {
-        let payloads = payloads.into_iter().map(|payload| payload.inner).collect();
+        let payloads: Vec<aptos_consensus_types::common::Payload> =
+            payloads.into_iter().map(|payload| payload.inner).collect();
         self.payload_manager.notify_commit(
             aptos_infallible::duration_since_epoch().as_micros() as u64,
-            payloads,
+            payloads.clone(),
         );
+
+        for payload in payloads {
+            let block = Block::new_for_dag(
+                0,
+                0,
+                0,
+                Vec::new(),
+                payload,
+                PeerId::ZERO,
+                Vec::new(),
+                HashValue::zero(),
+                BitVec::with_num_bits(8),
+                Vec::new(),
+            );
+            match self.payload_manager.get_transactions(&block).await {
+                Ok((txns, _)) => {
+                    let txns = txns.into_iter().map(Transaction::UserTransaction).collect();
+                    self.state_sync_notifier
+                        .notify_new_commit(txns, Vec::new())
+                        .await
+                        .unwrap();
+                },
+                Err(e) => error!("unable to fetch txns: {}", e),
+            }
+        }
     }
 }

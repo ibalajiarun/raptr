@@ -3,8 +3,9 @@ use aptos_consensus_notifications::{
     ConsensusNotification, ConsensusNotificationListener, ConsensusNotifier,
 };
 use aptos_crypto::HashValue;
+use aptos_framework::natives::debug;
 use aptos_infallible::Mutex;
-use aptos_logger::info;
+use aptos_logger::{debug, info};
 use aptos_mempool::{QuorumStoreRequest, QuorumStoreResponse};
 use aptos_mempool_notifications::{
     CommittedTransaction, MempoolCommitNotification, MempoolNotificationListener, MempoolNotifier,
@@ -47,12 +48,14 @@ pub struct PendingTracker {
 
 impl PendingTracker {
     fn register(&mut self, txn: &SignedTransaction, tx: oneshot::Sender<()>) {
+        debug!("register: {}, {}", txn.sender(), txn.sequence_number());
         self.tracker
             .insert((txn.sender(), txn.sequence_number()), tx);
     }
 
     fn notify(&mut self, txn: &Transaction) {
         let txn = txn.try_as_signed_user_txn().unwrap();
+        debug!("notify: {}. {}", txn.sender(), txn.sequence_number());
         if let Some(sender) = self.tracker.remove(&(txn.sender(), txn.sequence_number())) {
             sender.send(()).unwrap();
         }
@@ -168,18 +171,22 @@ pub async fn handle_txn(
     context: SimpleMempoolApiContext,
     request: bytes::Bytes,
 ) -> anyhow::Result<impl Reply, Rejection> {
+    debug!("api: handle_txn");
+
     let txn: SignedTransaction = bcs::from_bytes(&request).unwrap();
     let (tx, rx) = oneshot::channel();
 
     context.store.lock().push_back((txn, tx));
 
     if let Err(_) = rx.await {
+        debug!("api: response channel dropped unexpectedly");
         return Ok(reply::with_status(
             reply::reply(),
             warp::hyper::StatusCode::NOT_FOUND,
         ));
     }
 
+    debug!("api: txn successfully committed");
     Ok(reply::with_status(
         reply::reply(),
         warp::hyper::StatusCode::CREATED,

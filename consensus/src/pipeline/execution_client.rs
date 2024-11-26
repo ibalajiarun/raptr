@@ -29,6 +29,7 @@ use anyhow::{anyhow, Result};
 use aptos_bounded_executor::BoundedExecutor;
 use aptos_channels::{aptos_channel, message_queues::QueueStyle};
 use aptos_config::config::{ConsensusConfig, ConsensusObserverConfig};
+use aptos_consensus_notifications::ConsensusNotificationSender;
 use aptos_consensus_types::{
     common::{Author, Round},
     pipelined_block::PipelinedBlock,

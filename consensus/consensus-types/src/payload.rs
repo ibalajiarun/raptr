@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::proof_of_store::{BatchInfo, ProofOfStore};
+use aptos_bitvec::BitVec;
 use aptos_executor_types::ExecutorResult;
 use aptos_infallible::Mutex;
 use aptos_types::{transaction::SignedTransaction, PeerId};
@@ -337,6 +338,17 @@ impl RaikouPayload {
 
     pub fn sub_blocks(&self) -> &[BatchPointer<BatchInfo>] {
         &self.data.sub_blocks[self.sub_blocks.clone()]
+    }
+
+    pub fn numbered_sub_blocks(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (usize, &BatchPointer<BatchInfo>)> {
+        self.data
+            .sub_blocks
+            .iter()
+            .enumerate()
+            .skip(self.sub_blocks.start)
+            .take(self.sub_blocks.len())
     }
 
     pub fn proofs(&self) -> &ProofBatches {

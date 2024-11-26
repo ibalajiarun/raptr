@@ -15,7 +15,7 @@ use aptos_consensus_notifications::ConsensusNotificationSender;
 use aptos_consensus_types::{
     block::Block,
     block_data::{BlockData, BlockType},
-    common::{Author, PayloadFilter},
+    common::{Author, Payload, PayloadFilter},
     payload::{InlineBatches, OptQuorumStorePayload},
     payload_pull_params::{OptQSPayloadPullParams, PayloadPullParameters},
     proof_of_store::BatchInfo,
@@ -45,7 +45,9 @@ use raikou::{
     metrics,
     raikou::{
         dissemination::{self, DisseminationLayer},
-        types as raikou_types, RaikouNode,
+        types as raikou_types,
+        types::Prefix,
+        RaikouNode,
     },
 };
 use rayon::slice::ParallelSlice;
@@ -269,8 +271,11 @@ impl RaikouManager {
         consensus_config: ConsensusConfig,
         payload_manager: Arc<dyn TPayloadManager>,
         mut module_network: ModuleNetworkService,
-        state_sync_notifier: Arc<dyn aptos_consensus_notifications::ConsensusNotificationSender>,
+        state_sync_notifier: Arc<dyn ConsensusNotificationSender>,
     ) -> impl DisseminationLayer {
+        let round_initial_timeout =
+            Duration::from_millis(consensus_config.round_initial_timeout_ms);
+
         let dissemination = RaikouQSDisseminationLayer {
             node_id,
             payload_client,
@@ -284,36 +289,45 @@ impl RaikouManager {
             loop {
                 let (consensus_module, msg) = module_network.recv().await;
 
-                if msg.type_id() == TypeId::of::<dissemination::BlockReceived>() {
-                    let msg: Box<_> = msg.downcast::<dissemination::BlockReceived>().ok().unwrap();
-                    let dissemination::BlockReceived { payload, .. } = *msg;
+                if msg.type_id() == TypeId::of::<dissemination::ProposalReceived>() {
+                    let msg: Box<_> = msg
+                        .downcast::<dissemination::ProposalReceived>()
+                        .ok()
+                        .unwrap();
+                    let dissemination::ProposalReceived {
+                        round,
+                        leader_account,
+                        payload,
+                        ..
+                    } = *msg;
 
                     payload_manager.prefetch_payload_data(
                         &payload.inner,
                         aptos_infallible::duration_since_epoch().as_micros() as u64,
                     );
 
-                    // TODO: add FullBlockAvailable notification.
-                    // let module_network_sender = module_network.new_sender();
-                    // tokio::spawn(async move {
-                    //     let raikou_types::BlockData { round, author, payload, .. } = block_data;
-                    //     let block_data = BlockData::new_proposal(
-                    //         payload.inner,
-                    //         author.unwrap(),
-                    //         vec![], // failed_authors
-                    //         round,
-                    //         // Timestamp is only used to check batch expiration,
-                    //         // which is not supported by this prototype.
-                    //         0,
-                    //         QuorumCert::dummy(),
-                    //     );
-                    //     if let Ok(_) = payload_manager.get_transactions(&block_data).await {
-                    //         module_network_sender.send(
-                    //             consensus_module,
-                    //             FullBlockAvailable { round },
-                    //         ).await;
-                    //     }
-                    // });
+                    let module_network_sender = module_network.new_sender();
+                    let payload_manager = payload_manager.clone();
+                    tokio::spawn(async move {
+                        if let Ok(_) = payload_manager
+                            .wait_for_payload(
+                                &payload.inner,
+                                None,
+                                leader_account,
+                                // timestamp is only used for batch expiration, which is not
+                                // supported in this prototype.
+                                0,
+                                round_initial_timeout,
+                            )
+                            .await
+                        {
+                            module_network_sender
+                                .notify(consensus_module, dissemination::FullBlockAvailable {
+                                    round,
+                                })
+                                .await;
+                        }
+                    });
                 } else if msg.type_id() == TypeId::of::<dissemination::Kill>() {
                     break;
                 } else {
@@ -712,43 +726,57 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
     async fn available_prefix(
         &self,
         payload: &raikou_types::Payload,
-        cached_value: usize,
-    ) -> usize {
+        cached_value: Prefix,
+    ) -> Prefix {
         self.payload_manager
             .available_prefix(payload.inner.as_raikou_payload(), cached_value)
     }
 
-    async fn notify_commit(&self, payloads: Vec<raikou_types::Payload>) {
-        let payloads: Vec<aptos_consensus_types::common::Payload> =
-            payloads.into_iter().map(|payload| payload.inner).collect();
-        self.payload_manager.notify_commit(
-            aptos_infallible::duration_since_epoch().as_micros() as u64,
-            payloads.clone(),
-        );
+    async fn notify_commit(&self, payloads: Vec<raikou_types::Payload>, signers: Vec<Vec<Prefix>>) {
+        let payload_manager = self.payload_manager.clone();
+        let state_sync_notifier = self.state_sync_notifier.clone();
 
-        for payload in payloads {
-            let block = Block::new_for_dag(
-                0,
-                0,
-                0,
-                Vec::new(),
-                payload,
-                PeerId::ZERO,
-                Vec::new(),
-                HashValue::zero(),
-                BitVec::with_num_bits(8),
-                Vec::new(),
+        tokio::spawn(async move {
+            let payloads: Vec<Payload> =
+                payloads.into_iter().map(|payload| payload.inner).collect();
+
+            payload_manager.notify_commit(
+                aptos_infallible::duration_since_epoch().as_micros() as u64,
+                payloads.clone(),
             );
-            match self.payload_manager.get_transactions(&block).await {
-                Ok((txns, _)) => {
-                    let txns = txns.into_iter().map(Transaction::UserTransaction).collect();
-                    self.state_sync_notifier
-                        .notify_new_commit(txns, Vec::new())
-                        .await
-                        .unwrap();
-                },
-                Err(e) => error!("unable to fetch txns: {}", e),
+
+            for (payload, signers) in payloads.into_iter().zip(signers) {
+                while let Err(_) = payload_manager
+                    .wait_for_payload(&payload, Some(&signers), None, 0, Duration::from_secs(1))
+                    .await
+                {
+                    // TODO: add a logging / metric?
+                }
+
+                let block = Block::new_for_dag(
+                    0,
+                    0,
+                    0,
+                    Vec::new(),
+                    payload,
+                    PeerId::ZERO,
+                    Vec::new(),
+                    HashValue::zero(),
+                    BitVec::with_num_bits(8),
+                    Vec::new(),
+                );
+
+                match payload_manager.get_transactions(&block).await {
+                    Ok((txns, _)) => {
+                        let txns = txns.into_iter().map(Transaction::UserTransaction).collect();
+                        state_sync_notifier
+                            .notify_new_commit(txns, Vec::new())
+                            .await
+                            .unwrap();
+                    },
+                    Err(_e) => unreachable!("Failed to get transactions for block {:?} even after waiting for the payload", block),
+                }
             }
-        }
+        });
     }
 }

@@ -250,8 +250,8 @@ pub struct TimeoutDataSigningRepr {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AggregateSignatureWithPrefixes {
-    sig: AggregateSignature,
-    prefixes: Vec<Prefix>,
+    pub sig: AggregateSignature,
+    pub prefixes: Vec<Prefix>,
 }
 
 impl AggregateSignatureWithPrefixes {

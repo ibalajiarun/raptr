@@ -116,7 +116,7 @@ impl<NS: NetworkService, TS: TimerService> Context for SimpleContext<NS, TS> {
     }
 
     async fn notify_boxed(&self, module: ModuleId, event: ModuleEvent) {
-        self.module_network.send(module, event).await;
+        self.module_network.notify_boxed(module, event).await;
     }
 
     fn set_timer(&mut self, duration: std::time::Duration, event: Self::TimerEvent) {

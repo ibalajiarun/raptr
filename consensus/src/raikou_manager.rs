@@ -147,6 +147,14 @@ impl RaikouManager {
         //     },
         // ).await;
 
+        if validator_set.active_validators[node_id]
+            .config()
+            .find_ip_addr()
+            .is_none()
+        {
+            error!("ip missing for self: {:?}", validator_set);
+        }
+
         let network_service = TcpNetworkService::new(
             node_id,
             format!(

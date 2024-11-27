@@ -89,13 +89,20 @@ impl SimpleMempool {
             .unwrap();
     }
 
-    fn handle_notification_command(&mut self, cmd: ConsensusNotification) {
+    fn handle_notification_command(
+        &mut self,
+        cmd: ConsensusNotification,
+        listener: &mut ConsensusNotificationListener,
+    ) {
         let ConsensusNotification::NotifyCommit(notif) = cmd else {
             return;
         };
         for txn in notif.get_transactions() {
-            self.pending_tracker.notify(txn)
+            self.pending_tracker.notify(txn);
         }
+        listener
+            .respond_to_commit_notification(notif, Ok(()))
+            .unwrap();
     }
 
     async fn run(
@@ -109,7 +116,7 @@ impl SimpleMempool {
                     self.handle_quorum_store_request(req);
                 },
                 Some(cmd) = commit_notif_rx.next() => {
-                    self.handle_notification_command(cmd);
+                    self.handle_notification_command(cmd, &mut commit_notif_rx);
                 },
             };
         }

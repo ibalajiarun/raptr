@@ -2,7 +2,7 @@
 // Parts of the project are originally copyright © Meta Platforms, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::network_address::NetworkAddress;
+use crate::network_address::{DnsName, NetworkAddress};
 use aptos_crypto::bls12381;
 use move_core_types::{
     ident_str,
@@ -72,6 +72,16 @@ impl ValidatorConfig {
         for network_address in network_addresses {
             if let Some(ip_addr) = network_address.find_ip_addr() {
                 return Some(ip_addr);
+            }
+        }
+        None
+    }
+
+    pub fn find_dns_name(&self) -> Option<DnsName> {
+        let network_addresses = self.validator_network_addresses().unwrap();
+        for network_address in network_addresses {
+            if let Some(dns_name) = network_address.find_dns_name() {
+                return Some(dns_name);
             }
         }
         None

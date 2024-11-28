@@ -1099,7 +1099,11 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
         let validator_set: ValidatorSet = payload
             .get()
             .expect("failed to get ValidatorSet from payload");
-        debug!("validator set {:?}", validator_set);
+        debug!(
+            "validator set {}: {:?}",
+            validator_set.active_validators().len(),
+            validator_set
+        );
         let mut verifier: ValidatorVerifier = (&validator_set).into();
         verifier.set_optimistic_sig_verification_flag(self.config.optimistic_sig_verification);
 

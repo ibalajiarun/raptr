@@ -25,11 +25,12 @@ use aptos_consensus_types::{
 use aptos_crypto::HashValue;
 use aptos_logger::error;
 use aptos_types::{
-    epoch_state::EpochState, on_chain_config::ValidatorSet, transaction::Transaction,
-    validator_signer::ValidatorSigner, validator_verifier::ValidatorVerifier, PeerId,
+    epoch_state::EpochState, network_address::parse_ip_tcp, on_chain_config::ValidatorSet,
+    transaction::Transaction, validator_signer::ValidatorSigner,
+    validator_verifier::ValidatorVerifier, PeerId,
 };
 use aptos_validator_transaction_pool::TransactionFilter;
-use futures::{future::BoxFuture, FutureExt, StreamExt};
+use futures::{executor::block_on, future::BoxFuture, FutureExt, StreamExt};
 use futures_channel::{mpsc::UnboundedSender, oneshot};
 use raikou::{
     framework::{
@@ -57,10 +58,11 @@ use std::{
     collections::{HashMap, HashSet},
     future::Future,
     marker::PhantomData,
+    net::SocketAddr,
     sync::Arc,
     time::Duration,
 };
-use tokio::time::Instant;
+use tokio::{net::lookup_host, time::Instant};
 
 const JOLTEON_TIMEOUT: u32 = 3; // in Deltas
 const CONS_BASE_PORT: u16 = 12000;
@@ -157,29 +159,32 @@ impl RaikouManager {
 
         let network_service = TcpNetworkService::new(
             node_id,
-            format!(
-                "{}:{}",
-                validator_set.active_validators[node_id]
-                    .config()
-                    .find_ip_addr()
-                    .unwrap(),
-                CONS_BASE_PORT + node_id as u16,
-            )
-            .parse()
-            .unwrap(),
+            format!("0.0.0.0:{}", CONS_BASE_PORT + node_id as u16,)
+                .parse()
+                .unwrap(),
             raikou::framework::tcp_network::Config {
                 peers: validator_set
                     .active_validators
                     .iter()
                     .enumerate()
                     .map(|(peer_id, info)| {
-                        (format!(
-                            "{}:{}",
-                            info.config().find_ip_addr().unwrap(),
-                            CONS_BASE_PORT + peer_id as u16,
-                        )
-                        .parse()
-                        .unwrap())
+                        let ip = info.config().find_ip_addr();
+                        let addr = if let Some(addr) = ip {
+                            addr
+                        } else {
+                            let dns = info.config().find_dns_name().unwrap();
+                            block_on(lookup_host((
+                                dns.to_string(),
+                                CONS_BASE_PORT + peer_id as u16,
+                            )))
+                            .expect(&format!("{}", dns))
+                            .next()
+                            .unwrap()
+                            .ip()
+                        };
+                        (format!("{}:{}", addr, CONS_BASE_PORT + peer_id as u16,)
+                            .parse()
+                            .unwrap())
                     })
                     .collect(),
                 streams_per_peer: 4,
@@ -736,6 +741,10 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
         payload: &raikou_types::Payload,
         cached_value: Prefix,
     ) -> Prefix {
+        self.payload_manager.prefetch_payload_data(
+            &payload.inner,
+            aptos_infallible::duration_since_epoch().as_micros() as u64,
+        );
         self.payload_manager
             .available_prefix(payload.inner.as_raikou_payload(), cached_value)
     }
@@ -748,6 +757,12 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
             let payloads: Vec<Payload> =
                 payloads.into_iter().map(|payload| payload.inner).collect();
 
+            for payload in &payloads {
+                payload_manager.prefetch_payload_data(
+                    payload,
+                    aptos_infallible::duration_since_epoch().as_micros() as u64,
+                );
+            }
             payload_manager.notify_commit(
                 aptos_infallible::duration_since_epoch().as_micros() as u64,
                 payloads.clone(),

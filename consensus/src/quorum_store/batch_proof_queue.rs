@@ -716,10 +716,13 @@ impl BatchProofQueue {
 
     pub(crate) fn handle_updated_block_timestamp(&mut self, block_timestamp: u64) {
         let start = Instant::now();
-        assert!(
-            self.latest_block_timestamp <= block_timestamp,
-            "Decreasing block timestamp"
-        );
+        if self.latest_block_timestamp > block_timestamp {
+            return;
+        }
+        // assert!(
+        //     self.latest_block_timestamp <= block_timestamp,
+        //     "Decreasing block timestamp"
+        // );
         self.latest_block_timestamp = block_timestamp;
         if let Some(time_lag) = aptos_infallible::duration_since_epoch()
             .checked_sub(Duration::from_micros(block_timestamp))

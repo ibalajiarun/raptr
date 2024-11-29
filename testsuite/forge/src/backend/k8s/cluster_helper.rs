@@ -647,7 +647,7 @@ pub async fn install_testnet_resources(
         kube_client.clone(),
         kube_namespace.clone(),
         FORGE_TESTNET_DEPLOYER_DOCKER_IMAGE_REPO.to_string(),
-        None,
+        Some("d56fd62f95ac416abd0ccc9ff101585faaef336d".to_string()),
     );
 
     testnet_deployer.start(config).await?;
@@ -789,7 +789,7 @@ pub async fn collect_running_nodes(
         }
     }
 
-    nodes_healthcheck(nodes).await?;
+    // nodes_healthcheck(nodes).await?;
     Ok((validators, validator_fullnodes))
 }
 

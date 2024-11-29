@@ -23,6 +23,7 @@ use aptos_api::bootstrap as bootstrap_api;
 use aptos_build_info::build_information;
 use aptos_config::{
     config::{merge_node_config, NodeConfig, PersistableConfig},
+    network_id::NetworkId,
     utils::get_genesis_txn,
 };
 use aptos_consensus_notifications::{
@@ -61,6 +62,7 @@ use std::{
         Arc,
     },
     thread,
+    time::Duration,
 };
 use tokio::runtime::Runtime;
 
@@ -1073,6 +1075,24 @@ pub fn consensus_only_setup_environment_and_start_node(
     //         db_rw.clone(),
     //         consensus_observer_reconfig_subscription,
     //     );
+
+    loop {
+        let connected_peers = peers_and_metadata
+            .get_connected_peers_and_metadata()
+            .unwrap();
+        debug!("current peers {}", connected_peers.len());
+        if connected_peers.len()
+            == peers_and_metadata
+                .get_trusted_peers(&NetworkId::Validator)
+                .unwrap()
+                .len()
+                .saturating_sub(1)
+        {
+            thread::sleep(Duration::from_secs(30));
+            break;
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
 
     let consensus_reconfig_subscription = event_subscription_service
         .subscribe_to_reconfigurations()

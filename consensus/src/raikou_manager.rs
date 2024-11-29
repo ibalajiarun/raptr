@@ -471,14 +471,75 @@ impl RaikouManager {
     }
 }
 
-pub struct RaikouNetworkService<M> {
+pub struct RaikouNetworkSenderInner<M> {
     epoch: u64,
     n_nodes: usize,
     index_to_address: HashMap<usize, Author>,
     all_peer_addresses: Vec<Author>,
     network_sender: Arc<NetworkSender>,
-    deserialized_messages_rx: tokio::sync::mpsc::Receiver<(NodeId, M)>,
     _phantom: PhantomData<M>,
+}
+
+impl<M> RaikouNetworkSenderInner<M>
+where
+    M: Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static,
+{
+    async fn send(&self, msg: M, targets: Vec<NodeId>) {
+        let epoch = self.epoch;
+        let remote_peer_ids = targets
+            .into_iter()
+            .map(|i| *self.index_to_address.get(&i).unwrap())
+            .collect();
+        let network_sender = self.network_sender.clone();
+
+        // Serialization is done in a separate task to avoid blocking the main loop.
+        tokio::spawn(async move {
+            let raikou_msg = RaikouNetworkMessage {
+                epoch,
+                data: bcs::to_bytes(&msg).unwrap(),
+            };
+
+            let msg: ConsensusMsg = ConsensusMsg::RaikouMessage(raikou_msg);
+
+            network_sender.send(msg, remote_peer_ids).await;
+        });
+    }
+
+    fn n_nodes(&self) -> usize {
+        self.n_nodes
+    }
+}
+
+pub struct RaikouNetworkSender<M> {
+    inner: Arc<RaikouNetworkSenderInner<M>>,
+}
+
+impl<M> Clone for RaikouNetworkSender<M> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl<M> raikou::framework::network::NetworkSender for RaikouNetworkSender<M>
+where
+    M: Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static,
+{
+    type Message = M;
+
+    async fn send(&self, data: Self::Message, targets: Vec<NodeId>) {
+        self.inner.send(data, targets).await;
+    }
+
+    fn n_nodes(&self) -> usize {
+        self.inner.n_nodes()
+    }
+}
+
+pub struct RaikouNetworkService<M> {
+    sender: RaikouNetworkSender<M>,
+    deserialized_messages_rx: tokio::sync::mpsc::Receiver<(NodeId, M)>,
 }
 
 impl<M> RaikouNetworkService<M>
@@ -532,14 +593,33 @@ where
         });
 
         Self {
-            epoch: epoch_state.epoch,
-            n_nodes: epoch_state.verifier.len(),
-            index_to_address,
-            all_peer_addresses,
-            network_sender,
+            sender: RaikouNetworkSender {
+                inner: Arc::new(RaikouNetworkSenderInner {
+                    epoch: epoch_state.epoch,
+                    n_nodes: epoch_state.verifier.len(),
+                    index_to_address,
+                    all_peer_addresses,
+                    network_sender,
+                    _phantom: PhantomData,
+                }),
+            },
             deserialized_messages_rx,
-            _phantom: PhantomData,
         }
+    }
+}
+
+impl<M> raikou::framework::network::NetworkSender for RaikouNetworkService<M>
+where
+    M: Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static,
+{
+    type Message = M;
+
+    async fn send(&self, msg: Self::Message, targets: Vec<NodeId>) {
+        self.sender.send(msg, targets).await;
+    }
+
+    fn n_nodes(&self) -> usize {
+        self.sender.n_nodes()
     }
 }
 
@@ -547,34 +627,14 @@ impl<M> NetworkService for RaikouNetworkService<M>
 where
     M: Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static,
 {
-    type Message = M;
+    type Sender = RaikouNetworkSender<M>;
 
-    async fn send(&self, data: Self::Message, targets: Vec<NodeId>) {
-        let epoch = self.epoch;
-        let remote_peer_ids = targets
-            .into_iter()
-            .map(|i| *self.index_to_address.get(&i).unwrap())
-            .collect();
-        let network_sender = self.network_sender.clone();
-
-        tokio::spawn(async move {
-            let raikou_msg = RaikouNetworkMessage {
-                epoch,
-                data: bcs::to_bytes(&data).unwrap(),
-            };
-
-            let msg: ConsensusMsg = ConsensusMsg::RaikouMessage(raikou_msg);
-
-            network_sender.send(msg, remote_peer_ids).await;
-        });
+    fn new_sender(&self) -> Self::Sender {
+        self.sender.clone()
     }
 
     async fn recv(&mut self) -> (NodeId, Self::Message) {
         self.deserialized_messages_rx.recv().await.unwrap()
-    }
-
-    fn n_nodes(&self) -> usize {
-        self.n_nodes
     }
 }
 

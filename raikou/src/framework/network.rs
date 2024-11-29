@@ -12,7 +12,7 @@ pub trait Validate {
     fn validate(&self, validator_verifier: &ValidatorVerifier) -> anyhow::Result<()>;
 }
 
-pub trait NetworkService: Send + Sync + 'static {
+pub trait NetworkSender: Send + Sync + 'static {
     type Message: Send + Sync + 'static;
 
     fn send(&self, data: Self::Message, targets: Vec<NodeId>) -> impl Future<Output = ()> + Send;
@@ -25,15 +25,21 @@ pub trait NetworkService: Send + Sync + 'static {
         self.send(data, (0..self.n_nodes()).into_iter().collect())
     }
 
-    fn recv(&mut self) -> impl Future<Output = (NodeId, Self::Message)> + Send;
-
     fn n_nodes(&self) -> usize;
+}
+
+pub trait NetworkService: NetworkSender {
+    type Sender: NetworkSender<Message = Self::Message>;
+
+    fn new_sender(&self) -> Self::Sender;
+
+    fn recv(&mut self) -> impl Future<Output = (NodeId, Self::Message)> + Send;
 
     fn drop_one(&mut self) -> impl Future<Output = bool> + Send {
         async {
             let recv = self.recv();
             tokio::pin!(recv);
-            return matches!(poll!(recv.as_mut()), Ready(_));
+            matches!(poll!(recv.as_mut()), Ready(_))
         }
     }
 
@@ -49,14 +55,14 @@ pub trait Network {
     fn service(&mut self, node_id: NodeId) -> Self::Service;
 }
 
-pub struct InjectedLocalNetworkService<M, I> {
+#[derive(Clone)]
+pub struct InjectedLocalNetworkSender<M, I> {
     send: Vec<mpsc::Sender<(NodeId, M)>>,
-    recv: mpsc::Receiver<(NodeId, M)>,
-    node_id: NodeId,
     injection: I,
+    node_id: NodeId,
 }
 
-impl<M, I> NetworkService for InjectedLocalNetworkService<M, I>
+impl<M, I> NetworkSender for InjectedLocalNetworkSender<M, I>
 where
     M: Send + Sync + Clone + 'static,
     I: NetworkInjection<M>,
@@ -90,12 +96,45 @@ where
         }
     }
 
-    async fn recv(&mut self) -> (NodeId, M) {
-        self.recv.recv().await.unwrap()
+    fn n_nodes(&self) -> usize {
+        self.send.len()
+    }
+}
+
+pub struct InjectedLocalNetworkService<M, I> {
+    sender: InjectedLocalNetworkSender<M, I>,
+    recv: mpsc::Receiver<(NodeId, M)>,
+}
+
+impl<M, I> NetworkSender for InjectedLocalNetworkService<M, I>
+where
+    M: Send + Sync + Clone + 'static,
+    I: NetworkInjection<M>,
+{
+    type Message = M;
+
+    async fn send(&self, msg: Self::Message, targets: Vec<NodeId>) {
+        self.sender.send(msg, targets).await;
     }
 
     fn n_nodes(&self) -> usize {
-        self.send.len()
+        self.sender.n_nodes()
+    }
+}
+
+impl<M, I> NetworkService for InjectedLocalNetworkService<M, I>
+where
+    M: Send + Sync + Clone + 'static,
+    I: NetworkInjection<M>,
+{
+    type Sender = InjectedLocalNetworkSender<M, I>;
+
+    fn new_sender(&self) -> Self::Sender {
+        self.sender.clone()
+    }
+
+    async fn recv(&mut self) -> (NodeId, M) {
+        self.recv.recv().await.unwrap()
     }
 }
 
@@ -131,10 +170,12 @@ where
 
     fn service(&mut self, node_id: NodeId) -> Self::Service {
         InjectedLocalNetworkService {
-            send: self.send.clone(),
+            sender: InjectedLocalNetworkSender {
+                send: self.send.clone(),
+                injection: self.injection.clone(),
+                node_id,
+            },
             recv: self.recv[node_id].take().unwrap(),
-            node_id,
-            injection: self.injection.clone(),
         }
     }
 }
@@ -168,6 +209,7 @@ where
     }
 }
 
+#[derive(Clone)]
 pub struct DropAllNetworkService<M> {
     n_nodes: usize,
     _phantom: PhantomData<M>,
@@ -182,7 +224,7 @@ impl<M> DropAllNetworkService<M> {
     }
 }
 
-impl<M> NetworkService for DropAllNetworkService<M>
+impl<M> NetworkSender for DropAllNetworkService<M>
 where
     M: Send + Sync + Clone + 'static,
 {
@@ -190,12 +232,23 @@ where
 
     async fn send(&self, _: M, _: Vec<NodeId>) {}
 
+    fn n_nodes(&self) -> usize {
+        self.n_nodes
+    }
+}
+
+impl<M> NetworkService for DropAllNetworkService<M>
+where
+    M: Send + Sync + Clone + 'static,
+{
+    type Sender = Self;
+
+    fn new_sender(&self) -> Self::Sender {
+        self.clone()
+    }
+
     async fn recv(&mut self) -> (NodeId, M) {
         NeverReturn {}.await;
         unreachable!()
-    }
-
-    fn n_nodes(&self) -> usize {
-        self.n_nodes
     }
 }

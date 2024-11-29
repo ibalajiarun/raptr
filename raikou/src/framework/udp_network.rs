@@ -3,7 +3,7 @@
 
 use crate::framework::{
     injection::{delay_injection, drop_injection},
-    network::{NetworkService, Validate},
+    network::{NetworkSender, NetworkService, Validate},
     NodeId,
 };
 use aptos_channels::{aptos_channel, message_queues::QueueStyle};
@@ -30,24 +30,86 @@ pub struct Config {
     pub peer_concurrency_level: usize,
 }
 
-pub struct UdpNetworkService<M> {
-    recv: aptos_channel::Receiver<NodeId, (NodeId, M)>,
-    // recv: tokio::sync::mpsc::Receiver<(NodeId, M)>,
-    sender: Arc<UdpNetworkServiceSender<M>>,
-}
-
-struct UdpNetworkServiceSender<M> {
+struct UdpNetworkSenderInner<M> {
     node_id: NodeId,
     self_send: aptos_channel::Sender<NodeId, (NodeId, M)>,
     socks: Vec<Arc<UdpSocket>>,
 }
 
-impl<M> UdpNetworkServiceSender<M> {
+impl<M> UdpNetworkSenderInner<M> {
     fn self_send(&self, msg: M) {
         self.self_send
             .push(self.node_id, (self.node_id, msg))
             .unwrap();
     }
+}
+
+pub struct UdpNetworkSender<M> {
+    inner: Arc<UdpNetworkSenderInner<M>>,
+}
+
+impl<M> Clone for UdpNetworkSender<M> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl<M> NetworkSender for UdpNetworkSender<M>
+where
+    M: Send + Sync + 'static + Serialize + for<'de> Deserialize<'de> + Validate,
+{
+    type Message = M;
+
+    async fn send(&self, msg: Self::Message, targets: Vec<NodeId>) {
+        let sender = self.inner.clone();
+
+        tokio::spawn(async move {
+            // Avoid serializing the message if we are sending the message only to ourselves.
+            if targets.len() == 1 && targets[0] == sender.node_id {
+                sender.self_send(msg);
+                return;
+            }
+
+            let data = bcs::to_bytes(&msg).unwrap();
+
+            if data.len() > MAX_MESSAGE_SIZE {
+                // Panicking because this is most likely caused by a bug in the code and needs
+                // to be discovered ASAP.
+                panic!("Trying to send a message that is too large: {}", data.len());
+            }
+
+            // Bypass the network for self-sends.
+            if targets.contains(&sender.node_id) {
+                sender.self_send(msg);
+            }
+
+            delay_injection().await;
+
+            // TODO: should I use FuturesUnordered instead?
+            let mut futures = vec![];
+
+            for peer_id in targets {
+                if peer_id == sender.node_id {
+                    continue;
+                }
+
+                // TODO: should we `spawn` this instead?
+                futures.push(sender.socks[peer_id as usize].send(&data).map(|_| ()));
+            }
+            join_all(futures).await;
+        });
+    }
+
+    fn n_nodes(&self) -> usize {
+        self.inner.socks.len()
+    }
+}
+
+pub struct UdpNetworkService<M> {
+    recv: aptos_channel::Receiver<NodeId, (NodeId, M)>,
+    sender: UdpNetworkSender<M>,
 }
 
 impl<M> UdpNetworkService<M>
@@ -90,11 +152,13 @@ where
 
         Self {
             recv: rx,
-            sender: Arc::new(UdpNetworkServiceSender {
-                node_id,
-                self_send: tx,
-                socks,
-            }),
+            sender: UdpNetworkSender {
+                inner: Arc::new(UdpNetworkSenderInner {
+                    node_id,
+                    self_send: tx,
+                    socks,
+                }),
+            },
         }
     }
 
@@ -175,57 +239,32 @@ where
     }
 }
 
-impl<M> NetworkService for UdpNetworkService<M>
+impl<M> NetworkSender for UdpNetworkService<M>
 where
     M: Send + Sync + 'static + Serialize + for<'de> Deserialize<'de> + Validate,
 {
     type Message = M;
 
     async fn send(&self, msg: Self::Message, targets: Vec<NodeId>) {
-        let sender = self.sender.clone();
+        self.sender.send(msg, targets).await;
+    }
 
-        tokio::spawn(async move {
-            // Avoid serializing the message if we are sending the message only to ourselves.
-            if targets.len() == 1 && targets[0] == sender.node_id {
-                sender.self_send(msg);
-                return;
-            }
+    fn n_nodes(&self) -> usize {
+        self.sender.n_nodes()
+    }
+}
 
-            let data = bcs::to_bytes(&msg).unwrap();
+impl<M> NetworkService for UdpNetworkService<M>
+where
+    M: Send + Sync + 'static + Serialize + for<'de> Deserialize<'de> + Validate,
+{
+    type Sender = UdpNetworkSender<M>;
 
-            if data.len() > MAX_MESSAGE_SIZE {
-                // Panicking because this is most likely caused by a bug in the code and needs
-                // to be discovered ASAP.
-                panic!("Trying to send a message that is too large: {}", data.len());
-            }
-
-            // Bypass the network for self-sends.
-            if targets.contains(&sender.node_id) {
-                sender.self_send(msg);
-            }
-
-            delay_injection().await;
-
-            // TODO: should I use FuturesUnordered instead?
-            let mut futures = vec![];
-
-            for peer_id in targets {
-                if peer_id == sender.node_id {
-                    continue;
-                }
-
-                // TODO: should we `spawn` this instead?
-                futures.push(sender.socks[peer_id as usize].send(&data).map(|_| ()));
-            }
-            join_all(futures).await;
-        });
+    fn new_sender(&self) -> Self::Sender {
+        self.sender.clone()
     }
 
     async fn recv(&mut self) -> (NodeId, M) {
         self.recv.select_next_some().await
-    }
-
-    fn n_nodes(&self) -> usize {
-        self.sender.socks.len()
     }
 }

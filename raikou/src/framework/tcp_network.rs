@@ -3,7 +3,7 @@
 
 use crate::framework::{
     injection::{delay_injection, drop_injection},
-    network::{NetworkService, Validate},
+    network::{NetworkSender, NetworkService, Validate},
     NodeId,
 };
 use aptos_channels::{aptos_channel, message_queues::QueueStyle};
@@ -33,15 +33,18 @@ pub struct Config {
     pub streams_per_peer: usize,
 }
 
-pub struct TcpNetworkService<M> {
-    recv: aptos_channel::Receiver<NodeId, (NodeId, M)>,
-    sender: Arc<TcpNetworkServiceSender<M>>,
-}
-
-struct TcpNetworkServiceSender<M> {
+struct TcpNetworkSenderInner<M> {
     node_id: NodeId,
     self_send: aptos_channel::Sender<NodeId, (NodeId, M)>,
     streams: Vec<PeerStreams>,
+}
+
+impl<M> TcpNetworkSenderInner<M> {
+    fn self_send(&self, msg: M) {
+        self.self_send
+            .push(self.node_id, (self.node_id, msg))
+            .unwrap();
+    }
 }
 
 struct PeerStreams {
@@ -59,12 +62,91 @@ impl PeerStreams {
     }
 }
 
-impl<M> TcpNetworkServiceSender<M> {
-    fn self_send(&self, msg: M) {
-        self.self_send
-            .push(self.node_id, (self.node_id, msg))
-            .unwrap();
+pub struct TcpNetworkSender<M> {
+    inner: Arc<TcpNetworkSenderInner<M>>,
+}
+
+impl<M> Clone for TcpNetworkSender<M> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
     }
+}
+
+async fn send_msg_to_stream(
+    data: Arc<Vec<u8>>,
+    mut stream: OwnedMutexGuard<TcpStream>,
+) -> anyhow::Result<()> {
+    stream
+        .write_all(&(data.len() as MessageSizeTag).to_be_bytes())
+        .await?;
+    stream.write_all(&data).await?;
+    Ok(())
+}
+
+impl<M> NetworkSender for TcpNetworkSender<M>
+where
+    M: Send + Sync + 'static + Serialize + for<'de> Deserialize<'de> + Validate + std::fmt::Debug,
+{
+    type Message = M;
+
+    async fn send(&self, msg: Self::Message, targets: Vec<NodeId>) {
+        let inner = self.inner.clone();
+
+        tokio::spawn(async move {
+            let targets: Vec<NodeId> = targets.into_iter().collect();
+
+            // Avoid serializing the message if we are sending the message only to ourselves.
+            if targets.len() == 1 && targets[0] == inner.node_id {
+                inner.self_send(msg);
+                return;
+            }
+
+            let data = Arc::new(bcs::to_bytes(&msg).unwrap());
+
+            if data.len() > MAX_MESSAGE_SIZE {
+                // Panicking because this is most likely caused by a bug in the code and needs
+                // to be discovered ASAP.
+                panic!("Trying to send a message that is too large: {}", data.len());
+            }
+
+            // Bypass the network for self-sends.
+            if targets.contains(&inner.node_id) {
+                inner.self_send(msg);
+            }
+
+            for peer_id in targets {
+                if peer_id == inner.node_id {
+                    continue;
+                }
+
+                let data = data.clone();
+
+                let inner = inner.clone();
+                tokio::spawn(async move {
+                    let stream = inner.streams[peer_id].next().await;
+
+                    if let Err(err) = send_msg_to_stream(data, stream).await {
+                        aptos_logger::error!(
+                            "TCPNET: Failed to send message to peer {}: {}",
+                            peer_id,
+                            err,
+                        );
+                    }
+                });
+            }
+        });
+    }
+
+    fn n_nodes(&self) -> usize {
+        self.inner.streams.len()
+    }
+}
+
+pub struct TcpNetworkService<M> {
+    recv: aptos_channel::Receiver<NodeId, (NodeId, M)>,
+    sender: TcpNetworkSender<M>,
 }
 
 impl<M> TcpNetworkService<M>
@@ -113,13 +195,16 @@ where
             });
         }
 
-        let sender = Arc::new(TcpNetworkServiceSender {
-            node_id,
-            self_send,
-            streams,
-        });
-
-        TcpNetworkService { recv, sender }
+        TcpNetworkService {
+            recv,
+            sender: TcpNetworkSender {
+                inner: Arc::new(TcpNetworkSenderInner {
+                    node_id,
+                    self_send,
+                    streams,
+                }),
+            },
+        }
     }
 
     async fn create_listener(addr: SocketAddr) -> TcpListener {
@@ -159,17 +244,6 @@ where
                 },
             }
         }
-    }
-
-    async fn send_msg(
-        mut stream: OwnedMutexGuard<TcpStream>,
-        data: Arc<Vec<u8>>,
-    ) -> anyhow::Result<()> {
-        stream
-            .write_all(&(data.len() as MessageSizeTag).to_be_bytes())
-            .await?;
-        stream.write_all(&data).await?;
-        Ok(())
     }
 
     async fn listen_loop(
@@ -257,63 +331,32 @@ where
     }
 }
 
-impl<M> NetworkService for TcpNetworkService<M>
+impl<M> NetworkSender for TcpNetworkService<M>
 where
     M: Send + Sync + 'static + Serialize + for<'de> Deserialize<'de> + Validate + std::fmt::Debug,
 {
     type Message = M;
 
     async fn send(&self, msg: Self::Message, targets: Vec<NodeId>) {
-        let sender = self.sender.clone();
+        self.sender.send(msg, targets).await;
+    }
 
-        tokio::spawn(async move {
-            // Avoid serializing the message if we are sending the message only to ourselves.
-            if targets.len() == 1 && targets[0] == sender.node_id {
-                sender.self_send(msg);
-                return;
-            }
+    fn n_nodes(&self) -> usize {
+        self.sender.n_nodes()
+    }
+}
 
-            let data = Arc::new(bcs::to_bytes(&msg).unwrap());
+impl<M> NetworkService for TcpNetworkService<M>
+where
+    M: Send + Sync + 'static + Serialize + for<'de> Deserialize<'de> + Validate + std::fmt::Debug,
+{
+    type Sender = TcpNetworkSender<M>;
 
-            if data.len() > MAX_MESSAGE_SIZE {
-                // Panicking because this is most likely caused by a bug in the code and needs
-                // to be discovered ASAP.
-                panic!("Trying to send a message that is too large: {}", data.len());
-            }
-
-            // Bypass the network for self-sends.
-            if targets.contains(&sender.node_id) {
-                sender.self_send(msg);
-            }
-
-            for peer_id in targets {
-                if peer_id == sender.node_id {
-                    continue;
-                }
-
-                let data = data.clone();
-
-                let sender = sender.clone();
-                tokio::spawn(async move {
-                    let stream = sender.streams[peer_id].next().await;
-
-                    if let Err(err) = Self::send_msg(stream, data).await {
-                        aptos_logger::error!(
-                            "TCPNET: Failed to send message to peer {}: {}",
-                            peer_id,
-                            err,
-                        );
-                    }
-                });
-            }
-        });
+    fn new_sender(&self) -> Self::Sender {
+        self.sender.clone()
     }
 
     async fn recv(&mut self) -> (NodeId, M) {
         self.recv.select_next_some().await
-    }
-
-    fn n_nodes(&self) -> usize {
-        self.sender.streams.len()
     }
 }

@@ -3,7 +3,7 @@
 
 use crate::framework::{
     module_network::{ModuleEvent, ModuleId, ModuleNetworkService},
-    network::NetworkService,
+    network::{NetworkSender, NetworkService},
     timer::TimerService,
     NodeId,
 };
@@ -96,7 +96,7 @@ impl<NS: NetworkService, TS: TimerService> SimpleContext<NS, TS> {
 }
 
 impl<NS: NetworkService, TS: TimerService> Context for SimpleContext<NS, TS> {
-    type Message = <NS as NetworkService>::Message;
+    type Message = <NS as NetworkSender>::Message;
     type TimerEvent = <TS as TimerService>::Event;
 
     fn node_id(&self) -> NodeId {

@@ -15,9 +15,15 @@ pub trait Validate {
 pub trait NetworkService: Send + Sync + 'static {
     type Message: Send + Sync + 'static;
 
-    fn unicast(&self, data: Self::Message, target: NodeId) -> impl Future<Output = ()> + Send;
+    fn send(&self, data: Self::Message, targets: Vec<NodeId>) -> impl Future<Output = ()> + Send;
 
-    fn multicast(&self, data: Self::Message) -> impl Future<Output = ()> + Send;
+    fn unicast(&self, data: Self::Message, target: NodeId) -> impl Future<Output = ()> + Send {
+        self.send(data, vec![target])
+    }
+
+    fn multicast(&self, data: Self::Message) -> impl Future<Output = ()> + Send {
+        self.send(data, (0..self.n_nodes()).into_iter().collect())
+    }
 
     fn recv(&mut self) -> impl Future<Output = (NodeId, Self::Message)> + Send;
 
@@ -57,34 +63,30 @@ where
 {
     type Message = M;
 
-    /// `send` spawns a separate task that calls `self.injection` on the message before
-    /// sending it to `target`. The injection may:
+    /// `send` spawns a separate task for each target that calls `self.injection`
+    /// on the message before sending it to `target`. The injection may:
     ///   1. sleep to simulate a message delay
     ///   2. drop the message to simulate message loss;
     ///   3. modify the message to simulate message corruption.
     ///
     /// Since the injection happens in a new task, `send` always returns immediately, not
     /// affected by any injected delay.
-    async fn unicast(&self, data: M, target: NodeId) {
-        let sender = self.node_id;
-        let channel = self.send[target].clone();
-        let injection = self.injection.clone();
+    async fn send(&self, data: M, targets: Vec<NodeId>) {
+        for target in targets {
+            let data = data.clone();
+            let sender = self.node_id;
+            let channel = self.send[target].clone();
+            let injection = self.injection.clone();
 
-        tokio::spawn(async move {
-            // if let Some(message) = injection(message, target).await {
-            //     send_channel.send(message).await.unwrap();
-            // }
-            if let Some(data) = injection(sender, target, data).await {
-                // Ignoring send errors.
-                let _ = channel.send((sender, data)).await;
-            }
-        });
-    }
-
-    /// `multicast` sends the message to all nodes in the network, including itself.
-    async fn multicast(&self, data: M) {
-        for target in 0..self.n_nodes() {
-            self.unicast(data.clone(), target as NodeId).await;
+            tokio::spawn(async move {
+                // if let Some(message) = injection(message, target).await {
+                //     send_channel.send(message).await.unwrap();
+                // }
+                if let Some(data) = injection(sender, target, data).await {
+                    // Ignoring send errors.
+                    let _ = channel.send((sender, data)).await;
+                }
+            });
         }
     }
 
@@ -186,9 +188,7 @@ where
 {
     type Message = M;
 
-    async fn unicast(&self, _: M, _: NodeId) {}
-
-    async fn multicast(&self, _: M) {}
+    async fn send(&self, _: M, _: Vec<NodeId>) {}
 
     async fn recv(&mut self) -> (NodeId, M) {
         NeverReturn {}.await;

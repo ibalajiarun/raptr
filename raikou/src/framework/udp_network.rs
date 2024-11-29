@@ -98,46 +98,6 @@ where
         }
     }
 
-    async fn send(&self, peers: std::ops::Range<NodeId>, msg: M) {
-        let sender = self.sender.clone();
-
-        tokio::spawn(async move {
-            // Avoid serializing the message if we are sending the message only to ourselves.
-            if peers.len() == 1 && peers.start == sender.node_id {
-                sender.self_send(msg);
-                return;
-            }
-
-            let data = bcs::to_bytes(&msg).unwrap();
-
-            if data.len() > MAX_MESSAGE_SIZE {
-                // Panicking because this is most likely caused by a bug in the code and needs
-                // to be discovered ASAP.
-                panic!("Trying to send a message that is too large: {}", data.len());
-            }
-
-            // Bypass the network for self-sends.
-            if peers.contains(&sender.node_id) {
-                sender.self_send(msg);
-            }
-
-            delay_injection().await;
-
-            // TODO: should I use FuturesUnordered instead?
-            let mut futures = vec![];
-            for peer in peers {
-                if peer != sender.node_id {
-                    if drop_injection() {
-                        aptos_logger::warn!("Dropping a message to {}", peer);
-                        continue;
-                    }
-                    futures.push(sender.socks[peer as usize].send(&data).map(|_| ()));
-                }
-            }
-            join_all(futures).await;
-        });
-    }
-
     async fn recv_loop(
         peer_id: NodeId,
         recv_socket: Arc<UdpSocket>,
@@ -154,6 +114,7 @@ where
 
         loop {
             let mut buf = bufs[cur_buf].clone().lock_owned().await;
+
             match recv_socket.recv(&mut *buf).await {
                 Ok(n) => {
                     if n == 0 {
@@ -165,22 +126,27 @@ where
                         continue;
                     }
 
+                    if drop_injection() {
+                        aptos_logger::warn!("UPDNET: Dropping a message from {}", peer_id);
+                        continue;
+                    }
+
                     let tx = tx.clone();
                     cur_buf = (cur_buf + 1) % bufs.len();
 
-                    if concurrency_level == 1 {
+                    if concurrency_level > 1 || cfg!(feature = "inject-delays") {
+                        let validator_verifier = validator_verifier.clone();
+
+                        tokio::spawn(async move {
+                            delay_injection().await;
+                            Self::process_message(buf, n, peer_id, tx, validator_verifier).await;
+                        });
+                    } else {
                         Self::process_message(buf, n, peer_id, tx, validator_verifier.clone())
                             .await;
-                    } else {
-                        tokio::spawn(Self::process_message(
-                            buf,
-                            n,
-                            peer_id,
-                            tx,
-                            validator_verifier.clone(),
-                        ));
                     }
                 },
+
                 Err(err) => {
                     aptos_logger::error!("Error receiving message from {}: {}", peer_id, err);
                     break;
@@ -215,12 +181,44 @@ where
 {
     type Message = M;
 
-    async fn unicast(&self, data: Self::Message, target: NodeId) {
-        self.send(target..target + 1, data).await
-    }
+    async fn send(&self, msg: Self::Message, targets: Vec<NodeId>) {
+        let sender = self.sender.clone();
 
-    async fn multicast(&self, data: Self::Message) {
-        self.send(0..self.sender.socks.len() as NodeId, data).await
+        tokio::spawn(async move {
+            // Avoid serializing the message if we are sending the message only to ourselves.
+            if targets.len() == 1 && targets[0] == sender.node_id {
+                sender.self_send(msg);
+                return;
+            }
+
+            let data = bcs::to_bytes(&msg).unwrap();
+
+            if data.len() > MAX_MESSAGE_SIZE {
+                // Panicking because this is most likely caused by a bug in the code and needs
+                // to be discovered ASAP.
+                panic!("Trying to send a message that is too large: {}", data.len());
+            }
+
+            // Bypass the network for self-sends.
+            if targets.contains(&sender.node_id) {
+                sender.self_send(msg);
+            }
+
+            delay_injection().await;
+
+            // TODO: should I use FuturesUnordered instead?
+            let mut futures = vec![];
+
+            for peer_id in targets {
+                if peer_id == sender.node_id {
+                    continue;
+                }
+
+                // TODO: should we `spawn` this instead?
+                futures.push(sender.socks[peer_id as usize].send(&data).map(|_| ()));
+            }
+            join_all(futures).await;
+        });
     }
 
     async fn recv(&mut self) -> (NodeId, M) {

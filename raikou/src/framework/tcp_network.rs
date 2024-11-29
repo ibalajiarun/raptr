@@ -161,56 +161,6 @@ where
         }
     }
 
-    async fn send(&self, target: std::ops::Range<NodeId>, msg: M) {
-        let sender = self.sender.clone();
-
-        tokio::spawn(async move {
-            // Avoid serializing the message if we are sending the message only to ourselves.
-            if target.len() == 1 && target.start == sender.node_id {
-                sender.self_send(msg);
-                return;
-            }
-
-            let data = Arc::new(bcs::to_bytes(&msg).unwrap());
-
-            if data.len() > MAX_MESSAGE_SIZE {
-                // Panicking because this is most likely caused by a bug in the code and needs
-                // to be discovered ASAP.
-                panic!("Trying to send a message that is too large: {}", data.len());
-            }
-
-            // Bypass the network for self-sends.
-            if target.contains(&sender.node_id) {
-                sender.self_send(msg);
-            }
-
-            for peer_id in target {
-                if peer_id == sender.node_id {
-                    continue;
-                }
-
-                let data = data.clone();
-                let stream = sender.streams[peer_id].next().await;
-                tokio::spawn(async move {
-                    if drop_injection() {
-                        aptos_logger::warn!("TCPNET: Dropping a message to {}", peer_id);
-                        return;
-                    }
-
-                    delay_injection().await;
-
-                    if let Err(err) = Self::send_msg(stream, data).await {
-                        aptos_logger::error!(
-                            "TCPNET: Failed to send message to peer {}: {}",
-                            peer_id,
-                            err,
-                        );
-                    }
-                });
-            }
-        });
-    }
-
     async fn send_msg(
         mut stream: OwnedMutexGuard<TcpStream>,
         data: Arc<Vec<u8>>,
@@ -253,7 +203,20 @@ where
         loop {
             match Self::read_message(&mut stream, validator_verifier.clone(), &mut buf).await {
                 Ok(msg) => {
-                    self_send.push(peer_id, (peer_id, msg)).unwrap();
+                    if drop_injection() {
+                        aptos_logger::info!("TCPNET: Dropping message from peer {}", peer_id);
+                        continue;
+                    }
+
+                    if cfg!(feature = "inject-delays") {
+                        let self_send = self_send.clone();
+                        tokio::spawn(async move {
+                            delay_injection().await;
+                            self_send.push(peer_id, (peer_id, msg)).unwrap();
+                        });
+                    } else {
+                        self_send.push(peer_id, (peer_id, msg)).unwrap();
+                    }
                 },
                 Err(err) => {
                     aptos_logger::error!(
@@ -300,13 +263,50 @@ where
 {
     type Message = M;
 
-    async fn unicast(&self, data: Self::Message, target: NodeId) {
-        self.send(target..target + 1, data).await
-    }
+    async fn send(&self, msg: Self::Message, targets: Vec<NodeId>) {
+        let sender = self.sender.clone();
 
-    async fn multicast(&self, data: Self::Message) {
-        self.send(0..self.sender.streams.len() as NodeId, data)
-            .await
+        tokio::spawn(async move {
+            // Avoid serializing the message if we are sending the message only to ourselves.
+            if targets.len() == 1 && targets[0] == sender.node_id {
+                sender.self_send(msg);
+                return;
+            }
+
+            let data = Arc::new(bcs::to_bytes(&msg).unwrap());
+
+            if data.len() > MAX_MESSAGE_SIZE {
+                // Panicking because this is most likely caused by a bug in the code and needs
+                // to be discovered ASAP.
+                panic!("Trying to send a message that is too large: {}", data.len());
+            }
+
+            // Bypass the network for self-sends.
+            if targets.contains(&sender.node_id) {
+                sender.self_send(msg);
+            }
+
+            for peer_id in targets {
+                if peer_id == sender.node_id {
+                    continue;
+                }
+
+                let data = data.clone();
+
+                let sender = sender.clone();
+                tokio::spawn(async move {
+                    let stream = sender.streams[peer_id].next().await;
+
+                    if let Err(err) = Self::send_msg(stream, data).await {
+                        aptos_logger::error!(
+                            "TCPNET: Failed to send message to peer {}: {}",
+                            peer_id,
+                            err,
+                        );
+                    }
+                });
+            }
+        });
     }
 
     async fn recv(&mut self) -> (NodeId, M) {

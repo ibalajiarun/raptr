@@ -66,10 +66,10 @@ impl NetworkTest for ConsensusOnlyBenchmark {
             .unwrap();
 
         let result = load_test()
-            .tps(10)
+            .tps(10000)
             .duration(Duration::from_secs(60))
             .error_rate(0.0)
-            .hint(balter::Hint::Concurrency(1))
+            // .hint(balter::Hint::Concurrency(1))
             .await;
 
         println!("{:?}", result);

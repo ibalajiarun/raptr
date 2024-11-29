@@ -327,7 +327,9 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
     }
 
     async fn on_new_block(&mut self, block: &Block, ctx: &mut impl ContextFor<Self>) {
-        assert!(!self.blocks.contains_key(&block.digest));
+        if self.blocks.contains_key(&block.digest) {
+            return;
+        }
 
         self.blocks.insert(block.digest.clone(), block.clone());
         let parent_qc = block.parent_qc().unwrap();
@@ -1076,9 +1078,7 @@ where
         };
 
         upon receive [Message::FetchResp(block)] from [_any_node] {
-            if !self.blocks.contains_key(&block.digest) {
-                self.on_new_block(&block, ctx).await;
-            }
+            self.on_new_block(&block, ctx).await;
         };
 
         // State sync

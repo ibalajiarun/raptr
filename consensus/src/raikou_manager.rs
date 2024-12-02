@@ -55,7 +55,7 @@ use raikou::{
 use rayon::slice::ParallelSlice;
 use serde::{Deserialize, Serialize};
 use std::{
-    any::TypeId,
+    any::{Any, TypeId},
     collections::{HashMap, HashSet},
     future::Future,
     marker::PhantomData,
@@ -438,10 +438,20 @@ impl RaikouManager {
                                 .await;
                         }
                     });
+                } else if msg.type_id() == TypeId::of::<dissemination::NewQCWithPayload>() {
+                    let msg: Box<_> = msg
+                        .downcast::<dissemination::NewQCWithPayload>()
+                        .ok()
+                        .unwrap();
+                    let dissemination::NewQCWithPayload { payload, qc } = *msg;
+                    // TODO: add fetching here
                 } else if msg.type_id() == TypeId::of::<dissemination::Kill>() {
                     break;
                 } else {
-                    unreachable!();
+                    panic!(
+                        "Unexpected event type received from module network. Type id: {:?}",
+                        msg.type_id()
+                    );
                 }
             }
         });

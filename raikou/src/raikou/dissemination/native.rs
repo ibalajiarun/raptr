@@ -253,10 +253,15 @@ where
         for payload in &payloads {
             for batch in payload.all() {
                 if inner.committed_batches.contains(&batch.digest) {
-                    panic!(
+                    // NB: This may happen because de-duplication is best-effort:
+                    // e.g., if the block for the parent QC is not available, we will
+                    // go ahead with an incomplete `exclude` set.
+                    aptos_logger::warn!(
                         "Duplicate commit for batch {} (hash: {:#x})",
-                        batch.batch_id, batch.digest,
+                        batch.batch_id,
+                        batch.digest,
                     );
+                    continue;
                 }
 
                 inner.committed_batches.insert(batch.digest.clone());

@@ -44,7 +44,7 @@ use raikou::{
         NodeId, Protocol,
     },
     metrics,
-    metrics::display_metric,
+    metrics::{display_metric, display_metric_to},
     raikou::{
         dissemination::{self, DisseminationLayer},
         types as raikou_types,
@@ -294,8 +294,11 @@ impl RaikouManager {
                 // All data from the warmup period is discarded.
                 let warmup_period_in_delta = 50;
 
+                let mut metrics_output_buf = Vec::new();
+
                 // Printing metrics, internally, will wait for the protocol to halt.
-                display_metric(
+                display_metric_to(
+                    &mut metrics_output_buf,
                     "Fetch wait time after commit",
                     "The duration from committing a block until being able to execute it, i.e.,\
                     until we have the whole prefix of the chain fetched.",
@@ -306,7 +309,8 @@ impl RaikouManager {
                 )
                 .await;
 
-                display_metric(
+                display_metric_to(
+                    &mut metrics_output_buf,
                     "Penalty system delay",
                     "The penalties for optimistically committed batches. \
                     Measured on the leader.",
@@ -317,7 +321,8 @@ impl RaikouManager {
                 )
                 .await;
 
-                display_metric(
+                display_metric_to(
+                    &mut metrics_output_buf,
                     "Optimistic batch queueing time",
                     "The duration from when the batch is received by leader until the block \
                     containing this batch is proposed. \
@@ -331,7 +336,8 @@ impl RaikouManager {
                 )
                 .await;
 
-                display_metric(
+                display_metric_to(
+                    &mut metrics_output_buf,
                     "Batch consensus latency",
                     "The duration from when the batch is included in a block until \
                     the block is committed. \
@@ -343,7 +349,8 @@ impl RaikouManager {
                 )
                 .await;
 
-                display_metric(
+                display_metric_to(
+                    &mut metrics_output_buf,
                     "Batch commit time",
                     "The duration from creating the batch until committing it. \
                     After committing, we may have to wait for the data to be fetched. \
@@ -355,7 +362,8 @@ impl RaikouManager {
                 )
                 .await;
 
-                display_metric(
+                display_metric_to(
+                    &mut metrics_output_buf,
                     "Batch execute time (the end-to-end latency)",
                     "The duration from creating the batch until executing it. \
                     Measured on the batch creator.",
@@ -365,6 +373,11 @@ impl RaikouManager {
                     warmup_period_in_delta,
                 )
                 .await;
+
+                aptos_logger::info!(
+                    "Metrics: {}",
+                    std::str::from_utf8(&metrics_output_buf).unwrap(),
+                );
 
                 let _ = ack_tx.send(());
                 return;

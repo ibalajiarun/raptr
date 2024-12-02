@@ -244,20 +244,46 @@ impl Metric<f64> {
         self.show_histogram_range(n_bins, n_lines, min, max);
     }
 
+    //
+    pub fn print_stats_to(&self, writer: &mut impl std::io::Write) {
+        writeln!(writer, " #points: {:.2}", self.len()).unwrap();
+        writeln!(writer, "    mean: {:.2}", self.mean()).unwrap();
+        writeln!(writer, " std dev: {:.2}", self.std_dev()).unwrap();
+        writeln!(writer, "     min: {:.2}", self.min().unwrap()).unwrap();
+        writeln!(writer, "     10%: {:.2}", self.quantile(0.10)).unwrap();
+        writeln!(writer, "     50%: {:.2}", self.median()).unwrap();
+        writeln!(writer, "     90%: {:.2}", self.quantile(0.90)).unwrap();
+        writeln!(writer, "     max: {:.2}", self.max().unwrap()).unwrap();
+    }
+
     /// Prints the basic stats about the metric such as
     pub fn print_stats(&self) {
-        println!(" #points: {:.2}", self.len());
-        println!("    mean: {:.2}", self.mean());
-        println!(" std dev: {:.2}", self.std_dev());
-        println!("     min: {:.2}", self.min().unwrap());
-        println!("     10%: {:.2}", self.quantile(0.10));
-        println!("     50%: {:.2}", self.median());
-        println!("     90%: {:.2}", self.quantile(0.90));
-        println!("     max: {:.2}", self.max().unwrap());
+        self.print_stats_to(&mut std::io::stdout());
     }
 }
 
 pub async fn display_metric(
+    name: &str,
+    explanation_string: &str,
+    metric: UnorderedBuilder<(Instant, f64)>,
+    start_time: Instant,
+    delta: f64,
+    warmup_period_in_delta: u32,
+) {
+    display_metric_to(
+        &mut std::io::stdout(),
+        name,
+        explanation_string,
+        metric,
+        start_time,
+        delta,
+        warmup_period_in_delta,
+    )
+    .await;
+}
+
+pub async fn display_metric_to(
+    writer: &mut impl std::io::Write,
     name: &str,
     explanation_string: &str,
     metric: UnorderedBuilder<(Instant, f64)>,
@@ -273,18 +299,20 @@ pub async fn display_metric(
         })
         .map(|(_, latency)| latency)
         .sort();
-    println!("{}:", name);
-    println!("------");
-    println!("{}", explanation_string);
-    println!("------");
+    writeln!(writer, "{}:", name).unwrap();
+    writeln!(writer, "------").unwrap();
+    writeln!(writer, "{}", explanation_string).unwrap();
+    writeln!(writer, "------").unwrap();
     if trimmed_values.data.len() < 100 {
-        println!(
+        writeln!(
+            writer,
             "Not enough data. Number of data points: {}",
             trimmed_values.data.len()
-        );
+        )
+        .unwrap();
     } else {
-        trimmed_values.print_stats();
+        trimmed_values.print_stats_to(writer);
         trimmed_values.show_histogram(30, 10);
     }
-    println!();
+    writeln!(writer).unwrap();
 }

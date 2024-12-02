@@ -22,7 +22,9 @@ use std::{
 
 pub type Round = i64; // Round number.
 
-pub type Prefix = usize;
+pub type Prefix = aptos_consensus_types::payload::Prefix;
+
+pub type PrefixSet = aptos_consensus_types::payload::PrefixSet;
 
 pub type BlockSize = usize;
 
@@ -251,19 +253,19 @@ pub struct TimeoutDataSigningRepr {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AggregateSignatureWithPrefixes {
     pub sig: AggregateSignature,
-    pub prefixes: Vec<Prefix>,
+    pub prefixes: PrefixSet,
 }
 
 impl AggregateSignatureWithPrefixes {
-    pub fn new(sig: AggregateSignature, prefixes: Vec<Prefix>) -> Self {
-        assert_eq!(sig.get_num_voters(), prefixes.len());
+    pub fn new(sig: AggregateSignature, prefixes: PrefixSet) -> Self {
+        assert_eq!(sig.get_num_voters(), prefixes.iter().count());
         Self { sig, prefixes }
     }
 
     pub fn empty() -> Self {
         Self {
             sig: AggregateSignature::empty(),
-            prefixes: vec![],
+            prefixes: PrefixSet::empty(),
         }
     }
 
@@ -359,9 +361,9 @@ impl QC {
             .signatures_with_prefixes
             .prefixes
             .iter()
-            .map(|prefix| VoteDataSigningRepr {
+            .map(|(_node_id, prefix)| VoteDataSigningRepr {
                 common_data: self.common_data.clone(),
-                prefix: *prefix,
+                prefix,
             })
             .collect();
         let vote_datas_ref: Vec<_> = vote_datas.iter().collect();

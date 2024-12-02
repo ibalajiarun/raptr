@@ -19,10 +19,16 @@ pub enum Event<M, TE> {
 pub trait Context: Send + Sync {
     type Message: Send + Sync;
     type TimerEvent;
+    type NetworkSender: NetworkSender<Message = Self::Message>;
 
     fn node_id(&self) -> NodeId;
 
     fn n_nodes(&self) -> usize;
+
+    fn new_network_sender(&self) -> Self::NetworkSender;
+
+    fn send(&self, message: Self::Message, targets: Vec<NodeId>)
+        -> impl Future<Output = ()> + Send;
 
     // Unicast sends the message to a single node.
     fn unicast(&self, message: Self::Message, target: NodeId) -> impl Future<Output = ()> + Send;
@@ -97,6 +103,7 @@ impl<NS: NetworkService, TS: TimerService> SimpleContext<NS, TS> {
 
 impl<NS: NetworkService, TS: TimerService> Context for SimpleContext<NS, TS> {
     type Message = <NS as NetworkSender>::Message;
+    type NetworkSender = <NS as NetworkService>::Sender;
     type TimerEvent = <TS as TimerService>::Event;
 
     fn node_id(&self) -> NodeId {
@@ -105,6 +112,14 @@ impl<NS: NetworkService, TS: TimerService> Context for SimpleContext<NS, TS> {
 
     fn n_nodes(&self) -> usize {
         self.network.n_nodes()
+    }
+
+    fn new_network_sender(&self) -> Self::NetworkSender {
+        self.network.new_sender()
+    }
+
+    async fn send(&self, message: Self::Message, targets: Vec<NodeId>) {
+        self.network.send(message, targets).await;
     }
 
     async fn unicast(&self, message: Self::Message, target: NodeId) {

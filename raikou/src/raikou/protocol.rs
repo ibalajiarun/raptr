@@ -9,7 +9,9 @@ use crate::{
     protocol,
     raikou::{
         dissemination,
-        dissemination::{DisseminationLayer, FullBlockAvailable, ProposalReceived},
+        dissemination::{
+            DisseminationLayer, FullBlockAvailable, NewQCWithPayload, ProposalReceived,
+        },
         types::*,
     },
     utils::kth_max_set::KthMaxSet,
@@ -153,6 +155,7 @@ pub struct Config<S> {
     pub extra_wait_before_commit_vote: Duration,
 
     pub block_fetch_multiplicity: usize,
+    pub block_fetch_interval: Duration,
 
     pub round_sync_interval: Duration,
 
@@ -210,8 +213,11 @@ pub struct RaikouNode<S, DL> {
     // Set of blocks for which we have the full causal history available.
     satisfied_blocks: BTreeSet<BlockHash>,
 
-    // Map from a block id to the list of QCs that wait for this block to be satisfied.
+    // Map from an unsatisfied block hash to the list of QCs for this block.
     pending_qcs: DefaultBTreeMap<BlockHash, Vec<QC>>,
+
+    // Map from an unavailable block hash to the list of QCs for this block.
+    qcs_without_blocks: DefaultBTreeMap<BlockHash, Vec<QC>>,
 
     // QCs for which we have the full causal history available.
     satisfied_qcs: BTreeSet<SubBlockId>,
@@ -270,6 +276,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             pending_blocks: Default::default(),
             satisfied_blocks: Default::default(),
             pending_qcs: Default::default(),
+            qcs_without_blocks: Default::default(),
             satisfied_qcs: Default::default(),
             qcs_to_commit: Default::default(),
             leader_proposal: Default::default(),
@@ -326,9 +333,29 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         }
     }
 
+    async fn on_new_qc_with_available_block(
+        &self,
+        qc: QC,
+        block: &Block,
+        ctx: &mut impl ContextFor<Self>,
+    ) {
+        ctx.notify(self.dissemination.module_id(), NewQCWithPayload {
+            payload: block.payload().clone(),
+            qc,
+        }).await;
+    }
+
     async fn on_new_block(&mut self, block: &Block, ctx: &mut impl ContextFor<Self>) {
         if self.blocks.contains_key(&block.digest) {
             return;
+        }
+
+        for qc in self
+            .qcs_without_blocks
+            .remove(&block.digest)
+            .unwrap_or_default()
+        {
+            self.on_new_qc_with_available_block(qc, block, ctx).await;
         }
 
         self.blocks.insert(block.digest.clone(), block.clone());
@@ -381,6 +408,14 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         }
 
         self.known_qcs.insert(new_qc.sub_block_id());
+
+        if let Some(block) = self.blocks.get(&new_qc.common_data.hash) {
+            self.on_new_qc_with_available_block(new_qc.clone(), block, ctx)
+                .await;
+        } else {
+            self.qcs_without_blocks[new_qc.common_data.hash].push(new_qc.clone());
+        }
+
         if self.satisfied_blocks.contains(&new_qc.common_data.hash) {
             self.on_new_satisfied_qc(new_qc);
         } else {
@@ -439,17 +474,13 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
     }
 
     async fn commit_qc(&mut self, qc: QC, commit_reason: CommitReason) {
-        let (payloads, signers) = self.commit_qc_impl(qc, commit_reason);
-        self.dissemination.notify_commit(payloads, signers).await;
+        let payloads = self.commit_qc_impl(qc, commit_reason);
+        self.dissemination.notify_commit(payloads).await;
     }
 
-    fn commit_qc_impl(
-        &mut self,
-        qc: QC,
-        commit_reason: CommitReason,
-    ) -> (Vec<Payload>, Vec<Vec<Prefix>>) {
+    fn commit_qc_impl(&mut self, qc: QC, commit_reason: CommitReason) -> Vec<Payload> {
         if qc <= self.committed_qc {
-            return (vec![], vec![]);
+            return vec![];
         }
 
         let parent = self.blocks[&qc.common_data.hash]
@@ -490,12 +521,11 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                 commit_reason,
             ));
 
-            res.extend([(
+            res.push(
                 block
                     .payload()
                     .take_sub_blocks(self.committed_qc.prefix..qc.prefix),
-                qc.signatures_with_prefixes.prefixes.clone(),
-            )]);
+            );
 
             // Record the metrics
             let now = Instant::now();
@@ -528,10 +558,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                 commit_reason,
             ));
 
-            res.extend([(
-                block.payload().with_prefix(qc.prefix),
-                qc.signatures_with_prefixes.prefixes.clone(),
-            )]);
+            res.push(block.payload().with_prefix(qc.prefix));
 
             // Record the metrics
             let now = Instant::now();
@@ -856,7 +883,6 @@ where
                 let all_addresses = self.validator_verifier.get_ordered_account_addresses();
                 let authors = votes.keys().map(|&v| all_addresses[v]).collect_vec();
 
-
                 // A node forms a QC when it has received a quorum of votes
                 // with matching block digest and n_sub_blocks and either:
                 // 1. the node has not yet received or formed any QC for this round; or
@@ -895,9 +921,14 @@ where
                                 signature.clone(),
                             );
                         }
+
                         let aggregated_signature = self.validator_verifier.aggregate_signatures(partial_sigs.signatures_iter()).unwrap();
-                        let ordered_prefixes = votes.iter().map(|(_, (prefix, _))| *prefix).collect();
-                        let signatures_with_prefixes = AggregateSignatureWithPrefixes::new(aggregated_signature, ordered_prefixes);
+                        let prefix_set =
+                            votes
+                            .iter()
+                            .map(|(node_id, (prefix, _signature))| (*node_id, *prefix))
+                            .collect();
+                        let signatures_with_prefixes = AggregateSignatureWithPrefixes::new(aggregated_signature, prefix_set);
 
                         let qc = QC {
                             common_data: CommonData {
@@ -1056,7 +1087,7 @@ where
                 }
 
                 ctx.set_timer(
-                    self.config.delta * 2,
+                    self.config.block_fetch_interval,
                     TimerEvent::FetchBlock(block_round, digest, qc_signers),
                 );
             }

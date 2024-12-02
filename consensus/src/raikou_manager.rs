@@ -207,7 +207,8 @@ impl RaikouManager {
             enable_commit_votes: true,
             status_interval: Duration::from_secs_f64(delta * 10.),
             round_sync_interval: Duration::from_secs_f64(delta * 15.),
-            block_fetch_multiplicity: 1,
+            block_fetch_multiplicity: std::cmp::min(2, n_nodes),
+            block_fetch_interval: Duration::from_secs_f64(delta) * 2,
         };
 
         let mut module_network = ModuleNetwork::new();
@@ -325,7 +326,6 @@ impl RaikouManager {
                         if let Ok(_) = payload_manager
                             .wait_for_payload(
                                 &payload.inner,
-                                None,
                                 leader_account,
                                 // timestamp is only used for batch expiration, which is not
                                 // supported in this prototype.
@@ -435,24 +435,26 @@ impl RaikouManager {
         let queueing_time_sender = Some(queueing_time.new_sender());
         let penalty_wait_time_sender = Some(penalty_wait_time.new_sender());
 
-        let dissemination = dissemination::fake::FakeDisseminationLayer::new(
+        let dissemination = dissemination::native::NativeDisseminationLayer::new(
             node_id,
-            dissemination::fake::Config {
+            dissemination::native::Config {
                 module_id: diss_module_network.module_id(),
                 n_nodes,
                 f,
                 ac_quorum: 2 * f + 1,
                 delta: Duration::from_secs_f64(delta),
-                batch_interval: Duration::from_secs_f64(delta), // * 0.1),
+                batch_interval: Duration::from_secs_f64(delta * 0.2),
                 enable_optimistic_dissemination,
                 enable_penalty_tracker: true,
                 penalty_tracker_report_delay: Duration::from_secs_f64(delta * 5.),
                 n_sub_blocks: 7,
+                batch_fetch_multiplicity: std::cmp::min(2, n_nodes),
+                batch_fetch_interval: Duration::from_secs_f64(delta) * 2,
             },
             std::iter::repeat_with(|| vec![]),
             start_time,
             true,
-            dissemination::fake::Metrics {
+            dissemination::native::Metrics {
                 batch_commit_time: batch_commit_time_sender,
                 queueing_time: queueing_time_sender,
                 penalty_wait_time: penalty_wait_time_sender,
@@ -475,7 +477,6 @@ pub struct RaikouNetworkSenderInner<M> {
     epoch: u64,
     n_nodes: usize,
     index_to_address: HashMap<usize, Author>,
-    all_peer_addresses: Vec<Author>,
     network_sender: Arc<NetworkSender>,
     _phantom: PhantomData<M>,
 }
@@ -549,7 +550,7 @@ where
     pub async fn new(
         epoch_state: Arc<EpochState>,
         mut messages_rx: aptos_channels::aptos_channel::Receiver<
-            aptos_types::PeerId,
+            PeerId,
             (Author, RaikouNetworkMessage),
         >,
         network_sender: Arc<NetworkSender>,
@@ -560,7 +561,6 @@ where
             .into_iter()
             .map(|(k, v)| (v, k))
             .collect();
-        let all_peer_addresses = address_to_index.keys().cloned().collect();
 
         let (deserialized_messages_tx, deserialized_messages_rx) = tokio::sync::mpsc::channel(1024);
 
@@ -598,7 +598,6 @@ where
                     epoch: epoch_state.epoch,
                     n_nodes: epoch_state.verifier.len(),
                     index_to_address,
-                    all_peer_addresses,
                     network_sender,
                     _phantom: PhantomData,
                 }),
@@ -710,7 +709,7 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
             .available_prefix(payload.inner.as_raikou_payload(), cached_value)
     }
 
-    async fn notify_commit(&self, payloads: Vec<raikou_types::Payload>, signers: Vec<Vec<Prefix>>) {
+    async fn notify_commit(&self, payloads: Vec<raikou_types::Payload>) {
         let payload_manager = self.payload_manager.clone();
         let state_sync_notifier = self.state_sync_notifier.clone();
 
@@ -729,9 +728,9 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
                 payloads.clone(),
             );
 
-            for (payload, signers) in payloads.into_iter().zip(signers) {
+            for payload in payloads {
                 while let Err(_) = payload_manager
-                    .wait_for_payload(&payload, Some(&signers), None, 0, Duration::from_secs(1))
+                    .wait_for_payload(&payload, None, 0, Duration::from_secs(1))
                     .await
                 {
                     // TODO: add a logging / metric?

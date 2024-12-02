@@ -1008,6 +1008,7 @@ dependencies = [
  "rand 0.7.3",
  "rayon",
  "serde",
+ "serde_bytes",
  "serde_json",
  "tokio",
 ]

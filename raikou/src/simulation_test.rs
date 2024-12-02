@@ -10,7 +10,9 @@ use crate::{
         NodeId, Protocol,
     },
     leader_schedule::round_robin,
-    metrics, raikou,
+    metrics,
+    metrics::display_metric,
+    raikou,
     raikou::{dissemination, dissemination::native::NativeDisseminationLayer, RaikouNode},
 };
 use aptos_crypto::bls12381::{PrivateKey, PublicKey};
@@ -667,6 +669,8 @@ async fn test_raikou(
     let mut penalty_wait_time = metrics::UnorderedBuilder::new();
     let mut block_consensus_latency = metrics::UnorderedBuilder::new();
     let mut batch_consensus_latency = metrics::UnorderedBuilder::new();
+    let mut batch_execute_time = metrics::UnorderedBuilder::new();
+    let mut fetch_wait_time_after_commit = metrics::UnorderedBuilder::new();
     // let mut indirectly_committed_slots = metrics::UnorderedBuilder::new();
 
     let account_addresses: Vec<_> = (0..n_nodes)
@@ -719,6 +723,8 @@ async fn test_raikou(
         let penalty_wait_time_sender = Some(penalty_wait_time.new_sender());
         let block_consensus_latency_sender = Some(block_consensus_latency.new_sender());
         let batch_consensus_latency_sender = Some(batch_consensus_latency.new_sender());
+        let batch_execute_time_sender = Some(batch_execute_time.new_sender());
+        let fetch_wait_time_after_commit_sender = Some(fetch_wait_time_after_commit.new_sender());
         // let indirectly_committed_slots_sender = if node_id == monitored_node {
         //     Some(indirectly_committed_slots.new_sender())
         // } else {
@@ -767,6 +773,8 @@ async fn test_raikou(
                     batch_commit_time: batch_commit_time_sender,
                     queueing_time: queueing_time_sender,
                     penalty_wait_time: penalty_wait_time_sender,
+                    batch_execute_time: batch_execute_time_sender,
+                    fetch_wait_time_after_commit: fetch_wait_time_after_commit_sender,
                 },
             );
 
@@ -835,72 +843,76 @@ async fn test_raikou(
     // enter_time.show_histogram(n_slots as usize / 5, 10);
     // println!();
 
-    let batch_commit_time = batch_commit_time
-        .build()
-        .await
-        .filter(|&(timestamp, _)| {
-            timestamp >= start_time + Duration::from_secs_f64(delta) * warmup_period_in_delta
-        })
-        .map(|(_, commit_time)| commit_time)
-        .sort();
-    println!("Batch commit time:");
-    batch_commit_time.print_stats();
-    batch_commit_time.show_histogram(30, 10);
-    println!();
+    display_metric(
+        "Fetch wait time after commit",
+        "The duration from committing a block until being able to execute it, i.e.,\
+        until we have the whole prefix of the chain fetched.",
+        fetch_wait_time_after_commit,
+        start_time,
+        delta,
+        warmup_period_in_delta,
+    )
+    .await;
 
-    let queueing_time = queueing_time
-        .build()
-        .await
-        .filter(|&(timestamp, _)| {
-            timestamp >= start_time + Duration::from_secs_f64(delta) * warmup_period_in_delta
-        })
-        .map(|(_, queueing_time)| queueing_time)
-        .sort();
-    println!("Queueing time:");
-    queueing_time.print_stats();
-    queueing_time.show_histogram(30, 10);
-    println!();
+    display_metric(
+        "Penalty system delay",
+        "The penalties for optimistically committed batches. \
+        Measured on the leader.",
+        penalty_wait_time,
+        start_time,
+        delta,
+        warmup_period_in_delta,
+    )
+    .await;
 
-    let penalty_wait_time = penalty_wait_time
-        .build()
-        .await
-        .filter(|&(timestamp, _)| {
-            timestamp >= start_time + Duration::from_secs_f64(delta) * warmup_period_in_delta
-        })
-        .map(|(_, penalty_wait_time)| penalty_wait_time)
-        .sort();
-    println!("Penalty system delay:");
-    penalty_wait_time.print_stats();
-    penalty_wait_time.show_histogram(30, 10);
-    println!();
+    display_metric(
+        "Optimistic batch queueing time",
+        "The duration from when the batch is received by leader until the block \
+        containing this batch is proposed. \
+        Only measured if the block is committed. \
+        Only measured for optimistically committed batches. \
+        Measured on the leader.",
+        queueing_time,
+        start_time,
+        delta,
+        warmup_period_in_delta,
+    )
+    .await;
 
-    let batch_consensus_latency = batch_consensus_latency
-        .build()
-        .await
-        .filter(|&(timestamp, _)| {
-            timestamp >= start_time + Duration::from_secs_f64(delta) * warmup_period_in_delta
-        })
-        .map(|(_, latency)| latency)
-        .sort();
-    println!("Batch consensus latency:");
-    batch_consensus_latency.print_stats();
-    batch_consensus_latency.show_histogram(30, 10);
-    println!();
+    display_metric(
+        "Batch consensus latency",
+        "The duration from when the batch is included in a block until \
+        the block is committed. \
+        Measured on the leader.",
+        batch_consensus_latency,
+        start_time,
+        delta,
+        warmup_period_in_delta,
+    )
+    .await;
 
-    // println!("Indirectly Committed Slots:");
-    // let indirectly_committed_slots = indirectly_committed_slots
-    //     .build()
-    //     .await
-    //     .filter(|&slot| slot >= 20);
-    // println!("\tCount: {}", indirectly_committed_slots.len());
-    // println!(
-    //     "\tList: {:?}",
-    //     indirectly_committed_slots.clone().into_vec()
-    // );
-    // indirectly_committed_slots
-    //     .map(|slot| slot as f64) // histogram is supported only for f64.
-    //     .show_histogram_range(n_slots as usize / 5, 5, 20., n_slots as f64);
-    // println!();
+    display_metric(
+        "Batch commit time",
+        "The duration from creating the batch until committing it. \
+        After committing, we may have to wait for the data to be fetched. \
+        Measured on the batch creator.",
+        batch_commit_time,
+        start_time,
+        delta,
+        warmup_period_in_delta,
+    )
+    .await;
+
+    display_metric(
+        "Batch execute time (the end-to-end latency)",
+        "The duration from creating the batch until executing it. \
+        Measured on the batch creator.",
+        batch_execute_time,
+        start_time,
+        delta,
+        warmup_period_in_delta,
+    )
+    .await;
 }
 
 pub async fn main() {

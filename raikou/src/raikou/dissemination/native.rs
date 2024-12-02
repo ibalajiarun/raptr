@@ -29,7 +29,7 @@ use itertools::Itertools;
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
     future::Future,
     sync::{atomic::AtomicBool, Arc, RwLock},
     time::Duration,
@@ -148,8 +148,10 @@ pub struct Config {
 
 pub struct Metrics {
     pub batch_commit_time: Option<metrics::UnorderedSender<(Instant, f64)>>,
+    pub batch_execute_time: Option<metrics::UnorderedSender<(Instant, f64)>>,
     pub queueing_time: Option<metrics::UnorderedSender<(Instant, f64)>>,
     pub penalty_wait_time: Option<metrics::UnorderedSender<(Instant, f64)>>,
+    pub fetch_wait_time_after_commit: Option<metrics::UnorderedSender<(Instant, f64)>>,
     // pub average_penalty: Option<metrics::UnorderedSender<(Instant, f64)>>,
     // pub total_committed_batches: Option<metrics::UnorderedSender<(Instant, usize)>>,
     // pub two_chain_commit_batches: Option<metrics::UnorderedSender<(Instant, usize)>>,
@@ -262,26 +264,23 @@ where
         let mut inner = self.inner.lock().await;
         let now = Instant::now();
 
-        // TODO: actually pull the data.
-
         for payload in &payloads {
             for batch in payload.all() {
                 if inner.committed_batches.contains(&batch.digest) {
-                    aptos_logger::warn!(
+                    panic!(
                         "Duplicate commit for batch {} (hash: {:#x})",
-                        batch.batch_id,
-                        batch.digest,
+                        batch.batch_id, batch.digest,
                     );
-                    continue;
                 }
 
                 inner.committed_batches.insert(batch.digest.clone());
                 inner.uncommitted_acs.remove(&batch.digest);
                 inner.uncommitted_uncertified_batches.remove(&batch.digest);
 
+                inner.batch_commit_time.insert(batch.digest.clone(), now);
+
                 if batch.author == inner.node_id {
-                    let commit_time =
-                        inner.to_deltas(inner.batch_send_time[&batch.digest].elapsed());
+                    let commit_time = inner.to_deltas(now - inner.batch_send_time[&batch.digest]);
                     inner.metrics.batch_commit_time.push((now, commit_time));
                 }
             }
@@ -304,7 +303,7 @@ where
                     let batch_propose_delay = block_prepare_time - batch_receive_time;
 
                     assert!(batch_propose_delay >= penalty);
-                    let queueing_time_in_deltas = inner.to_deltas(batch_propose_delay - penalty);
+                    let queueing_time_in_deltas = inner.to_deltas(batch_propose_delay);
                     inner
                         .metrics
                         .queueing_time
@@ -318,6 +317,14 @@ where
                 }
             }
         }
+
+        inner.execution_queue.extend(
+            payloads
+                .iter()
+                .flat_map(|payload| payload.all())
+                .map(|batch_info| batch_info.digest.clone()),
+        );
+        inner.execute_prefix();
     }
 }
 
@@ -365,13 +372,13 @@ pub struct ToyDisseminationLayerProtocol<TI> {
     // The set of nodes that have stored this node's batch with the given sequence number.
     batch_stored_votes: DefaultBTreeMap<BatchId, BitVec>,
 
-    batch_created_time: DefaultBTreeMap<BatchId, Instant>,
-
     // Logging and metrics
     detailed_logging: bool,
     start_time: Instant,
     metrics: Metrics,
     batch_send_time: BTreeMap<BatchHash, Instant>,
+    batch_commit_time: BTreeMap<BatchHash, Instant>,
+    execution_queue: VecDeque<BatchHash>,
 }
 
 impl<TI> ToyDisseminationLayerProtocol<TI> {
@@ -423,11 +430,12 @@ where
             uncommitted_acs: BTreeMap::new(),
             uncommitted_uncertified_batches: BTreeSet::new(),
             batch_stored_votes: DefaultBTreeMap::new(BitVec::repeat(false, n_nodes)),
-            batch_created_time: DefaultBTreeMap::new(Instant::now()),
+            execution_queue: Default::default(),
             detailed_logging,
             start_time,
             metrics,
             batch_send_time: Default::default(),
+            batch_commit_time: Default::default(),
         }
     }
 
@@ -510,6 +518,27 @@ where
             }
         });
     }
+
+    fn execute_prefix(&mut self) {
+        let now = Instant::now();
+
+        while let Some(batch_digest) = self.execution_queue.pop_front() {
+            if !self.batches.contains_key(&batch_digest) {
+                break;
+            }
+
+            if let Some(&send_time) = self.batch_send_time.get(&batch_digest) {
+                self.metrics
+                    .batch_execute_time
+                    .push((now, self.to_deltas(now - send_time)));
+            }
+
+            self.metrics.fetch_wait_time_after_commit.push((
+                now,
+                self.to_deltas(now - self.batch_commit_time[&batch_digest]),
+            ));
+        }
+    }
 }
 
 impl<TI> Protocol for ToyDisseminationLayerProtocol<TI>
@@ -550,7 +579,6 @@ where
             ));
             ctx.multicast(Message::Batch(batch.clone())).await;
 
-            self.batch_created_time[batch_id] = Instant::now();
             self.my_batches.insert(batch_id, digest.clone());
             self.on_new_batch(batch, false, ctx).await;
 
@@ -666,6 +694,7 @@ where
             for batch in batches {
                 self.on_new_batch(batch, true, ctx).await;
             }
+            self.execute_prefix();
         };
 
         // Halting

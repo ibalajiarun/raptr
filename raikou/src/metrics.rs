@@ -1,5 +1,12 @@
-use std::{cmp, cmp::min, ops, sync::Arc};
-use tokio::sync::{Mutex, OwnedMutexGuard};
+// Copyright (c) Aptos Foundation
+// SPDX-License-Identifier: Apache-2.0
+
+use crate::metrics;
+use std::{cmp, cmp::min, ops, sync::Arc, time::Duration};
+use tokio::{
+    sync::{Mutex, OwnedMutexGuard},
+    time::Instant,
+};
 
 /// Allows async concurrent *unordered* metric recording.
 pub struct UnorderedBuilder<T> {
@@ -248,4 +255,29 @@ impl Metric<f64> {
         println!("     90%: {:.2}", self.quantile(0.90));
         println!("     max: {:.2}", self.max().unwrap());
     }
+}
+
+pub async fn display_metric(
+    name: &str,
+    explanation_string: &str,
+    metric: UnorderedBuilder<(Instant, f64)>,
+    start_time: Instant,
+    delta: f64,
+    warmup_period_in_delta: u32,
+) {
+    let trimmed_values = metric
+        .build()
+        .await
+        .filter(|&(timestamp, _)| {
+            timestamp >= start_time + Duration::from_secs_f64(delta) * warmup_period_in_delta
+        })
+        .map(|(_, latency)| latency)
+        .sort();
+    println!("{}:", name);
+    println!("------");
+    println!("{}", explanation_string);
+    println!("------");
+    trimmed_values.print_stats();
+    trimmed_values.show_histogram(30, 10);
+    println!();
 }

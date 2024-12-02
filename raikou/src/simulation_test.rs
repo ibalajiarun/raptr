@@ -769,7 +769,7 @@ async fn test_raikou(
                 txns_iter,
                 start_time,
                 node_id == monitored_node,
-                dissemination::native::Metrics {
+                dissemination::Metrics {
                     batch_commit_time: batch_commit_time_sender,
                     queueing_time: queueing_time_sender,
                     penalty_wait_time: penalty_wait_time_sender,

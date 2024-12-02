@@ -15,7 +15,7 @@ use crate::{
         dissemination::{
             penalty_tracker,
             penalty_tracker::{PenaltyTracker, PenaltyTrackerReports},
-            DisseminationLayer, Kill, NewQCWithPayload, ProposalReceived,
+            DisseminationLayer, Kill, Metrics, NewQCWithPayload, ProposalReceived,
         },
         types::*,
     },
@@ -144,20 +144,6 @@ pub struct Config {
     pub enable_penalty_tracker: bool,
     pub penalty_tracker_report_delay: Duration,
     pub n_sub_blocks: usize,
-}
-
-pub struct Metrics {
-    pub batch_commit_time: Option<metrics::UnorderedSender<(Instant, f64)>>,
-    pub batch_execute_time: Option<metrics::UnorderedSender<(Instant, f64)>>,
-    pub queueing_time: Option<metrics::UnorderedSender<(Instant, f64)>>,
-    pub penalty_wait_time: Option<metrics::UnorderedSender<(Instant, f64)>>,
-    pub fetch_wait_time_after_commit: Option<metrics::UnorderedSender<(Instant, f64)>>,
-    // pub average_penalty: Option<metrics::UnorderedSender<(Instant, f64)>>,
-    // pub total_committed_batches: Option<metrics::UnorderedSender<(Instant, usize)>>,
-    // pub two_chain_commit_batches: Option<metrics::UnorderedSender<(Instant, usize)>>,
-    // pub order_vote_committed_batches: Option<metrics::UnorderedSender<(Instant, usize)>>,
-    // pub committed_acs: Option<metrics::UnorderedSender<(Instant, usize)>>,
-    // pub optimistically_committed_batches: Option<metrics::UnorderedSender<(Instant, usize)>>,
 }
 
 #[derive(Clone)]

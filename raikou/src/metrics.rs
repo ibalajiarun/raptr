@@ -277,7 +277,14 @@ pub async fn display_metric(
     println!("------");
     println!("{}", explanation_string);
     println!("------");
-    trimmed_values.print_stats();
-    trimmed_values.show_histogram(30, 10);
+    if trimmed_values.data.len() < 100 {
+        println!(
+            "Not enough data. Number of data points: {}",
+            trimmed_values.data.len()
+        );
+    } else {
+        trimmed_values.print_stats();
+        trimmed_values.show_histogram(30, 10);
+    }
     println!();
 }

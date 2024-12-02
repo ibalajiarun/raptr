@@ -3,10 +3,12 @@
 
 use crate::{
     framework::{module_network::ModuleId, NamedAny, NodeId},
+    metrics,
     raikou::types::*,
 };
 use aptos_consensus_types::common::Author;
 use std::{collections::HashSet, future::Future};
+use tokio::time::Instant;
 
 #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
 pub mod native;
@@ -52,4 +54,18 @@ pub trait DisseminationLayer: Send + Sync + 'static {
     ) -> impl Future<Output = Prefix> + Send;
 
     fn notify_commit(&self, payloads: Vec<Payload>) -> impl Future<Output = ()> + Send;
+}
+
+pub struct Metrics {
+    pub batch_commit_time: Option<metrics::UnorderedSender<(Instant, f64)>>,
+    pub batch_execute_time: Option<metrics::UnorderedSender<(Instant, f64)>>,
+    pub queueing_time: Option<metrics::UnorderedSender<(Instant, f64)>>,
+    pub penalty_wait_time: Option<metrics::UnorderedSender<(Instant, f64)>>,
+    pub fetch_wait_time_after_commit: Option<metrics::UnorderedSender<(Instant, f64)>>,
+    // pub average_penalty: Option<metrics::UnorderedSender<(Instant, f64)>>,
+    // pub total_committed_batches: Option<metrics::UnorderedSender<(Instant, usize)>>,
+    // pub two_chain_commit_batches: Option<metrics::UnorderedSender<(Instant, usize)>>,
+    // pub order_vote_committed_batches: Option<metrics::UnorderedSender<(Instant, usize)>>,
+    // pub committed_acs: Option<metrics::UnorderedSender<(Instant, usize)>>,
+    // pub optimistically_committed_batches: Option<metrics::UnorderedSender<(Instant, usize)>>,
 }

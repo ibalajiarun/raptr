@@ -44,6 +44,7 @@ use raikou::{
         NodeId, Protocol,
     },
     metrics,
+    metrics::display_metric,
     raikou::{
         dissemination::{self, DisseminationLayer},
         types as raikou_types,
@@ -215,11 +216,24 @@ impl RaikouManager {
         let diss_module_network = module_network.register().await;
         let cons_module_network = module_network.register().await;
 
+        // Consensus metrics
         let mut block_consensus_latency = metrics::UnorderedBuilder::new();
         let mut batch_consensus_latency = metrics::UnorderedBuilder::new();
 
-        let block_consensus_latency_sender = Some(block_consensus_latency.new_sender());
-        let batch_consensus_latency_sender = Some(batch_consensus_latency.new_sender());
+        // Dissemination layer metrics
+        let mut batch_commit_time = metrics::UnorderedBuilder::new();
+        let mut batch_execute_time = metrics::UnorderedBuilder::new();
+        let mut queueing_time = metrics::UnorderedBuilder::new();
+        let mut penalty_wait_time = metrics::UnorderedBuilder::new();
+        let mut fetch_wait_time_after_commit = metrics::UnorderedBuilder::new();
+
+        let diss_metrics = dissemination::Metrics {
+            batch_commit_time: Some(batch_commit_time.new_sender()),
+            batch_execute_time: Some(batch_execute_time.new_sender()),
+            queueing_time: Some(queueing_time.new_sender()),
+            penalty_wait_time: Some(penalty_wait_time.new_sender()),
+            fetch_wait_time_after_commit: Some(fetch_wait_time_after_commit.new_sender()),
+        };
 
         #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
         let dissemination = Self::spawn_fake_dissemination_layer(
@@ -235,6 +249,7 @@ impl RaikouManager {
             validator_set,
             epoch_state.verifier.clone(),
             enable_optimistic_dissemination,
+            diss_metrics,
         )
         .await;
 
@@ -258,8 +273,8 @@ impl RaikouManager {
             raikou::raikou::Metrics {
                 // propose_time: propose_time_sender,
                 // enter_time: enter_time_sender,
-                block_consensus_latency: block_consensus_latency_sender,
-                batch_consensus_latency: batch_consensus_latency_sender,
+                block_consensus_latency: Some(block_consensus_latency.new_sender()),
+                batch_consensus_latency: Some(batch_consensus_latency.new_sender()),
                 // indirectly_committed_slots: indirectly_committed_slots_sender,
             },
             epoch_state.verifier.clone(),
@@ -269,6 +284,81 @@ impl RaikouManager {
 
         tokio::select! {
             Ok(ack_tx) = &mut shutdown_rx => {
+
+                // All data from the warmup period is discarded.
+                let warmup_period_in_delta = 50;
+
+                display_metric(
+                    "Fetch wait time after commit",
+                    "The duration from committing a block until being able to execute it, i.e.,\
+                    until we have the whole prefix of the chain fetched.",
+                    fetch_wait_time_after_commit,
+                    start_time,
+                    delta,
+                    warmup_period_in_delta,
+                )
+                .await;
+
+                display_metric(
+                    "Penalty system delay",
+                    "The penalties for optimistically committed batches. \
+                    Measured on the leader.",
+                    penalty_wait_time,
+                    start_time,
+                    delta,
+                    warmup_period_in_delta,
+                )
+                .await;
+
+                display_metric(
+                    "Optimistic batch queueing time",
+                    "The duration from when the batch is received by leader until the block \
+                    containing this batch is proposed. \
+                    Only measured if the block is committed. \
+                    Only measured for optimistically committed batches. \
+                    Measured on the leader.",
+                    queueing_time,
+                    start_time,
+                    delta,
+                    warmup_period_in_delta,
+                )
+                .await;
+
+                display_metric(
+                    "Batch consensus latency",
+                    "The duration from when the batch is included in a block until \
+                    the block is committed. \
+                    Measured on the leader.",
+                    batch_consensus_latency,
+                    start_time,
+                    delta,
+                    warmup_period_in_delta,
+                )
+                .await;
+
+                display_metric(
+                    "Batch commit time",
+                    "The duration from creating the batch until committing it. \
+                    After committing, we may have to wait for the data to be fetched. \
+                    Measured on the batch creator.",
+                    batch_commit_time,
+                    start_time,
+                    delta,
+                    warmup_period_in_delta,
+                )
+                .await;
+
+                display_metric(
+                    "Batch execute time (the end-to-end latency)",
+                    "The duration from creating the batch until executing it. \
+                    Measured on the batch creator.",
+                    batch_execute_time,
+                    start_time,
+                    delta,
+                    warmup_period_in_delta,
+                )
+                .await;
+
                 let _ = ack_tx.send(());
                 return;
             },
@@ -369,6 +459,7 @@ impl RaikouManager {
         validator_set: ValidatorSet,
         validator_verifier: Arc<ValidatorVerifier>,
         enable_optimistic_dissemination: bool,
+        metrics: dissemination::Metrics,
     ) -> impl DisseminationLayer {
         // let diss_network_service =
         //     RaikouDissNetworkService::new(epoch_state, diss_rx, network_sender);
@@ -428,12 +519,6 @@ impl RaikouManager {
 
         let diss_timer = LocalTimerService::new();
 
-        let mut batch_commit_time = metrics::UnorderedBuilder::new();
-        let mut batch_execute_time = metrics::UnorderedBuilder::new();
-        let mut queueing_time = metrics::UnorderedBuilder::new();
-        let mut penalty_wait_time = metrics::UnorderedBuilder::new();
-        let mut fetch_wait_time_after_commit = metrics::UnorderedBuilder::new();
-
         let dissemination = dissemination::native::NativeDisseminationLayer::new(
             node_id,
             dissemination::native::Config {
@@ -453,13 +538,7 @@ impl RaikouManager {
             std::iter::repeat_with(|| vec![]),
             start_time,
             true,
-            dissemination::native::Metrics {
-                batch_commit_time: Some(batch_commit_time.new_sender()),
-                batch_execute_time: Some(batch_execute_time.new_sender()),
-                queueing_time: Some(queueing_time.new_sender()),
-                penalty_wait_time: Some(penalty_wait_time.new_sender()),
-                fetch_wait_time_after_commit: Some(fetch_wait_time_after_commit.new_sender()),
-            },
+            metrics,
         );
 
         tokio::spawn(Protocol::run(

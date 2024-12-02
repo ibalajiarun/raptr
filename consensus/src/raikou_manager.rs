@@ -292,7 +292,7 @@ impl RaikouManager {
                 module_net.notify(cons_module_id, dissemination::Kill()).await;
 
                 // All data from the warmup period is discarded.
-                let warmup_period_in_delta = 50;
+                let warmup_period_in_delta = 10;
 
                 let mut metrics_output_buf = Vec::new();
 
@@ -559,7 +559,8 @@ impl RaikouManager {
                 delta: Duration::from_secs_f64(delta),
                 batch_interval: Duration::from_secs_f64(delta * 0.2),
                 enable_optimistic_dissemination,
-                enable_penalty_tracker: true,
+                // penalty tracker doesn't work with 0 delays
+                enable_penalty_tracker: false,
                 penalty_tracker_report_delay: Duration::from_secs_f64(delta * 5.),
                 n_sub_blocks: 7,
                 batch_fetch_multiplicity: std::cmp::min(2, n_nodes),

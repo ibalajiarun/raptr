@@ -215,6 +215,8 @@ impl RaikouManager {
         let mut module_network = ModuleNetwork::new();
         let diss_module_network = module_network.register().await;
         let cons_module_network = module_network.register().await;
+        let diss_module_id = diss_module_network.module_id();
+        let cons_module_id = cons_module_network.module_id();
 
         // Consensus metrics
         let mut block_consensus_latency = metrics::UnorderedBuilder::new();
@@ -285,9 +287,14 @@ impl RaikouManager {
         tokio::select! {
             Ok(ack_tx) = &mut shutdown_rx => {
 
+                // Notify the protocol to stop.
+                let module_net = module_network.register().await;
+                module_net.notify(cons_module_id, dissemination::Kill()).await;
+
                 // All data from the warmup period is discarded.
                 let warmup_period_in_delta = 50;
 
+                // Printing metrics, internally, will wait for the protocol to halt.
                 display_metric(
                     "Fetch wait time after commit",
                     "The duration from committing a block until being able to execute it, i.e.,\

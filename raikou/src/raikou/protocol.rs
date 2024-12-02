@@ -10,7 +10,7 @@ use crate::{
     raikou::{
         dissemination,
         dissemination::{
-            DisseminationLayer, FullBlockAvailable, NewQCWithPayload, ProposalReceived,
+            DisseminationLayer, FullBlockAvailable, Kill, NewQCWithPayload, ProposalReceived,
         },
         types::*,
     },
@@ -1154,9 +1154,17 @@ where
         };
 
         upon timer [TimerEvent::EndOfRun] {
-            self.log_detail("Halting".to_string());
-            ctx.notify(self.dissemination.module_id(), dissemination::Kill()).await;
+            self.log_detail("Halting by end-of-run timer".to_string());
+            ctx.notify(self.dissemination.module_id(), Kill()).await;
             ctx.halt();
+        };
+
+        upon event of type [Kill] from [_any_module] {
+            upon [Kill()] {
+                self.log_detail("Halting by Kill event".to_string());
+                ctx.notify(self.dissemination.module_id(), Kill()).await;
+                ctx.halt();
+            };
         };
 
         upon timer [TimerEvent::Status] {

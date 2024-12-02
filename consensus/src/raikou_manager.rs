@@ -429,11 +429,10 @@ impl RaikouManager {
         let diss_timer = LocalTimerService::new();
 
         let mut batch_commit_time = metrics::UnorderedBuilder::new();
+        let mut batch_execute_time = metrics::UnorderedBuilder::new();
         let mut queueing_time = metrics::UnorderedBuilder::new();
         let mut penalty_wait_time = metrics::UnorderedBuilder::new();
-        let batch_commit_time_sender = Some(batch_commit_time.new_sender());
-        let queueing_time_sender = Some(queueing_time.new_sender());
-        let penalty_wait_time_sender = Some(penalty_wait_time.new_sender());
+        let mut fetch_wait_time_after_commit = metrics::UnorderedBuilder::new();
 
         let dissemination = dissemination::native::NativeDisseminationLayer::new(
             node_id,
@@ -455,9 +454,11 @@ impl RaikouManager {
             start_time,
             true,
             dissemination::native::Metrics {
-                batch_commit_time: batch_commit_time_sender,
-                queueing_time: queueing_time_sender,
-                penalty_wait_time: penalty_wait_time_sender,
+                batch_commit_time: Some(batch_commit_time.new_sender()),
+                batch_execute_time: Some(batch_execute_time.new_sender()),
+                queueing_time: Some(queueing_time.new_sender()),
+                penalty_wait_time: Some(penalty_wait_time.new_sender()),
+                fetch_wait_time_after_commit: Some(fetch_wait_time_after_commit.new_sender()),
             },
         );
 

@@ -11,7 +11,7 @@ use crate::{
     },
     leader_schedule::round_robin,
     metrics, raikou,
-    raikou::{dissemination, dissemination::fake::FakeDisseminationLayer, RaikouNode},
+    raikou::{dissemination, dissemination::native::NativeDisseminationLayer, RaikouNode},
 };
 use aptos_crypto::bls12381::{PrivateKey, PublicKey};
 use aptos_types::{
@@ -652,7 +652,8 @@ async fn test_raikou(
         enable_commit_votes: true,
         status_interval: 10 * Duration::from_secs_f64(delta),
         round_sync_interval: Duration::from_secs_f64(delta * 15.),
-        block_fetch_multiplicity: 2,
+        block_fetch_multiplicity: std::cmp::min(2, n_nodes),
+        block_fetch_interval: Duration::from_secs_f64(delta) * 2,
     };
 
     let mut join_handles = Vec::new();
@@ -743,9 +744,9 @@ async fn test_raikou(
             let diss_module_network = module_network.register().await;
             let cons_module_network = module_network.register().await;
 
-            let dissemination = FakeDisseminationLayer::new(
+            let dissemination = NativeDisseminationLayer::new(
                 node_id,
-                dissemination::fake::Config {
+                dissemination::native::Config {
                     module_id: diss_module_network.module_id(),
                     n_nodes,
                     f,
@@ -756,11 +757,13 @@ async fn test_raikou(
                     enable_penalty_tracker: true,
                     penalty_tracker_report_delay: Duration::from_secs_f64(delta * 5.),
                     n_sub_blocks: 7,
+                    batch_fetch_multiplicity: std::cmp::min(2, n_nodes),
+                    batch_fetch_interval: Duration::from_secs_f64(delta) * 2,
                 },
                 txns_iter,
                 start_time,
                 node_id == monitored_node,
-                dissemination::fake::Metrics {
+                dissemination::native::Metrics {
                     batch_commit_time: batch_commit_time_sender,
                     queueing_time: queueing_time_sender,
                     penalty_wait_time: penalty_wait_time_sender,

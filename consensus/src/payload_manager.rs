@@ -63,7 +63,6 @@ pub trait TPayloadManager: Send + Sync {
     async fn wait_for_payload(
         &self,
         payload: &Payload,
-        signers: Option<&Vec<raikou::raikou::types::Prefix>>,
         block_author: Option<Author>,
         block_timestamp: u64,
         timeout: Duration,
@@ -452,7 +451,6 @@ impl TPayloadManager for QuorumStorePayloadManager {
     async fn wait_for_payload(
         &self,
         payload: &Payload,
-        opt_signers: Option<&Vec<raikou::raikou::types::Prefix>>,
         block_author: Option<Author>,
         block_timestamp: u64,
         timeout: Duration,
@@ -462,14 +460,7 @@ impl TPayloadManager for QuorumStorePayloadManager {
                 unreachable!("Only Raikou payload is supported");
             };
 
-            for (sub_block_id, sub_block) in payload.numbered_sub_blocks() {
-                let sub_block_signers: Option<BitVec> = opt_signers.map(|signers| {
-                    signers
-                        .iter()
-                        .map(|&prefix| prefix > sub_block_id)
-                        .collect()
-                });
-
+            for sub_block in payload.sub_blocks() {
                 // TODO: pass `sub_block_signers` to the helper.
                 process_payload_helper(
                     sub_block,

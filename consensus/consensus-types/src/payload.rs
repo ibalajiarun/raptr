@@ -292,6 +292,101 @@ impl OptQuorumStorePayloadV1 {
 
 pub type SubBlocks = Vec<BatchPointer<BatchInfo>>;
 
+pub type Prefix = usize;
+
+pub type PrefixSet = CompressedPrefixSet;
+
+#[derive(Clone, Hash, Serialize, Deserialize)]
+pub struct CompressedPrefixSet {
+    #[serde(with = "serde_bytes")]
+    repr: Vec<u8>,
+}
+
+impl CompressedPrefixSet {
+    pub fn new(votes: impl IntoIterator<Item = (usize, usize)>) -> Self {
+        let mut repr = vec![];
+
+        for (node_id, prefix) in votes {
+            assert!(prefix < 0xF);
+
+            let byte_id = node_id / 2;
+
+            while repr.len() < byte_id + 1 {
+                // Lazy initialization with 0xFF so that each half-byte is set to 0xF.
+                // 0xF is used as the special value indicating that the node is not a signer.
+                repr.push(0xFF);
+            }
+
+            if node_id % 2 == 0 {
+                // Least significant 4 bits are used for even node IDs.
+                // Keep most significant 4 bits, set least significant 4 bits to `prefix`.
+                repr[byte_id] = repr[byte_id] & 0xF0 | prefix as u8;
+            } else {
+                // Most significant 4 bits are used for odd node IDs.
+                // Keep least significant 4 bits, set most significant 4 bits to `prefix`.
+                repr[byte_id] = repr[byte_id] & 0x0F | ((prefix as u8) << 4);
+            }
+        }
+
+        CompressedPrefixSet { repr }
+    }
+
+    pub fn empty() -> Self {
+        Self { repr: vec![] }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (usize, Prefix)> + '_ {
+        self.repr
+            .iter()
+            .copied()
+            .enumerate()
+            .flat_map(|(byte_id, byte)| {
+                [
+                    // Least significant 4 bits are used for even node IDs.
+                    (byte_id * 2, (byte & 0x0F) as Prefix),
+                    // Most significant 4 bits are used for odd node IDs.
+                    (byte_id * 2 + 1, (byte >> 4) as Prefix),
+                ]
+            })
+            // 0xF is used as the special value indicating that the node is not a signer.
+            .filter(|(id, prefix)| *prefix != 0xF)
+    }
+
+    pub fn sub_block_signers(&self, sub_block: usize) -> Vec<usize> {
+        self.iter()
+            .filter(|(_, prefix)| *prefix >= sub_block)
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    pub fn prefix(&self, storage_requirement: usize) -> Prefix {
+        assert!(storage_requirement > 0, "storage_requirement cannot be 0");
+        let mut counts = [0; 16];
+
+        // Count the occurrences of each prefix.
+        for (_, prefix) in self.iter() {
+            counts[prefix] += 1;
+        }
+
+        // Iterate from the highest prefix downward, accumulating counts.
+        let mut total = 0;
+        for prefix in (0..=15).rev() {
+            total += counts[prefix];
+            if total >= storage_requirement {
+                return prefix;
+            }
+        }
+
+        panic!("Not enough votes in a PrefixSet. storage_requirement cannot exceed quorum size.");
+    }
+}
+
+impl FromIterator<(usize, usize)> for CompressedPrefixSet {
+    fn from_iter<T: IntoIterator<Item = (usize, usize)>>(iter: T) -> Self {
+        Self::new(iter)
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct RaikouPayload {
     data: Arc<RaikouPayloadData>,
@@ -547,5 +642,64 @@ impl fmt::Display for OptQuorumStorePayload {
             self.proofs.num_txns(),
             self.execution_limits,
         )
+    }
+}
+
+// Write tests for PrefixSet
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_prefix_set() {
+        let votes = vec![(0, 3), (2, 14), (5, 0)];
+        let prefix_set = PrefixSet::new(votes);
+        let mut iter = prefix_set.iter();
+        assert_eq!(iter.next(), Some((0, 3)));
+        assert_eq!(iter.next(), Some((2, 14)));
+        assert_eq!(iter.next(), Some((5, 0)));
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_compressed_prefix_set_prefix_too_large_1() {
+        let votes = vec![(0, 3), (2, 14), (5, 15)];
+        let _prefix_set = CompressedPrefixSet::new(votes);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_compressed_prefix_set_prefix_too_large_2() {
+        let votes = vec![(0, 3), (2, 14), (5, 24)];
+        let _prefix_set = CompressedPrefixSet::new(votes);
+    }
+
+    #[test]
+    fn test_sub_block_signers() {
+        let votes = vec![(0, 3), (2, 13), (5, 0)];
+        let prefix_set = PrefixSet::new(votes);
+        assert_eq!(prefix_set.sub_block_signers(3), vec![0, 2]);
+        assert_eq!(prefix_set.sub_block_signers(10), vec![2]);
+        assert_eq!(prefix_set.sub_block_signers(13), vec![2]);
+        assert_eq!(prefix_set.sub_block_signers(14), vec![] as Vec<usize>);
+        assert_eq!(prefix_set.sub_block_signers(0), vec![0, 2, 5]);
+    }
+
+    #[test]
+    fn test_prefix() {
+        let votes = vec![(0, 3), (2, 14), (5, 0)];
+        let prefix_set = PrefixSet::new(votes);
+        assert_eq!(prefix_set.prefix(1), 14);
+        assert_eq!(prefix_set.prefix(2), 3);
+        assert_eq!(prefix_set.prefix(3), 0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_prefix_panic() {
+        let votes = vec![(0, 3), (2, 14), (5, 0)];
+        let prefix_set = PrefixSet::new(votes);
+        prefix_set.prefix(4);
     }
 }

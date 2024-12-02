@@ -9,7 +9,7 @@ use aptos_consensus_types::common::Author;
 use std::{collections::HashSet, future::Future};
 
 #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
-pub mod fake; // pub mod multichain_raikou;
+pub mod native;
 
 #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
 pub mod penalty_tracker;
@@ -20,6 +20,11 @@ pub struct ProposalReceived {
     pub leader_account: Option<Author>,
     pub round: Round,
     pub payload: Payload,
+}
+
+pub struct NewQCWithPayload {
+    pub payload: Payload,
+    pub qc: QC,
 }
 
 /// Event sent by the consensus module to the dissemination layer to notify that it should stop.
@@ -46,9 +51,5 @@ pub trait DisseminationLayer: Send + Sync + 'static {
         cached_value: Prefix,
     ) -> impl Future<Output = Prefix> + Send;
 
-    fn notify_commit(
-        &self,
-        payloads: Vec<Payload>,
-        signers: Vec<Vec<Prefix>>,
-    ) -> impl Future<Output = ()> + Send;
+    fn notify_commit(&self, payloads: Vec<Payload>) -> impl Future<Output = ()> + Send;
 }

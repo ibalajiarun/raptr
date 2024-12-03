@@ -227,7 +227,7 @@ where
         validator_verifier: Arc<ValidatorVerifier>,
     ) {
         let data = &*buf;
-        if let Ok(msg) = bcs::from_bytes::<M>(&data[..msg_len]) {
+        if let Ok(mut msg) = bcs::from_bytes::<M>(&data[..msg_len]) {
             if let Ok(()) = msg.validate(&validator_verifier) {
                 tx.push(peer_id, (peer_id, msg)).unwrap();
             } else {

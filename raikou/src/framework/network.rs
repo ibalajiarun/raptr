@@ -9,7 +9,9 @@ use std::{future::Future, marker::PhantomData, task::Poll::Ready, time::Duration
 use tokio::sync::mpsc;
 
 pub trait Validate {
-    fn validate(&self, validator_verifier: &ValidatorVerifier) -> anyhow::Result<()>;
+    // `&mut self` is used because validation may populate untrusted fields
+    // such as the hash of the content.
+    fn validate(&mut self, validator_verifier: &ValidatorVerifier) -> anyhow::Result<()>;
 }
 
 pub trait NetworkSender: Send + Sync + 'static {

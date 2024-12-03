@@ -32,37 +32,12 @@ pub type BatchHash = HashValue;
 
 pub type BlockHash = HashValue;
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Block {
     #[serde(skip)]
-    pub digest: BlockHash,
+    pub digest: BlockHash, // Populated during the validation in `Block::validate`.
     pub data: BlockData,
     pub signature: Option<Signature>,
-}
-
-impl<'de> Deserialize<'de> for Block {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(rename = "Block")]
-        struct BlockWithoutId {
-            block_data: BlockData,
-            signature: Option<Signature>,
-        }
-
-        let BlockWithoutId {
-            block_data,
-            signature,
-        } = BlockWithoutId::deserialize(deserializer)?;
-
-        Ok(Block {
-            digest: block_data.hash(),
-            data: block_data,
-            signature,
-        })
-    }
 }
 
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
@@ -165,7 +140,9 @@ impl Block {
         }
     }
 
-    pub fn verify(&self, validator_verifier: &ValidatorVerifier) -> anyhow::Result<()> {
+    pub fn validate(&mut self, validator_verifier: &ValidatorVerifier) -> anyhow::Result<()> {
+        self.digest = self.data.hash();
+
         match &self.data.reason {
             RoundEnterReason::Genesis => Ok(()),
             _ => {

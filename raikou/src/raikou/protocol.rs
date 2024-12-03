@@ -75,10 +75,10 @@ impl Debug for Message {
 }
 
 impl Validate for Message {
-    fn validate(&self, validator_verifier: &ValidatorVerifier) -> anyhow::Result<()> {
+    fn validate(&mut self, validator_verifier: &ValidatorVerifier) -> anyhow::Result<()> {
         match self {
             Message::Propose(block) => {
-                block.verify(validator_verifier)?;
+                block.validate(validator_verifier)?;
             },
             Message::QcVote(vote_data, signature) => {
                 validator_verifier.verify(

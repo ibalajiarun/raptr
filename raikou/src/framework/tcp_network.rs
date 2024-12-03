@@ -338,7 +338,7 @@ where
             return Err(anyhow::anyhow!("Message size too large: {}", msg_size));
         }
         stream.read_exact(&mut buf[..msg_size]).await?;
-        let msg: M = bcs::from_bytes(&buf[..msg_size])?;
+        let mut msg: M = bcs::from_bytes(&buf[..msg_size])?;
         match msg.validate(&validator_verifier) {
             Ok(()) => Ok(msg),
             Err(err) => Err(anyhow::anyhow!(

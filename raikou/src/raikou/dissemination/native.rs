@@ -36,11 +36,11 @@ use std::{
 };
 use tokio::time::Instant;
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Batch {
     data: BatchData,
     #[serde(skip)]
-    digest: BatchHash,
+    digest: BatchHash, // Populated during the validation in `Batch::validate`.
 }
 
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
@@ -48,26 +48,6 @@ struct BatchData {
     author: NodeId,
     batch_id: BatchId,
     txns: Arc<Vec<Txn>>,
-}
-
-impl<'de> Deserialize<'de> for Batch {
-    fn deserialize<D>(deserializer: D) -> Result<Batch, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let data = BatchData::deserialize(deserializer)?;
-        let digest = data.hash();
-        Ok(Batch { data, digest })
-    }
-
-    fn deserialize_in_place<D>(deserializer: D, place: &mut Self) -> Result<(), D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        BatchData::deserialize_in_place(deserializer, &mut place.data)?;
-        place.digest = place.data.hash();
-        Ok(())
-    }
 }
 
 impl Batch {
@@ -89,6 +69,12 @@ impl Batch {
 
     pub fn txns(&self) -> &[Txn] {
         &self.data.txns
+    }
+
+    pub fn validate(&mut self, validator_verifier: &ValidatorVerifier) -> anyhow::Result<()> {
+        self.digest = self.data.hash();
+        // TODO: verify the author's signature.
+        Ok(())
     }
 }
 
@@ -118,8 +104,19 @@ impl std::fmt::Debug for Message {
 }
 
 impl Validate for Message {
-    fn validate(&self, validator_verifier: &ValidatorVerifier) -> anyhow::Result<()> {
-        // TODO: implement validation
+    fn validate(&mut self, validator_verifier: &ValidatorVerifier) -> anyhow::Result<()> {
+        // TODO
+        match self {
+            Message::Batch(batch) => {
+                batch.validate(validator_verifier)?;
+            },
+            Message::BatchStored(_) => {},
+            Message::AvailabilityCert(_) => {},
+            Message::Fetch(_) => {},
+            Message::FetchResp(_) => {},
+            Message::PenaltyTrackerReport(_, _) => {},
+        }
+
         Ok(())
     }
 }

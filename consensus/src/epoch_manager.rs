@@ -1354,7 +1354,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
         self.raikou_shutdown_tx = Some(raikou_shutdown_tx);
 
         let delta = 0.16;
-        let total_duration_in_delta = 1000;
+        let total_duration_in_delta = 200;
         let enable_optimistic_dissemination = true;
 
         tokio::spawn(bootstrapper.run(

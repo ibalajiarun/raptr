@@ -284,104 +284,110 @@ impl RaikouManager {
             // ordered_nodes_tx,
         )));
 
-        tokio::select! {
-            Ok(ack_tx) = &mut shutdown_rx => {
-                // Notify the protocol to stop.
-                let module_net = module_network.register().await;
-                module_net.notify(cons_module_id, dissemination::Kill()).await;
+        let print_metrics = async {
+            // Notify the protocol to stop.
+            let module_net = module_network.register().await;
+            module_net
+                .notify(cons_module_id, dissemination::Kill())
+                .await;
 
-                // All data from the warmup period is discarded.
-                let warmup_period_in_delta = 10;
+            // All data from the warmup period is discarded.
+            let warmup_period_in_delta = 50;
 
-                let mut metrics_output_buf = Vec::new();
+            let mut metrics_output_buf = Vec::new();
 
-                // Printing metrics, internally, will wait for the protocol to halt.
-                display_metric_to(
-                    &mut metrics_output_buf,
-                    "Fetch wait time after commit",
-                    "The duration from committing a block until being able to execute it, i.e.,\
+            // Printing metrics, internally, will wait for the protocol to halt.
+            display_metric_to(
+                &mut metrics_output_buf,
+                "Fetch wait time after commit",
+                "The duration from committing a block until being able to execute it, i.e.,\
                     until we have the whole prefix of the chain fetched.",
-                    fetch_wait_time_after_commit,
-                    start_time,
-                    delta,
-                    warmup_period_in_delta,
-                )
-                .await;
+                fetch_wait_time_after_commit,
+                start_time,
+                delta,
+                warmup_period_in_delta,
+            )
+            .await;
 
-                display_metric_to(
-                    &mut metrics_output_buf,
-                    "Penalty system delay",
-                    "The penalties for optimistically committed batches. \
+            display_metric_to(
+                &mut metrics_output_buf,
+                "Penalty system delay",
+                "The penalties for optimistically committed batches. \
                     Measured on the leader.",
-                    penalty_wait_time,
-                    start_time,
-                    delta,
-                    warmup_period_in_delta,
-                )
-                .await;
+                penalty_wait_time,
+                start_time,
+                delta,
+                warmup_period_in_delta,
+            )
+            .await;
 
-                display_metric_to(
-                    &mut metrics_output_buf,
-                    "Optimistic batch queueing time",
-                    "The duration from when the batch is received by leader until the block \
+            display_metric_to(
+                &mut metrics_output_buf,
+                "Optimistic batch queueing time",
+                "The duration from when the batch is received by leader until the block \
                     containing this batch is proposed. \
                     Only measured if the block is committed. \
                     Only measured for optimistically committed batches. \
                     Measured on the leader.",
-                    queueing_time,
-                    start_time,
-                    delta,
-                    warmup_period_in_delta,
-                )
-                .await;
+                queueing_time,
+                start_time,
+                delta,
+                warmup_period_in_delta,
+            )
+            .await;
 
-                display_metric_to(
-                    &mut metrics_output_buf,
-                    "Batch consensus latency",
-                    "The duration from when the batch is included in a block until \
+            display_metric_to(
+                &mut metrics_output_buf,
+                "Batch consensus latency",
+                "The duration from when the batch is included in a block until \
                     the block is committed. \
                     Measured on the leader.",
-                    batch_consensus_latency,
-                    start_time,
-                    delta,
-                    warmup_period_in_delta,
-                )
-                .await;
+                batch_consensus_latency,
+                start_time,
+                delta,
+                warmup_period_in_delta,
+            )
+            .await;
 
-                display_metric_to(
-                    &mut metrics_output_buf,
-                    "Batch commit time",
-                    "The duration from creating the batch until committing it. \
+            display_metric_to(
+                &mut metrics_output_buf,
+                "Batch commit time",
+                "The duration from creating the batch until committing it. \
                     After committing, we may have to wait for the data to be fetched. \
                     Measured on the batch creator.",
-                    batch_commit_time,
-                    start_time,
-                    delta,
-                    warmup_period_in_delta,
-                )
-                .await;
+                batch_commit_time,
+                start_time,
+                delta,
+                warmup_period_in_delta,
+            )
+            .await;
 
-                display_metric_to(
-                    &mut metrics_output_buf,
-                    "Batch execute time (the end-to-end latency)",
-                    "The duration from creating the batch until executing it. \
+            display_metric_to(
+                &mut metrics_output_buf,
+                "Batch execute time (the end-to-end latency)",
+                "The duration from creating the batch until executing it. \
                     Measured on the batch creator.",
-                    batch_execute_time,
-                    start_time,
-                    delta,
-                    warmup_period_in_delta,
-                )
-                .await;
+                batch_execute_time,
+                start_time,
+                delta,
+                warmup_period_in_delta,
+            )
+            .await;
 
-                aptos_logger::info!(
-                    "Metrics: {}",
-                    std::str::from_utf8(&metrics_output_buf).unwrap(),
-                );
+            aptos_logger::info!(
+                "Metrics: {}",
+                std::str::from_utf8(&metrics_output_buf).unwrap(),
+            );
+        };
 
+        tokio::select! {
+            Ok(ack_tx) = &mut shutdown_rx => {
+                print_metrics.await;
                 let _ = ack_tx.send(());
                 return;
             },
             _ = Protocol::run(node, node_id, network_service, cons_module_network, timer) => {
+                print_metrics.await;
                 unreachable!()
             },
         }

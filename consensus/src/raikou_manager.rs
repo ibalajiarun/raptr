@@ -191,6 +191,8 @@ impl RaikouManager {
                 streams_per_peer: 4,
             },
             epoch_state.verifier.clone(),
+            // 32MB max block size
+            32 * 1024 * 1024,
         )
         .await;
 
@@ -553,6 +555,7 @@ impl RaikouManager {
                 streams_per_peer: 4,
             },
             validator_verifier,
+            1 * 1024 * 1024,
         )
         .await;
 

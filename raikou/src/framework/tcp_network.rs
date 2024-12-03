@@ -23,8 +23,6 @@ use tokio::{
 };
 
 pub type MessageSizeTag = u32;
-pub const BUF_SIZE: usize = 32 * 1024;
-pub const MAX_MESSAGE_SIZE: usize = BUF_SIZE;
 
 pub const RETRY_MILLIS: u64 = 1000;
 
@@ -37,6 +35,7 @@ struct TcpNetworkSenderInner<M> {
     node_id: NodeId,
     self_send: aptos_channel::Sender<NodeId, (NodeId, M)>,
     streams: Vec<PeerStreams>,
+    max_message_size: usize,
 }
 
 impl<M> TcpNetworkSenderInner<M> {
@@ -105,7 +104,7 @@ where
 
             let data = Arc::new(bcs::to_bytes(&msg).unwrap());
 
-            if data.len() > MAX_MESSAGE_SIZE {
+            if data.len() > inner.max_message_size {
                 // Panicking because this is most likely caused by a bug in the code and needs
                 // to be discovered ASAP.
                 panic!("Trying to send a message that is too large: {}", data.len());
@@ -158,6 +157,7 @@ where
         addr: SocketAddr,
         config: Config,
         validator_verifier: Arc<ValidatorVerifier>,
+        max_message_size: usize,
     ) -> Self {
         aptos_logger::info!(
             "TCPNET: Starting TCP network service for node {} at {}",
@@ -173,6 +173,7 @@ where
             listener,
             self_send.clone(),
             validator_verifier,
+            max_message_size,
         ));
 
         let mut streams = Vec::new();
@@ -202,6 +203,7 @@ where
                     node_id,
                     self_send,
                     streams,
+                    max_message_size,
                 }),
             },
         }
@@ -250,6 +252,7 @@ where
         tcp_listener: TcpListener,
         self_send: aptos_channel::Sender<NodeId, (NodeId, M)>,
         validator_verifier: Arc<ValidatorVerifier>,
+        max_message_size: usize,
     ) {
         loop {
             let (stream, _) = tcp_listener.accept().await.unwrap();
@@ -257,6 +260,7 @@ where
                 stream,
                 self_send.clone(),
                 validator_verifier.clone(),
+                max_message_size,
             ));
         }
     }
@@ -265,8 +269,9 @@ where
         mut stream: TcpStream,
         self_send: aptos_channel::Sender<NodeId, (NodeId, M)>,
         validator_verifier: Arc<ValidatorVerifier>,
+        max_message_size: usize,
     ) {
-        let mut buf = [0; BUF_SIZE];
+        let mut buf = vec![0; max_message_size];
 
         stream
             .read_exact(&mut buf[..size_of::<NodeId>()])
@@ -275,7 +280,14 @@ where
         let peer_id = NodeId::from_be_bytes(buf[..size_of::<NodeId>()].try_into().unwrap());
 
         while !self_send.receiver_dropped() {
-            match Self::read_message(&mut stream, validator_verifier.clone(), &mut buf).await {
+            match Self::read_message(
+                &mut stream,
+                validator_verifier.clone(),
+                &mut buf,
+                max_message_size,
+            )
+            .await
+            {
                 Ok(msg) => {
                     if drop_injection() {
                         aptos_logger::info!("TCPNET: Dropping message from peer {}", peer_id);
@@ -313,7 +325,8 @@ where
     async fn read_message(
         stream: &mut TcpStream,
         validator_verifier: Arc<ValidatorVerifier>,
-        buf: &mut [u8; BUF_SIZE],
+        buf: &mut [u8],
+        max_message_size: usize,
     ) -> anyhow::Result<M> {
         stream
             .read_exact(&mut buf[..size_of::<MessageSizeTag>()])
@@ -321,7 +334,7 @@ where
         let msg_size =
             MessageSizeTag::from_be_bytes(buf[..size_of::<MessageSizeTag>()].try_into().unwrap())
                 as usize;
-        if msg_size > MAX_MESSAGE_SIZE {
+        if msg_size > max_message_size {
             return Err(anyhow::anyhow!("Message size too large: {}", msg_size));
         }
         stream.read_exact(&mut buf[..msg_size]).await?;

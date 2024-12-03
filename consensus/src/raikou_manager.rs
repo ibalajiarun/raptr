@@ -384,11 +384,9 @@ impl RaikouManager {
             Ok(ack_tx) = &mut shutdown_rx => {
                 print_metrics.await;
                 let _ = ack_tx.send(());
-                return;
             },
             _ = Protocol::run(node, node_id, network_service, cons_module_network, timer) => {
                 print_metrics.await;
-                unreachable!()
             },
         }
     }

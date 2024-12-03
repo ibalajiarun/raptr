@@ -274,7 +274,7 @@ where
             .unwrap();
         let peer_id = NodeId::from_be_bytes(buf[..size_of::<NodeId>()].try_into().unwrap());
 
-        loop {
+        while !self_send.receiver_dropped() {
             match Self::read_message(&mut stream, validator_verifier.clone(), &mut buf).await {
                 Ok(msg) => {
                     if drop_injection() {
@@ -286,10 +286,16 @@ where
                         let self_send = self_send.clone();
                         tokio::spawn(async move {
                             delay_injection().await;
-                            self_send.push(peer_id, (peer_id, msg)).unwrap();
+                            if self_send.push(peer_id, (peer_id, msg)).is_err() {
+                                // The receiver has been dropped.
+                                return;
+                            }
                         });
                     } else {
-                        self_send.push(peer_id, (peer_id, msg)).unwrap();
+                        if self_send.push(peer_id, (peer_id, msg)).is_err() {
+                            // The receiver has been dropped. Closing the stream.
+                            break;
+                        }
                     }
                 },
                 Err(err) => {

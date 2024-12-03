@@ -98,10 +98,10 @@ impl ModuleNetworkService {
 
 impl ModuleNetworkSender {
     pub async fn notify_boxed(&self, module: ModuleId, event: ModuleEvent) {
-        self.send.read().await[&module]
+        // Ignore errors if the receiver is gone.
+        let _res = self.send.read().await[&module]
             .send((self.module_id, event))
-            .await
-            .unwrap();
+            .await;
     }
 
     pub async fn notify<E: Send + 'static>(&self, module: ModuleId, event: E) {

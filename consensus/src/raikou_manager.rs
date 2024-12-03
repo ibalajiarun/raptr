@@ -300,14 +300,15 @@ impl RaikouManager {
             display_metric_to(
                 &mut metrics_output_buf,
                 "Fetch wait time after commit",
-                "The duration from committing a block until being able to execute it, i.e.,\
+                "The duration from committing a block until being able to execute it, i.e., \
                     until we have the whole prefix of the chain fetched.",
                 fetch_wait_time_after_commit,
                 start_time,
                 delta,
                 warmup_period_in_delta,
             )
-            .await;
+            .await
+            .unwrap();
 
             display_metric_to(
                 &mut metrics_output_buf,
@@ -319,7 +320,8 @@ impl RaikouManager {
                 delta,
                 warmup_period_in_delta,
             )
-            .await;
+            .await
+            .unwrap();
 
             display_metric_to(
                 &mut metrics_output_buf,
@@ -334,7 +336,8 @@ impl RaikouManager {
                 delta,
                 warmup_period_in_delta,
             )
-            .await;
+            .await
+            .unwrap();
 
             display_metric_to(
                 &mut metrics_output_buf,
@@ -347,7 +350,8 @@ impl RaikouManager {
                 delta,
                 warmup_period_in_delta,
             )
-            .await;
+            .await
+            .unwrap();
 
             display_metric_to(
                 &mut metrics_output_buf,
@@ -360,7 +364,8 @@ impl RaikouManager {
                 delta,
                 warmup_period_in_delta,
             )
-            .await;
+            .await
+            .unwrap();
 
             display_metric_to(
                 &mut metrics_output_buf,
@@ -372,10 +377,11 @@ impl RaikouManager {
                 delta,
                 warmup_period_in_delta,
             )
-            .await;
+            .await
+            .unwrap();
 
             aptos_logger::info!(
-                "Metrics: {}",
+                "Metrics: \n{}",
                 std::str::from_utf8(&metrics_output_buf).unwrap(),
             );
         };

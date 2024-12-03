@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::metrics;
-use std::{cmp, cmp::min, ops, sync::Arc, time::Duration};
+use std::{cmp, cmp::min, io, ops, sync::Arc, time::Duration};
 use tokio::{
     sync::{Mutex, OwnedMutexGuard},
     time::Instant,
@@ -190,7 +190,14 @@ impl Metric<f64> {
         self.variance().sqrt()
     }
 
-    pub fn show_histogram_range(&self, n_bins: usize, n_lines: usize, min: f64, max: f64) {
+    pub fn show_histogram_range_to(
+        &self,
+        writer: &mut impl io::Write,
+        n_bins: usize,
+        n_lines: usize,
+        min: f64,
+        max: f64,
+    ) -> io::Result<()> {
         let mut hist = vec![0; n_bins];
 
         let bin_width = (max - min) / n_bins as f64;
@@ -204,21 +211,22 @@ impl Metric<f64> {
         let line_range = max_count as f64 / n_lines as f64;
 
         // lines are numbered from bottom to top, but are traversed from top to bottom
-        println!("{:>6.0}", max_count as f64);
+        writeln!(writer, "{:>6.0}", max_count as f64)?;
         for line in (0..n_lines).rev() {
             let line_threshold = line as f64 * line_range;
-            print!("{:>6.0}  ", line_threshold);
+            write!(writer, "{:>6.0}  ", line_threshold)?;
             for bin in 0..n_bins {
-                print!(
+                write!(
+                    writer,
                     "{}",
                     if hist[bin] as f64 > line_threshold {
                         '#'
                     } else {
                         ' '
                     }
-                );
+                )?;
             }
-            println!();
+            writeln!(writer)?;
         }
 
         let min_str = format!("{:.2}", min);
@@ -226,39 +234,55 @@ impl Metric<f64> {
         if min_str.len() + max_str.len() + 3 < n_bins {
             // 8 spaces
             let n_spaces = n_bins - min_str.len() - max_str.len();
-            print!(
+            write!(
+                writer,
                 "{:8}{}{:n_spaces$}{}",
                 "",
                 min_str,
                 "",
                 max_str,
                 n_spaces = n_spaces
-            );
+            )?;
         }
-        println!();
+        writeln!(writer)?;
+
+        Ok(())
     }
 
     pub fn show_histogram(&self, n_bins: usize, n_lines: usize) {
-        let min = self.data.iter().copied().fold(f64::INFINITY, f64::min);
-        let max = self.data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        self.show_histogram_range(n_bins, n_lines, min, max);
+        self.show_histogram_to(&mut io::stdout(), n_bins, n_lines)
+            .unwrap();
     }
 
-    //
-    pub fn print_stats_to(&self, writer: &mut impl std::io::Write) {
-        writeln!(writer, " #points: {:.2}", self.len()).unwrap();
-        writeln!(writer, "    mean: {:.2}", self.mean()).unwrap();
-        writeln!(writer, " std dev: {:.2}", self.std_dev()).unwrap();
-        writeln!(writer, "     min: {:.2}", self.min().unwrap()).unwrap();
-        writeln!(writer, "     10%: {:.2}", self.quantile(0.10)).unwrap();
-        writeln!(writer, "     50%: {:.2}", self.median()).unwrap();
-        writeln!(writer, "     90%: {:.2}", self.quantile(0.90)).unwrap();
-        writeln!(writer, "     max: {:.2}", self.max().unwrap()).unwrap();
+    pub fn show_histogram_to(
+        &self,
+        writer: &mut impl io::Write,
+        n_bins: usize,
+        n_lines: usize,
+    ) -> io::Result<()> {
+        let min = self.data.iter().copied().fold(f64::INFINITY, f64::min);
+        let max = self.data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        self.show_histogram_range_to(writer, n_bins, n_lines, min, max)?;
+
+        Ok(())
+    }
+
+    pub fn print_stats_to(&self, writer: &mut impl io::Write) -> io::Result<()> {
+        writeln!(writer, " #points: {:.2}", self.len())?;
+        writeln!(writer, "    mean: {:.2}", self.mean())?;
+        writeln!(writer, " std dev: {:.2}", self.std_dev())?;
+        writeln!(writer, "     min: {:.2}", self.min().unwrap())?;
+        writeln!(writer, "     10%: {:.2}", self.quantile(0.10))?;
+        writeln!(writer, "     50%: {:.2}", self.median())?;
+        writeln!(writer, "     90%: {:.2}", self.quantile(0.90))?;
+        writeln!(writer, "     max: {:.2}", self.max().unwrap())?;
+
+        Ok(())
     }
 
     /// Prints the basic stats about the metric such as
     pub fn print_stats(&self) {
-        self.print_stats_to(&mut std::io::stdout());
+        self.print_stats_to(&mut io::stdout()).unwrap();
     }
 }
 
@@ -271,7 +295,7 @@ pub async fn display_metric(
     warmup_period_in_delta: u32,
 ) {
     display_metric_to(
-        &mut std::io::stdout(),
+        &mut io::stdout(),
         name,
         explanation_string,
         metric,
@@ -279,18 +303,19 @@ pub async fn display_metric(
         delta,
         warmup_period_in_delta,
     )
-    .await;
+    .await
+    .unwrap();
 }
 
 pub async fn display_metric_to(
-    writer: &mut impl std::io::Write,
+    writer: &mut impl io::Write,
     name: &str,
     explanation_string: &str,
     metric: UnorderedBuilder<(Instant, f64)>,
     start_time: Instant,
     delta: f64,
     warmup_period_in_delta: u32,
-) {
+) -> io::Result<()> {
     let trimmed_values = metric
         .build()
         .await
@@ -299,20 +324,21 @@ pub async fn display_metric_to(
         })
         .map(|(_, latency)| latency)
         .sort();
-    writeln!(writer, "{}:", name).unwrap();
-    writeln!(writer, "------").unwrap();
-    writeln!(writer, "{}", explanation_string).unwrap();
-    writeln!(writer, "------").unwrap();
+    writeln!(writer, "{}:", name)?;
+    writeln!(writer, "------")?;
+    writeln!(writer, "{}", explanation_string)?;
+    writeln!(writer, "------")?;
     if trimmed_values.data.len() < 100 {
         writeln!(
             writer,
             "Not enough data. Number of data points: {}",
             trimmed_values.data.len()
-        )
-        .unwrap();
+        )?;
     } else {
         trimmed_values.print_stats_to(writer);
-        trimmed_values.show_histogram(30, 10);
+        trimmed_values.show_histogram_to(writer, 30, 10);
     }
-    writeln!(writer).unwrap();
+    writeln!(writer)?;
+
+    Ok(())
 }

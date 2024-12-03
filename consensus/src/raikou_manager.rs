@@ -286,7 +286,6 @@ impl RaikouManager {
 
         tokio::select! {
             Ok(ack_tx) = &mut shutdown_rx => {
-
                 // Notify the protocol to stop.
                 let module_net = module_network.register().await;
                 module_net.notify(cons_module_id, dissemination::Kill()).await;

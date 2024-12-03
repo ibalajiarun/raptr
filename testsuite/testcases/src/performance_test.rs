@@ -130,15 +130,18 @@ async fn transaction(
     client: &aptos_rest_client::Client,
     txn_payload: Vec<u8>,
 ) -> anyhow::Result<()> {
-    let response = client
-        .post(client.build_path("submit_txn").unwrap())
-        .body(txn_payload)
-        .timeout(Duration::from_secs(120))
-        .send()
-        .await
-        .unwrap();
+    #[cfg(any(not(feature = "sim-types"), feature = "force-aptos-types"))]
+    {
+        let response = client
+            .post(client.build_path("submit_txn").unwrap())
+            .body(txn_payload)
+            .timeout(Duration::from_secs(120))
+            .send()
+            .await
+            .unwrap();
 
-    response.error_for_status().unwrap();
+        response.error_for_status().unwrap();
+    }
 
     Ok(())
 }

@@ -48,3 +48,7 @@ harness = false
 [[test]]
 name = "forge-local-performance"
 harness = false
+
+[features]
+sim-types = []
+force-aptos-types = []

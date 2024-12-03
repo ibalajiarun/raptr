@@ -42,4 +42,3 @@ sim-types = []
 force-aptos-types = []
 inject-delays = []
 inject-drops = []
-

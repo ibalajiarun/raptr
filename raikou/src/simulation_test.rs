@@ -755,6 +755,7 @@ async fn test_raikou(
                     status_interval: Duration::from_secs_f64(delta) * 10,
                 },
                 txns_iter,
+                cons_module_network.module_id(),
                 start_time,
                 node_id == monitored_node,
                 dissemination::Metrics {

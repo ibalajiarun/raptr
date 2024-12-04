@@ -254,6 +254,7 @@ impl RaikouManager {
             f,
             diss_module_network,
             delta,
+            cons_module_id,
             start_time,
             epoch_state.clone(),
             diss_rx,
@@ -497,6 +498,7 @@ impl RaikouManager {
         f: usize,
         diss_module_network: ModuleNetworkService,
         delta: f64,
+        consensus_module_id: ModuleId,
         start_time: Instant,
         epoch_state: Arc<EpochState>,
         diss_rx: aptos_channels::aptos_channel::Receiver<
@@ -598,6 +600,7 @@ impl RaikouManager {
                 status_interval: Duration::from_secs_f64(delta) * 10,
             },
             txns_iter,
+            consensus_module_id,
             start_time,
             true,
             metrics,

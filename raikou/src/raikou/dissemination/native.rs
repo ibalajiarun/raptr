@@ -17,7 +17,8 @@ use crate::{
         dissemination::{
             penalty_tracker,
             penalty_tracker::{PenaltyTracker, PenaltyTrackerReports},
-            DisseminationLayer, Kill, Metrics, NewQCWithPayload, ProposalReceived,
+            DisseminationLayer, FullBlockAvailable, Kill, Metrics, NewQCWithPayload,
+            ProposalReceived,
         },
         types::*,
     },
@@ -213,6 +214,7 @@ where
         node_id: NodeId,
         mut config: Config,
         txns_iter: TI,
+        consensus_module_id: ModuleId,
         start_time: Instant,
         detailed_logging: bool,
         metrics: Metrics,
@@ -233,6 +235,7 @@ where
                     node_id,
                     config,
                     txns_iter,
+                    consensus_module_id,
                     start_time,
                     detailed_logging,
                     metrics,
@@ -399,6 +402,12 @@ impl FetchTaskHandle {
     }
 }
 
+#[derive(Default)]
+struct CurrentProposalStatus {
+    round: Round,
+    missing_batches: HashSet<BatchHash>,
+}
+
 pub struct NativeDisseminationLayerProtocol<TI> {
     txns_iter: TI,
     config: Config,
@@ -421,6 +430,10 @@ pub struct NativeDisseminationLayerProtocol<TI> {
 
     // The set of nodes that have stored this node's batch with the given sequence number.
     batch_stored_votes: DefaultBTreeMap<BatchId, BitVec>,
+
+    // Tracking the missing batches in the current proposal.
+    current_proposal_status: CurrentProposalStatus,
+    consensus_module_id: ModuleId,
 
     // Crypto
     signer: Signer,
@@ -468,6 +481,7 @@ where
         node_id: NodeId,
         config: Config,
         txns_iter: TI,
+        consensus_module_id: ModuleId,
         start_time: Instant,
         detailed_logging: bool,
         metrics: Metrics,
@@ -494,6 +508,8 @@ where
             uncommitted_acs: BTreeMap::new(),
             uncommitted_uncertified_batches: BTreeSet::new(),
             batch_stored_votes: DefaultBTreeMap::new(BitVec::repeat(false, n_nodes)),
+            current_proposal_status: Default::default(),
+            consensus_module_id,
             execution_queue: Default::default(),
             detailed_logging,
             start_time,
@@ -512,6 +528,16 @@ where
 
         // NB: it may happen that the same batch is received multiple times.
         self.batches.insert(digest.clone(), batch);
+
+        if !self.current_proposal_status.missing_batches.is_empty() {
+            self.current_proposal_status.missing_batches.remove(&digest);
+            if self.current_proposal_status.missing_batches.is_empty() {
+                ctx.notify(self.consensus_module_id, FullBlockAvailable {
+                    round: self.current_proposal_status.round,
+                })
+                .await;
+            }
+        }
 
         if let Some(handle) = self.fetch_tasks.remove(&digest) {
             handle.kill();
@@ -718,7 +744,7 @@ where
             self.on_new_ac(ac, ctx).await;
         };
 
-        upon event of type [ProposalReceived] from [_any_module] {
+        upon event of type [ProposalReceived] from [consensus] {
             upon [ProposalReceived { leader, round, payload, .. }] {
                 for ac in payload.acs() {
                     if !self.uncommitted_acs.contains_key(&ac.info.digest)
@@ -735,9 +761,28 @@ where
                             leader,
                             round,
                             Instant::now(),
-                            payload,
+                            payload.clone(),
                         )
                     );
+                }
+
+                let missing_batches: HashSet<_> = payload
+                    .sub_blocks()
+                    .flatten()
+                    .filter(|batch_info| !self.batches.contains_key(&batch_info.digest))
+                    .map(|batch_info| batch_info.digest.clone())
+                    .collect();
+
+                if missing_batches.is_empty() {
+                    ctx.notify(
+                        self.consensus_module_id,
+                        FullBlockAvailable { round },
+                    ).await;
+                }
+
+                self.current_proposal_status = CurrentProposalStatus {
+                    round,
+                    missing_batches,
                 }
             };
         };

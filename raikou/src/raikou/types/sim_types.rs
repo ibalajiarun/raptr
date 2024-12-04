@@ -2,14 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    framework::NodeId,
-    raikou::types::{BatchHash, Prefix, Round},
+    framework::{crypto::Verifier, NodeId},
+    raikou::types::{BatchHash, Prefix, Round, N_SUB_BLOCKS},
 };
 use bitvec::prelude::BitVec;
 use serde::{Deserialize, Serialize};
 use siphasher::sip::SipHasher13;
 use std::{
-    fmt::Formatter,
+    fmt::{Debug, Formatter},
     hash::{Hash, Hasher},
     ops::Range,
     sync::Arc,
@@ -17,38 +17,6 @@ use std::{
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Txn();
-
-// Unsafe crypto, for simulation and testing purposes only.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct HashValue(pub u64);
-
-impl HashValue {
-    pub fn zero() -> Self {
-        Self(0)
-    }
-}
-
-impl std::fmt::LowerHex for HashValue {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-fn hasher() -> SipHasher13 {
-    SipHasher13::new_with_keys(13153606100881650582, 6006124427657524892)
-}
-
-pub fn hash(x: impl Hash) -> HashValue {
-    // This hashing is obviously not secure, but it's good enough for simulation purposes.
-    let mut hasher = hasher();
-    x.hash(&mut hasher);
-    HashValue(hasher.finish())
-}
-
-// TODO: add signatures to the protocol
-// pub struct Signature(NodeId, HashValue);
-// pub struct SignatureShare(NodeId, HashValue);
-// pub struct MultiSignature(BitVec, HashValue);
 
 pub type BatchId = i64;
 
@@ -99,45 +67,49 @@ impl AC {
 #[derive(Clone, Hash, Serialize, Deserialize)]
 pub struct Payload {
     round: Round,
-    leader: NodeId,
+    author: NodeId,
     data: Arc<PayloadData>,
     include_acs: bool,
     sub_blocks: Range<Prefix>,
 }
 
+impl Debug for Payload {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Payload")
+            .field("round", &self.round)
+            .field("author", &self.author)
+            .finish()
+    }
+}
+
 #[derive(Hash, Serialize, Deserialize)]
 struct PayloadData {
     acs: Vec<AC>,
-    batches: Vec<Vec<BatchInfo>>,
+    sub_blocks: [Vec<BatchInfo>; N_SUB_BLOCKS],
 }
 
 impl Payload {
     pub fn new(
         round: Round,
-        leader: NodeId,
+        author: NodeId,
         acs: Vec<AC>,
-        sub_blocks: Vec<Vec<BatchInfo>>,
+        sub_blocks: [Vec<BatchInfo>; N_SUB_BLOCKS],
     ) -> Self {
-        let n_sub_blocks = sub_blocks.len();
-
         Self {
             round,
-            leader,
-            data: Arc::new(PayloadData {
-                acs,
-                batches: sub_blocks,
-            }),
+            author,
+            data: Arc::new(PayloadData { acs, sub_blocks }),
             include_acs: true,
-            sub_blocks: 0..n_sub_blocks,
+            sub_blocks: 0..N_SUB_BLOCKS,
         }
     }
 
     pub fn with_prefix(&self, prefix: Prefix) -> Self {
-        assert!(prefix <= self.data.batches.len());
+        assert!(prefix <= self.data.sub_blocks.len());
 
         Self {
             round: self.round,
-            leader: self.leader,
+            author: self.author,
             data: self.data.clone(),
             include_acs: true,
             sub_blocks: 0..prefix,
@@ -145,11 +117,11 @@ impl Payload {
     }
 
     pub fn take_sub_blocks(&self, range: Range<Prefix>) -> Self {
-        assert!(range.end <= self.data.batches.len());
+        assert!(range.end <= self.data.sub_blocks.len());
 
         Self {
             round: self.round,
-            leader: self.leader,
+            author: self.author,
             data: self.data.clone(),
             include_acs: false,
             sub_blocks: range,
@@ -157,15 +129,16 @@ impl Payload {
     }
 
     pub fn empty(round: Round, leader: NodeId) -> Self {
-        Self::new(round, leader, vec![], vec![])
+        let sub_blocks: [Vec<BatchInfo>; N_SUB_BLOCKS] = Default::default();
+        Self::new(round, leader, vec![], sub_blocks)
     }
 
     pub fn round(&self) -> Round {
         self.round
     }
 
-    pub fn leader(&self) -> NodeId {
-        self.leader
+    pub fn author(&self) -> NodeId {
+        self.author
     }
 
     pub fn acs(&self) -> &Vec<AC> {
@@ -178,11 +151,11 @@ impl Payload {
     }
 
     pub fn sub_blocks(&self) -> impl ExactSizeIterator<Item = &Vec<BatchInfo>> {
-        (&self.data.batches[self.sub_blocks.clone()]).into_iter()
+        (&self.data.sub_blocks[self.sub_blocks.clone()]).into_iter()
     }
 
     pub fn sub_block(&self, index: usize) -> &Vec<BatchInfo> {
-        &self.data.batches[index]
+        &self.data.sub_blocks[index]
     }
 
     pub fn all(&self) -> impl Iterator<Item = &BatchInfo> {
@@ -190,5 +163,12 @@ impl Payload {
             .iter()
             .map(|ac| &ac.info)
             .chain(self.sub_blocks().flatten())
+    }
+
+    pub fn validate(&self, verifier: &Verifier) -> anyhow::Result<()> {
+        for ac in self.acs() {
+            // TODO: verify
+        }
+        Ok(())
     }
 }

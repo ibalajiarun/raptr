@@ -2,12 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    framework::{module_network::ModuleId, NamedAny, NodeId},
+    framework::{
+        module_network::{ModuleEventTrait, ModuleId},
+        NodeId,
+    },
     metrics,
     raikou::types::*,
 };
-use aptos_consensus_types::common::Author;
-use std::{collections::HashSet, future::Future};
+use std::{any::Any, collections::HashSet, fmt::Debug, future::Future};
 use tokio::time::Instant;
 
 #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
@@ -17,25 +19,52 @@ pub mod native;
 pub mod penalty_tracker;
 
 /// Event sent by the consensus module to the dissemination layer to notify of a new block.
+#[derive(Debug)]
 pub struct ProposalReceived {
     pub leader: NodeId,
-    pub leader_account: Option<Author>,
     pub round: Round,
     pub payload: Payload,
 }
 
+impl ModuleEventTrait for ProposalReceived {
+    fn as_any(self: Box<Self>) -> Box<dyn Any> {
+        self
+    }
+}
+
+#[derive(Debug)]
 pub struct NewQCWithPayload {
     pub payload: Payload,
     pub qc: QC,
 }
 
+impl ModuleEventTrait for NewQCWithPayload {
+    fn as_any(self: Box<Self>) -> Box<dyn Any> {
+        self
+    }
+}
+
 /// Event sent by the consensus module to the dissemination layer to notify that it should stop.
+#[derive(Debug)]
 pub struct Kill();
+
+impl ModuleEventTrait for Kill {
+    fn as_any(self: Box<Self>) -> Box<dyn Any> {
+        self
+    }
+}
 
 /// Event sent by the dissemination layer to the consensus module in response to `ProposalReceived`
 /// to notify that all data from the proposed block is available.
+#[derive(Debug)]
 pub struct FullBlockAvailable {
     pub round: Round,
+}
+
+impl ModuleEventTrait for FullBlockAvailable {
+    fn as_any(self: Box<Self>) -> Box<dyn Any> {
+        self
+    }
 }
 
 pub trait DisseminationLayer: Send + Sync + 'static {

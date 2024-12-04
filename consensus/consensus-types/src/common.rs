@@ -362,7 +362,7 @@ impl Payload {
             Payload::OptQuorumStore(opt_qs_payload) => {
                 opt_qs_payload.max_txns_to_execute().unwrap_or(u64::MAX)
             },
-            Payload::Raikou(raikou_payload) => u64::MAX,
+            Payload::Raikou(_raikou_payload) => u64::MAX,
         }
     }
 

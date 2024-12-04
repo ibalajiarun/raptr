@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    any::Any,
+    any::{Any, TypeId},
     collections::{btree_map::Entry, BTreeMap},
+    fmt::Debug,
     sync::Arc,
 };
 use tokio::sync::{mpsc, RwLock};
@@ -23,7 +24,25 @@ impl ModuleId {
     }
 }
 
-pub type ModuleEvent = Box<dyn Send + std::any::Any + 'static>;
+pub trait ModuleEventTrait: Any + Debug + Send + 'static {
+    fn debug_string(&self) -> String {
+        format!("{:?}", self)
+    }
+
+    fn event_type_id(&self) -> TypeId {
+        self.type_id()
+    }
+
+    // TODO: figure out if it's possible to add a default implementation for this method.
+    fn as_any(self: Box<Self>) -> Box<dyn Any>;
+}
+
+/// Fool-proof way to match event types.
+pub fn match_event_type<E: ModuleEventTrait>(event: &ModuleEvent) -> bool {
+    event.event_type_id() == TypeId::of::<E>()
+}
+
+pub type ModuleEvent = Box<dyn ModuleEventTrait>;
 
 pub struct ModuleNetwork {
     send: Arc<RwLock<BTreeMap<ModuleId, mpsc::Sender<(ModuleId, ModuleEvent)>>>>,
@@ -33,7 +52,7 @@ pub struct ModuleNetwork {
 impl ModuleNetwork {
     pub fn new() -> Self {
         ModuleNetwork {
-            send: Arc::new(tokio::sync::RwLock::new(BTreeMap::new())),
+            send: Arc::new(RwLock::new(BTreeMap::new())),
             next_id: ModuleId::first_dynamic(),
         }
     }
@@ -83,7 +102,7 @@ impl ModuleNetworkService {
         self.sender.notify_boxed(module, event).await;
     }
 
-    pub async fn notify<E: Send + 'static>(&self, module: ModuleId, event: E) {
+    pub async fn notify<E: ModuleEventTrait>(&self, module: ModuleId, event: E) {
         self.notify_boxed(module, Box::new(event)).await;
     }
 
@@ -104,7 +123,7 @@ impl ModuleNetworkSender {
             .await;
     }
 
-    pub async fn notify<E: Send + 'static>(&self, module: ModuleId, event: E) {
+    pub async fn notify<E: ModuleEventTrait>(&self, module: ModuleId, event: E) {
         self.notify_boxed(module, Box::new(event)).await;
     }
 }

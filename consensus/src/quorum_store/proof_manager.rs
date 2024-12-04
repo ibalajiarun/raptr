@@ -8,7 +8,7 @@ use crate::{
 };
 use aptos_consensus_types::{
     common::{Payload, PayloadFilter, ProofWithData, TxnSummaryWithExpiration},
-    payload::{OptQuorumStorePayload, PayloadExecutionLimit, RaikouPayload},
+    payload::{OptQuorumStorePayload, PayloadExecutionLimit, RaikouPayload, SubBlocks},
     proof_of_store::{BatchInfo, ProofOfStore, ProofOfStoreMsg},
     request_response::{GetPayloadCommand, GetPayloadResponse},
     utils::PayloadTxnsSize,
@@ -17,6 +17,7 @@ use aptos_logger::prelude::*;
 use aptos_types::PeerId;
 use futures::StreamExt;
 use futures_channel::mpsc::Receiver;
+use raikou::raikou::types::N_SUB_BLOCKS;
 use std::{cmp::min, collections::HashSet, sync::Arc, time::Duration};
 
 #[derive(Debug)]
@@ -183,10 +184,10 @@ impl ProofManager {
         counters::NUM_INLINE_TXNS.observe(inline_block_size.count() as f64);
 
         let response = if request.maybe_optqs_payload_pull_params.is_some() {
-            Payload::Raikou(RaikouPayload::new(
-                vec![opt_batches.into()], // TODO
-                proof_block.into(),
-            ))
+            let mut sub_blocks = SubBlocks::default();
+            sub_blocks[0] = opt_batches.into(); // TODO
+
+            Payload::Raikou(RaikouPayload::new(proof_block.into(), sub_blocks))
         } else if proof_block.is_empty() && inline_block.is_empty() {
             Payload::empty(true, self.allow_batches_without_pos_in_proposal)
         } else {

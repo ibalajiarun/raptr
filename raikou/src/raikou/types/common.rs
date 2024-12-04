@@ -2,18 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    framework::NodeId,
+    framework::{crypto::Verifier, NodeId},
     raikou::types::{BatchInfo, Payload, AC},
 };
-use aptos_consensus_types::common::Author;
-use aptos_crypto::{
-    bls12381::Signature, hash::CryptoHash, CryptoMaterialError, Genesis, HashValue,
-};
+use anyhow::Context;
+use aptos_crypto::{bls12381::Signature, hash::CryptoHash, Genesis, HashValue};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
-use aptos_types::{
-    aggregate_signature::AggregateSignature, validator_signer::ValidatorSigner,
-    validator_verifier::ValidatorVerifier,
-};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{
     cmp::Ordering,
@@ -32,63 +26,69 @@ pub type BatchHash = HashValue;
 
 pub type BlockHash = HashValue;
 
+// Must not exceed 14 due to the implementation of `PrefixSet`.
+pub const N_SUB_BLOCKS: Prefix = aptos_consensus_types::payload::N_SUB_BLOCKS;
+
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(from = "BlockSerialization")]
 pub struct Block {
-    #[serde(skip)]
-    pub digest: BlockHash, // Populated during the validation in `Block::validate`.
     pub data: BlockData,
-    pub signature: Option<Signature>,
+    pub signature: Signature,
+    #[serde(skip)]
+    pub digest: BlockHash,
+}
+
+#[derive(Deserialize)]
+struct BlockSerialization {
+    data: BlockData,
+    signature: Signature,
+}
+
+impl From<BlockSerialization> for Block {
+    fn from(serialized: BlockSerialization) -> Self {
+        Block::new(serialized.data, serialized.signature)
+    }
 }
 
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
 pub struct BlockData {
-    pub round: Round,
     pub payload: Payload,
-    pub parent_qc: Option<QC>, // `None` only for the genesis block.
-    pub author: Option<Author>,
+    pub parent_qc: QC,
     pub reason: RoundEnterReason,
 }
 
-impl BlockData {
-    pub fn sign(&self, signer: &ValidatorSigner) -> Result<Signature, CryptoMaterialError> {
-        signer.sign(self)
-    }
+#[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
+pub struct BlockSignatureData {
+    pub hash: BlockHash,
 }
 
 impl Block {
-    pub fn genesis() -> Self {
-        let data = BlockData {
-            round: 0,
-            payload: Payload::empty(-1, 999999999),
-            parent_qc: None,
-            author: None,
-            reason: RoundEnterReason::Genesis,
-        };
+    pub fn new(data: BlockData, signature: Signature) -> Self {
         Block {
             digest: data.hash(),
             data,
-            signature: None,
+            signature,
         }
     }
 
     pub fn round(&self) -> Round {
-        self.data.round
+        self.payload().round()
+    }
+
+    pub fn author(&self) -> NodeId {
+        self.payload().author()
     }
 
     pub fn payload(&self) -> &Payload {
         &self.data.payload
     }
 
-    pub fn parent_qc(&self) -> Option<&QC> {
-        self.data.parent_qc.as_ref()
+    pub fn parent_qc(&self) -> &QC {
+        &self.data.parent_qc
     }
 
     pub fn reason(&self) -> &RoundEnterReason {
         &self.data.reason
-    }
-
-    pub fn n_sub_blocks(&self) -> usize {
-        self.payload().sub_blocks().len()
     }
 
     pub fn acs(&self) -> &Vec<AC> {
@@ -103,270 +103,46 @@ impl Block {
         self.sub_blocks().nth(index).unwrap()
     }
 
-    pub fn is_genesis(&self) -> bool {
-        self.round() == 0
-    }
-
-    /// A non-genesis block is considered valid if:
-    /// 1. It contains a valid multi-signature (omitted in the prototype);
-    /// 2. It contains a valid parent QC;
-    /// 3. At least one of the three conditions hold:
-    ///    - `parent_qc.round == round - 1` and `parent_qc.is_full()`;
-    ///    - `cc` is not None, `cc.round == round - 1`, and `parent_qc.id() >= cc.highest_qc_id()`.
-    ///    - `tc` is not None, `cc.round == round - 1`, and `parent_qc.id() >= tc.highest_qc_id()`.
-    pub fn is_valid(&self) -> bool {
-        // TODO: add digest verification.
-
-        if self.is_genesis() {
-            return true;
+    pub fn validate(&self, verifier: &Verifier) -> anyhow::Result<()> {
+        if self.round() == 0 {
+            return Err(anyhow::anyhow!("Invalid Block round: 0"));
         }
 
-        let Some(parent_qc) = &self.parent_qc() else {
-            return false;
-        };
+        self.payload()
+            .validate(verifier)
+            .context("Error verifying payload")?;
+        self.parent_qc()
+            .validate(verifier)
+            .context("Error verifying parent_qc")?;
+        self.reason()
+            .validate(self.round(), &self.parent_qc(), verifier)
+            .context("Error verifying entry reason")?;
 
-        match &self.reason() {
-            RoundEnterReason::Genesis => false, // Should not be used in a non-genesis block.
-            RoundEnterReason::FullPrefixQC => {
-                parent_qc.common_data.round == self.round() - 1 && parent_qc.is_full()
-            },
-            RoundEnterReason::CC(cc) => {
-                cc.round == self.round() - 1 && parent_qc.sub_block_id() >= cc.highest_qc_id()
-            },
-            RoundEnterReason::TC(tc) => {
-                tc.timeout_round == self.round() - 1
-                    && parent_qc.sub_block_id() >= tc.highest_qc_id()
-            },
-        }
-    }
+        verifier
+            .verify(
+                self.author(),
+                &BlockSignatureData {
+                    hash: self.digest.clone(),
+                },
+                &self.signature,
+            )
+            .context("Error verifying author signature")?;
 
-    pub fn validate(&mut self, validator_verifier: &ValidatorVerifier) -> anyhow::Result<()> {
-        self.digest = self.data.hash();
-
-        match &self.data.reason {
-            RoundEnterReason::Genesis => Ok(()),
-            _ => {
-                let signature = self
-                    .signature
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("Missing signature"))?;
-                let author = self
-                    .data
-                    .author
-                    .ok_or_else(|| anyhow::anyhow!("Missing author"))?;
-                validator_verifier.verify(author, &self.data, &signature)?;
-                Ok(())
-            },
-        }
-    }
-}
-
-#[derive(
-    Clone, CryptoHasher, BCSCryptoHash, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize,
-)]
-pub struct CommonData {
-    pub round: Round,
-    pub hash: BlockHash,
-    pub size: BlockSize,
-}
-
-#[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
-pub struct VoteData {
-    // author of the vote
-    pub author: Author,
-    pub common_data: CommonData,
-    pub prefix: Prefix,
-}
-
-impl VoteData {
-    pub fn sign(&self, signer: &ValidatorSigner) -> Result<Signature, CryptoMaterialError> {
-        signer.sign(&self.signing_format())
-    }
-
-    pub fn signing_format(&self) -> VoteDataSigningRepr {
-        VoteDataSigningRepr {
-            common_data: self.common_data.clone(),
-            prefix: self.prefix,
-        }
-    }
-}
-
-#[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
-pub struct VoteDataSigningRepr {
-    pub common_data: CommonData,
-    pub prefix: Prefix,
-}
-
-#[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
-pub struct TimeoutData {
-    // author of the timeout
-    pub author: Author,
-    pub timeout_round: Round,
-    pub prefix: Prefix,
-    pub qc_high: QC,
-}
-
-impl TimeoutData {
-    pub fn sign(&self, signer: &ValidatorSigner) -> Result<Signature, CryptoMaterialError> {
-        signer.sign(&self.signing_format())
-    }
-
-    pub fn signing_format(&self) -> TimeoutDataSigningRepr {
-        TimeoutDataSigningRepr {
-            timeout_round: self.timeout_round,
-            common_data: self.qc_high.common_data.clone(),
-            prefix: self.prefix,
-        }
-    }
-}
-
-#[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
-pub struct TimeoutDataSigningRepr {
-    pub timeout_round: Round,
-    pub common_data: CommonData,
-    pub prefix: Prefix,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct AggregateSignatureWithPrefixes {
-    pub sig: AggregateSignature,
-    pub prefixes: PrefixSet,
-}
-
-impl AggregateSignatureWithPrefixes {
-    pub fn new(sig: AggregateSignature, prefixes: PrefixSet) -> Self {
-        assert_eq!(sig.get_num_voters(), prefixes.iter().count());
-        Self { sig, prefixes }
-    }
-
-    pub fn empty() -> Self {
-        Self {
-            sig: AggregateSignature::empty(),
-            prefixes: PrefixSet::empty(),
-        }
-    }
-
-    pub fn get_voters(&self, ordered_validator_addresses: &[Author]) -> Vec<Author> {
-        self.sig.get_signers_addresses(ordered_validator_addresses)
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct AggregateSignatureWithTimeouts {
-    sig: AggregateSignature,
-    timeouts: Vec<TimeoutDataSigningRepr>,
-}
-
-impl AggregateSignatureWithTimeouts {
-    pub fn new(sig: AggregateSignature, timeouts: Vec<TimeoutDataSigningRepr>) -> Self {
-        assert_eq!(sig.get_num_voters(), timeouts.len());
-        Self { sig, timeouts }
-    }
-
-    pub fn empty() -> Self {
-        Self {
-            sig: AggregateSignature::empty(),
-            timeouts: vec![],
-        }
-    }
-
-    pub fn get_voters(&self, ordered_validator_addresses: &[Author]) -> Vec<Author> {
-        self.sig.get_signers_addresses(ordered_validator_addresses)
-    }
-
-    pub fn max_vote(&self) -> SubBlockId {
-        self.timeouts
-            .iter()
-            .map(|timeout| (timeout.common_data.round, timeout.prefix))
-            .max()
-            .unwrap()
-            .into()
-    }
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct AggregateSignatureWithQCs {
-    sig: AggregateSignature,
-    qcs: Vec<QCSigningRepr>,
-}
-
-impl AggregateSignatureWithQCs {
-    pub fn new(sig: AggregateSignature, qcs: Vec<QCSigningRepr>) -> Self {
-        assert_eq!(sig.get_num_voters(), qcs.len());
-        Self { sig, qcs }
-    }
-
-    pub fn empty() -> Self {
-        Self {
-            sig: AggregateSignature::empty(),
-            qcs: vec![],
-        }
-    }
-
-    pub fn get_voters(&self, ordered_validator_addresses: &[Author]) -> Vec<Author> {
-        self.sig.get_signers_addresses(ordered_validator_addresses)
-    }
-
-    pub fn max_prefix(&self) -> Prefix {
-        self.qcs.iter().map(|qc| qc.prefix).max().unwrap()
-    }
-
-    pub fn min_prefix(&self) -> Prefix {
-        self.qcs.iter().map(|qc| qc.prefix).min().unwrap()
-    }
-}
-
-#[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
-pub struct QC {
-    pub common_data: CommonData,
-    pub prefix: Prefix,
-
-    // TODO: wrap in an Arc to avoid cloning?
-    pub signatures_with_prefixes: AggregateSignatureWithPrefixes,
-}
-
-impl QC {
-    pub fn signers(&self) -> impl Iterator<Item = NodeId> + '_ {
-        self.signatures_with_prefixes
-            .sig
-            .get_signers_bitvec()
-            .iter_ones()
-    }
-
-    pub fn verify(&self, validator_verifier: &ValidatorVerifier) -> anyhow::Result<()> {
-        let vote_datas: Vec<_> = self
-            .signatures_with_prefixes
-            .prefixes
-            .iter()
-            .map(|(_node_id, prefix)| VoteDataSigningRepr {
-                common_data: self.common_data.clone(),
-                prefix,
-            })
-            .collect();
-        let vote_datas_ref: Vec<_> = vote_datas.iter().collect();
-        validator_verifier
-            .verify_aggregate_signatures(&vote_datas_ref, &self.signatures_with_prefixes.sig)?;
         Ok(())
     }
 }
 
-impl QC {
-    pub fn sign(&self, signer: &ValidatorSigner) -> Result<Signature, CryptoMaterialError> {
-        signer.sign(&self.signing_format())
-    }
-
-    pub fn signing_format(&self) -> QCSigningRepr {
-        QCSigningRepr {
-            common_data: self.common_data.clone(),
-            prefix: self.prefix,
-        }
-    }
+#[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
+pub struct QcVoteSignatureData {
+    pub round: Round,
+    pub prefix: Prefix,
+    pub hash: BlockHash,
 }
 
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
-pub struct QCSigningRepr {
-    pub common_data: CommonData,
-    pub prefix: Prefix,
+pub struct TcVoteSignatureData {
+    pub timeout_round: Round,
+    pub qc_high_id: SubBlockId,
 }
 
 #[derive(
@@ -406,30 +182,92 @@ impl From<(Round, Prefix)> for SubBlockId {
     }
 }
 
+#[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
+pub struct QC {
+    pub round: Round,
+    pub prefix: Prefix,
+    pub hash: HashValue,
+    pub vote_prefixes: PrefixSet,
+    pub aggregated_signature: Option<Signature>, // `None` only for the genesis QC.
+}
+
+impl Debug for QC {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QC")
+            .field("round", &self.round)
+            .field("prefix", &self.prefix)
+            .finish()
+    }
+}
+
 impl QC {
     pub fn genesis() -> Self {
         QC {
-            common_data: CommonData {
-                round: 0,
-                hash: Block::genesis().digest,
-                size: 0,
-            },
-            prefix: 0,
-            // signature_data: QcSignatureData::new(&vec![], 0),
-            signatures_with_prefixes: AggregateSignatureWithPrefixes::empty(),
+            round: 0,
+            prefix: N_SUB_BLOCKS,
+            hash: HashValue::zero(),
+            vote_prefixes: PrefixSet::empty(),
+            aggregated_signature: None,
         }
     }
 
+    pub fn signer_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.vote_prefixes.node_ids()
+    }
+
     pub fn is_genesis(&self) -> bool {
-        self.common_data.round == 0
+        self.round == 0
     }
 
     pub fn is_full(&self) -> bool {
-        self.prefix == self.common_data.size
+        self.prefix == N_SUB_BLOCKS
     }
 
     pub fn sub_block_id(&self) -> SubBlockId {
-        (self.common_data.round, self.prefix).into()
+        (self.round, self.prefix).into()
+    }
+
+    fn validate_structure(&self) -> bool {
+        if self.is_genesis() {
+            return self.vote_prefixes.is_empty()
+                && self.hash == HashValue::zero()
+                && self.aggregated_signature.is_none();
+        }
+
+        if self.aggregated_signature.is_none() {
+            return false; // Non-genesis block without a signature.
+        }
+
+        // TODO: verify that `vote_data.len() >= quorum` and `prefix` is the S+1'st maximum.
+        //       The issue is that we would have to pass these parameters here from the config.
+
+        true
+    }
+
+    pub fn validate(&self, verifier: &Verifier) -> anyhow::Result<()> {
+        if !self.validate_structure() {
+            return Err(anyhow::anyhow!("Invalid QC structure"));
+        }
+
+        if self.is_genesis() {
+            return Ok(());
+        }
+
+        let sig_data: Vec<_> = self
+            .vote_prefixes
+            .prefixes()
+            .map(|prefix| QcVoteSignatureData {
+                round: self.round,
+                prefix,
+                hash: self.hash.clone(),
+            })
+            .collect();
+
+        verifier.verify_aggregate_signatures(
+            self.vote_prefixes.node_ids(),
+            sig_data.iter().collect(),
+            self.aggregated_signature.as_ref().unwrap(),
+        )
     }
 }
 
@@ -454,73 +292,59 @@ impl Ord for QC {
 }
 
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
-pub struct SignedQC {
-    pub qc: QC,
-    pub author: Author,
-    pub signature: Signature,
+#[serde(from = "CcSerialization")]
+pub struct CC {
+    round: Round,
+    hash: HashValue,
+    vote_prefixes: PrefixSet,
+    aggregated_signature: Signature,
+
+    #[serde(skip)]
+    min_prefix: Prefix,
+    #[serde(skip)]
+    max_prefix: Prefix,
 }
 
-impl SignedQC {
-    pub fn new(qc: QC, author: Author, signature: Signature) -> Self {
-        Self {
-            qc,
-            author,
-            signature,
-        }
-    }
+#[derive(Deserialize)]
+struct CcSerialization {
+    round: Round,
+    hash: HashValue,
+    vote_prefixes: PrefixSet,
+    aggregated_signature: Signature,
 }
 
-impl PartialEq for SignedQC {
-    fn eq(&self, other: &Self) -> bool {
-        self.qc.sub_block_id() == other.qc.sub_block_id()
-    }
-}
-
-impl Eq for SignedQC {}
-
-impl PartialOrd for SignedQC {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.qc.sub_block_id().partial_cmp(&other.qc.sub_block_id())
-    }
-}
-
-impl Ord for SignedQC {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.qc.sub_block_id().cmp(&other.qc.sub_block_id())
+impl From<CcSerialization> for CC {
+    fn from(serialized: CcSerialization) -> Self {
+        CC::new(
+            serialized.round,
+            serialized.hash,
+            serialized.vote_prefixes,
+            serialized.aggregated_signature,
+        )
     }
 }
 
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
-pub struct CC {
-    round: Round,
-    min_prefix: Prefix,
-    max_prefix: Prefix,
-
-    // TODO: wrap in an Arc to avoid cloning?
-    signatures_with_qcs: AggregateSignatureWithQCs,
+pub struct CcVoteSignatureData {
+    pub round: Round,
+    pub hash: BlockHash,
+    pub prefix: Prefix,
 }
 
 impl CC {
     pub fn new(
         round: Round,
-        min_prefix: Prefix,
-        max_prefix: Prefix,
-        signatures_with_qcs: AggregateSignatureWithQCs,
+        hash: BlockHash,
+        vote_prefixes: PrefixSet,
+        aggregated_signature: Signature,
     ) -> Self {
         CC {
             round,
-            min_prefix,
-            max_prefix,
-            signatures_with_qcs,
-        }
-    }
-
-    pub fn genesis() -> Self {
-        CC {
-            round: 0,
-            min_prefix: 0,
-            max_prefix: 0,
-            signatures_with_qcs: AggregateSignatureWithQCs::empty(),
+            hash,
+            aggregated_signature,
+            min_prefix: vote_prefixes.prefixes().min().unwrap(),
+            max_prefix: vote_prefixes.prefixes().max().unwrap(),
+            vote_prefixes,
         }
     }
 
@@ -532,40 +356,68 @@ impl CC {
         (self.round, self.max_prefix).into()
     }
 
-    pub fn verify(&self, validator_verifier: &ValidatorVerifier) -> anyhow::Result<()> {
-        let qcs_ref: Vec<_> = self.signatures_with_qcs.qcs.iter().collect();
-        validator_verifier.verify_aggregate_signatures(&qcs_ref, &self.signatures_with_qcs.sig)?;
-        Ok(())
+    pub fn validate(&self, verifier: &Verifier) -> anyhow::Result<()> {
+        let sig_data: Vec<_> = self
+            .vote_prefixes
+            .prefixes()
+            .map(|prefix| CcVoteSignatureData {
+                round: self.round,
+                prefix,
+                hash: self.hash,
+            })
+            .collect();
+
+        verifier.verify_aggregate_signatures(
+            self.vote_prefixes.node_ids(),
+            sig_data.iter().collect(),
+            &self.aggregated_signature,
+        )
     }
 }
 
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
+#[serde(from = "TcSerialization")]
 pub struct TC {
     timeout_round: Round,
-    max_vote: SubBlockId,
+    vote_data: Vec<(NodeId, SubBlockId)>,
+    aggregated_signature: Signature,
 
-    // TODO: wrap in an Arc to avoid cloning?
-    signatures_with_timeouts: AggregateSignatureWithTimeouts,
+    #[serde(skip)]
+    max_vote: SubBlockId,
+}
+
+#[derive(Deserialize)]
+struct TcSerialization {
+    timeout_round: Round,
+    vote_data: Vec<(NodeId, SubBlockId)>,
+    aggregated_signature: Signature,
+}
+
+impl From<TcSerialization> for TC {
+    fn from(serialized: TcSerialization) -> Self {
+        TC::new(
+            serialized.timeout_round,
+            serialized.vote_data,
+            serialized.aggregated_signature,
+        )
+    }
 }
 
 impl TC {
-    pub fn genesis() -> Self {
-        TC {
-            timeout_round: 0,
-            max_vote: (0, 0).into(),
-            signatures_with_timeouts: AggregateSignatureWithTimeouts::empty(),
-        }
-    }
-
     pub fn new(
         timeout_round: Round,
-        max_vote: SubBlockId,
-        signatures_with_timeouts: AggregateSignatureWithTimeouts,
+        vote_data: Vec<(NodeId, SubBlockId)>,
+        aggregated_signature: Signature,
     ) -> Self {
         TC {
             timeout_round,
-            max_vote,
-            signatures_with_timeouts,
+            max_vote: vote_data
+                .iter()
+                .map(|(_, qc_high_id)| *qc_high_id)
+                .max()
+                .unwrap(),
+            vote_data,
+            aggregated_signature,
         }
     }
 
@@ -573,11 +425,21 @@ impl TC {
         self.max_vote
     }
 
-    pub fn verify(&self, validator_verifier: &ValidatorVerifier) -> anyhow::Result<()> {
-        let timeout_data_ref: Vec<_> = self.signatures_with_timeouts.timeouts.iter().collect();
-        validator_verifier
-            .verify_aggregate_signatures(&timeout_data_ref, &self.signatures_with_timeouts.sig)?;
-        Ok(())
+    pub fn validate(&self, verifier: &Verifier) -> anyhow::Result<()> {
+        let sig_data: Vec<_> = self
+            .vote_data
+            .iter()
+            .map(|(node_id, qc_high_id)| TcVoteSignatureData {
+                timeout_round: self.timeout_round,
+                qc_high_id: *qc_high_id,
+            })
+            .collect();
+
+        verifier.verify_aggregate_signatures(
+            self.vote_data.iter().map(|(node_id, _)| *node_id),
+            sig_data.iter().collect(),
+            &self.aggregated_signature,
+        )
     }
 }
 
@@ -601,5 +463,37 @@ impl Debug for RoundEnterReason {
             RoundEnterReason::CC(cc) => write!(f, "CC({})", cc.round),
             RoundEnterReason::TC(tc) => write!(f, "TC({})", tc.timeout_round),
         }
+    }
+}
+
+impl RoundEnterReason {
+    pub fn validate(&self, round: Round, qc: &QC, verifier: &Verifier) -> anyhow::Result<()> {
+        match self {
+            RoundEnterReason::Genesis => {
+                if round != 0 {
+                    return Err(anyhow::anyhow!("Invalid Genesis entry reason"));
+                }
+            },
+            RoundEnterReason::FullPrefixQC => {
+                if !(qc.round == round - 1 && qc.is_full()) {
+                    return Err(anyhow::anyhow!("Invalid FullPrefixQC entry reason"));
+                }
+                qc.validate(verifier)?;
+            },
+            RoundEnterReason::CC(cc) => {
+                if !(cc.round == round - 1 && qc.sub_block_id() >= cc.highest_qc_id()) {
+                    return Err(anyhow::anyhow!("Invalid CC entry reason"));
+                }
+                cc.validate(verifier)?;
+            },
+            RoundEnterReason::TC(tc) => {
+                if !(tc.timeout_round == round - 1 && qc.sub_block_id() >= tc.highest_qc_id()) {
+                    return Err(anyhow::anyhow!("Invalid TC entry reason"));
+                }
+                tc.validate(verifier)?;
+            },
+        }
+
+        Ok(())
     }
 }

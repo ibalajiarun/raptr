@@ -335,8 +335,8 @@ pub async fn display_metric_to(
             trimmed_values.data.len()
         )?;
     } else {
-        trimmed_values.print_stats_to(writer);
-        trimmed_values.show_histogram_to(writer, 30, 10);
+        trimmed_values.print_stats_to(writer)?;
+        trimmed_values.show_histogram_to(writer, 30, 10)?;
     }
     writeln!(writer)?;
 

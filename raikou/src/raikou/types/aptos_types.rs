@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
+    framework,
     framework::NodeId,
     raikou::types::common::{Prefix, Round},
 };
@@ -11,7 +12,7 @@ use aptos_crypto::hash::{CryptoHash, CryptoHasher};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use std::ops::Range;
+use std::{fmt::Debug, ops::Range};
 
 pub type Txn = aptos_types::transaction::Transaction;
 pub type AC = aptos_consensus_types::proof_of_store::ProofOfStore;
@@ -19,8 +20,17 @@ pub type AC = aptos_consensus_types::proof_of_store::ProofOfStore;
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
 pub struct Payload {
     round: Round,
-    leader: NodeId,
+    author: NodeId,
     pub inner: aptos_consensus_types::common::Payload,
+}
+
+impl Debug for Payload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Payload")
+            .field("round", &self.round)
+            .field("author", &self.author)
+            .finish()
+    }
 }
 
 pub fn hash(x: &impl CryptoHash) -> HashValue {
@@ -36,16 +46,20 @@ impl Payload {
     ) -> Self {
         Self {
             round,
-            leader,
+            author: leader,
             inner,
         }
+    }
+
+    pub fn author(&self) -> NodeId {
+        self.author
     }
 
     /// Return a truncated payload that contains only `prefix` of the sub-blocks.
     pub fn with_prefix(&self, prefix: Prefix) -> Self {
         Self {
             round: self.round,
-            leader: self.leader,
+            author: self.author,
             inner: self.inner.as_raikou_payload().with_prefix(prefix).into(),
         }
     }
@@ -55,7 +69,7 @@ impl Payload {
     pub fn take_sub_blocks(&self, range: Range<Prefix>) -> Self {
         Self {
             round: self.round,
-            leader: self.leader,
+            author: self.author,
             inner: self.inner.as_raikou_payload().take_sub_blocks(range).into(),
         }
     }
@@ -75,7 +89,7 @@ impl Payload {
     }
 
     pub fn leader(&self) -> NodeId {
-        self.leader
+        self.author
     }
 
     pub fn acs(&self) -> &Vec<AC> {
@@ -95,5 +109,10 @@ impl Payload {
             .iter()
             .map(|ac| ac.info())
             .chain(self.sub_blocks().flatten())
+    }
+
+    pub fn validate(&self, verifier: &framework::crypto::Verifier) -> anyhow::Result<()> {
+        // TODO
+        Ok(())
     }
 }

@@ -2,12 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::framework::{
+    crypto::{Signer, Verifier},
     injection::{delay_injection, drop_injection},
-    network::{NetworkSender, NetworkService, Validate},
+    network::{NetworkMessage, NetworkSender, NetworkService, Sign, Validate},
     NodeId,
 };
+use anyhow::Context;
 use aptos_channels::{aptos_channel, message_queues::QueueStyle};
-use aptos_types::validator_verifier::ValidatorVerifier;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -35,6 +36,7 @@ struct TcpNetworkSenderInner<M> {
     node_id: NodeId,
     self_send: aptos_channel::Sender<NodeId, (NodeId, M)>,
     streams: Vec<PeerStreams>,
+    signer: Signer,
     max_message_size: usize,
 }
 
@@ -84,17 +86,19 @@ async fn send_msg_to_stream(
     Ok(())
 }
 
-impl<M> NetworkSender for TcpNetworkSender<M>
+impl<M: NetworkMessage> NetworkSender for TcpNetworkSender<M>
 where
-    M: Send + Sync + 'static + Serialize + for<'de> Deserialize<'de> + Validate + std::fmt::Debug,
+    M: NetworkMessage + Serialize + for<'de> Deserialize<'de> + std::fmt::Debug,
 {
     type Message = M;
 
-    async fn send(&self, msg: Self::Message, targets: Vec<NodeId>) {
+    async fn send(&self, mut msg: Self::Message, targets: Vec<NodeId>) {
         let inner = self.inner.clone();
 
         tokio::spawn(async move {
-            let targets: Vec<NodeId> = targets.into_iter().collect();
+            if let Err(err) = msg.sign(&inner.signer) {
+                panic!("TCPNET: Failed to sign message: {:#}", err);
+            }
 
             // Avoid serializing the message if we are sending the message only to ourselves.
             if targets.len() == 1 && targets[0] == inner.node_id {
@@ -128,7 +132,7 @@ where
 
                     if let Err(err) = send_msg_to_stream(data, stream).await {
                         aptos_logger::error!(
-                            "TCPNET: Failed to send message to peer {}: {}",
+                            "TCPNET: Failed to send message to peer {}: {:#}",
                             peer_id,
                             err,
                         );
@@ -150,13 +154,14 @@ pub struct TcpNetworkService<M> {
 
 impl<M> TcpNetworkService<M>
 where
-    M: Send + Sync + 'static + Serialize + for<'de> Deserialize<'de> + Validate + std::fmt::Debug,
+    M: NetworkMessage + Serialize + for<'de> Deserialize<'de> + std::fmt::Debug,
 {
     pub async fn new(
         node_id: NodeId,
         addr: SocketAddr,
         config: Config,
-        validator_verifier: Arc<ValidatorVerifier>,
+        signer: Signer,
+        verifier: Verifier,
         max_message_size: usize,
     ) -> Self {
         aptos_logger::info!(
@@ -172,7 +177,7 @@ where
         tokio::spawn(Self::listen_loop(
             listener,
             self_send.clone(),
-            validator_verifier,
+            verifier,
             max_message_size,
         ));
 
@@ -203,6 +208,7 @@ where
                     node_id,
                     self_send,
                     streams,
+                    signer,
                     max_message_size,
                 }),
             },
@@ -251,7 +257,7 @@ where
     async fn listen_loop(
         tcp_listener: TcpListener,
         self_send: aptos_channel::Sender<NodeId, (NodeId, M)>,
-        validator_verifier: Arc<ValidatorVerifier>,
+        validator_verifier: Verifier,
         max_message_size: usize,
     ) {
         loop {
@@ -268,7 +274,7 @@ where
     async fn listen_stream(
         mut stream: TcpStream,
         self_send: aptos_channel::Sender<NodeId, (NodeId, M)>,
-        validator_verifier: Arc<ValidatorVerifier>,
+        validator_verifier: Verifier,
         max_message_size: usize,
     ) {
         let mut buf = vec![0; max_message_size];
@@ -277,11 +283,15 @@ where
             .read_exact(&mut buf[..size_of::<NodeId>()])
             .await
             .unwrap();
+
+        // FIXME: this is not Byzantine fault tolerant.
+        // TODO: add authentication.
         let peer_id = NodeId::from_be_bytes(buf[..size_of::<NodeId>()].try_into().unwrap());
 
         while !self_send.receiver_dropped() {
-            match Self::read_message(
+            match Self::read_and_validate_message(
                 &mut stream,
+                peer_id,
                 validator_verifier.clone(),
                 &mut buf,
                 max_message_size,
@@ -312,7 +322,7 @@ where
                 },
                 Err(err) => {
                     aptos_logger::error!(
-                        "TCPNET: Failed to read message from peer {}, closing the stream: {}",
+                        "TCPNET: Failed to read message from peer {}, closing the stream: {:#}",
                         peer_id,
                         err
                     );
@@ -322,37 +332,42 @@ where
         }
     }
 
-    async fn read_message(
+    async fn read_and_validate_message(
         stream: &mut TcpStream,
-        validator_verifier: Arc<ValidatorVerifier>,
+        peer_id: NodeId,
+        validator_verifier: Verifier,
         buf: &mut [u8],
         max_message_size: usize,
     ) -> anyhow::Result<M> {
+        // Read and check the message size tag.
         stream
             .read_exact(&mut buf[..size_of::<MessageSizeTag>()])
-            .await?;
+            .await
+            .context("Error reading the message size tag")?;
         let msg_size =
             MessageSizeTag::from_be_bytes(buf[..size_of::<MessageSizeTag>()].try_into().unwrap())
                 as usize;
         if msg_size > max_message_size {
             return Err(anyhow::anyhow!("Message size too large: {}", msg_size));
         }
-        stream.read_exact(&mut buf[..msg_size]).await?;
-        let mut msg: M = bcs::from_bytes(&buf[..msg_size])?;
-        match msg.validate(&validator_verifier) {
-            Ok(()) => Ok(msg),
-            Err(err) => Err(anyhow::anyhow!(
-                "Failed to validate message {:?} due to error {}",
-                msg,
-                err
-            )),
-        }
+
+        // Read the message, deserialize it, and validate it.
+        stream
+            .read_exact(&mut buf[..msg_size])
+            .await
+            .context("Error reading the message")?;
+        let msg: M =
+            bcs::from_bytes(&buf[..msg_size]).context("Error deserializing the message")?;
+        msg.validate(peer_id, &validator_verifier)
+            .context("Error validating the message")?;
+
+        Ok(msg)
     }
 }
 
 impl<M> NetworkSender for TcpNetworkService<M>
 where
-    M: Send + Sync + 'static + Serialize + for<'de> Deserialize<'de> + Validate + std::fmt::Debug,
+    M: NetworkMessage + Serialize + for<'de> Deserialize<'de> + std::fmt::Debug,
 {
     type Message = M;
 
@@ -367,7 +382,7 @@ where
 
 impl<M> NetworkService for TcpNetworkService<M>
 where
-    M: Send + Sync + 'static + Serialize + for<'de> Deserialize<'de> + Validate + std::fmt::Debug,
+    M: NetworkMessage + Serialize + for<'de> Deserialize<'de> + std::fmt::Debug,
 {
     type Sender = TcpNetworkSender<M>;
 

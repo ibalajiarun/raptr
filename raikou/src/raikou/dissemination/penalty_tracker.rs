@@ -67,7 +67,6 @@ pub struct Config {
     pub n_nodes: usize,
     pub f: usize,
     pub enable: bool,
-    pub n_sub_blocks: usize,
     pub batch_expiration_time: Duration,
 }
 
@@ -395,32 +394,40 @@ impl PenaltyTracker {
 
     pub fn on_new_batch(&mut self, digest: BatchHash) {
         // This should be executed even when the penalty system is turned off.
+        assert!(!self.batch_receive_time.contains_key(&digest));
         self.batch_receive_time.insert(digest, Instant::now());
     }
 
-    fn split_to_sub_blocks(&self, batches: Vec<BatchInfo>) -> Vec<Vec<BatchInfo>> {
-        if batches.is_empty() {
-            return vec![];
+    fn split_to_sub_blocks(&self, batches: Vec<BatchInfo>) -> [Vec<BatchInfo>; N_SUB_BLOCKS] {
+        let mut sub_blocks: [Vec<BatchInfo>; N_SUB_BLOCKS] = Default::default();
+
+        let smaller_sub_block_size = batches.len() / N_SUB_BLOCKS;
+        let larger_sub_block_size = smaller_sub_block_size + 1;
+        let n_larger_sub_blocks = batches.len() % N_SUB_BLOCKS;
+
+        let mut iter = batches.into_iter();
+
+        for i in 0..N_SUB_BLOCKS {
+            let sub_block_size = if i < n_larger_sub_blocks {
+                larger_sub_block_size
+            } else {
+                smaller_sub_block_size
+            };
+
+            sub_blocks[i].reserve_exact(sub_block_size);
+            for _ in 0..sub_block_size {
+                sub_blocks[i].push(iter.next().unwrap());
+            }
         }
 
-        let n_batches = batches.len();
-        let sub_block_size = (n_batches + self.config.n_sub_blocks - 1) / self.config.n_sub_blocks;
-        assert!(sub_block_size * self.config.n_sub_blocks >= n_batches);
-        assert!((sub_block_size - 1) * self.config.n_sub_blocks < n_batches);
-
-        batches
-            .into_iter()
-            .chunks(sub_block_size)
-            .into_iter()
-            .map(|chunk| chunk.collect())
-            .collect()
+        sub_blocks
     }
 
     pub fn prepare_new_block(
         &mut self,
         round: Round,
         batches: Vec<BatchInfo>,
-    ) -> Vec<Vec<BatchInfo>> {
+    ) -> [Vec<BatchInfo>; N_SUB_BLOCKS] {
         if !self.config.enable {
             self.block_prepare_time.insert(round, Instant::now());
             let now = Instant::now();

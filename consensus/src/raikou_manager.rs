@@ -32,10 +32,12 @@ use aptos_types::{
 use aptos_validator_transaction_pool::TransactionFilter;
 use futures::{executor::block_on, future::BoxFuture, FutureExt, StreamExt};
 use futures_channel::{mpsc::UnboundedSender, oneshot};
+use itertools::Itertools;
 use raikou::{
+    framework,
     framework::{
         injection::{delay_injection, drop_injection},
-        module_network::{ModuleId, ModuleNetwork, ModuleNetworkService},
+        module_network::{match_event_type, ModuleId, ModuleNetwork, ModuleNetworkService},
         network::{Network, NetworkService},
         tcp_network::TcpNetworkService,
         timer::LocalTimerService,
@@ -60,6 +62,7 @@ use std::{
     future::Future,
     marker::PhantomData,
     net::SocketAddr,
+    ops::Deref,
     sync::Arc,
     time::Duration,
 };
@@ -119,7 +122,31 @@ impl RaikouManager {
         let timer = LocalTimerService::new();
 
         let address_to_index = epoch_state.verifier.address_to_validator_index().clone();
+        let index_to_address = address_to_index
+            .clone()
+            .into_iter()
+            .map(|(k, v)| (v, k))
+            .collect::<HashMap<_, _>>();
+
         let node_id = *address_to_index.get(&self_author).unwrap();
+
+        if validator_set.active_validators[node_id]
+            .config()
+            .find_ip_addr()
+            .is_none()
+        {
+            error!("ip missing for self: {:?}", validator_set);
+        }
+
+        let signer = raikou::framework::crypto::Signer::new(node_id, validator_signer.clone());
+
+        let verifier = raikou::framework::crypto::Verifier::new(
+            index_to_address
+                .iter()
+                .sorted_by_key(|(&index, _)| index)
+                .map(|(_, address)| epoch_state.verifier.get_public_key(address).unwrap())
+                .collect(),
+        );
 
         // let network_service: RaikouNetworkService<raikou::raikou::Message> =
         //     RaikouNetworkService::new(epoch_state.clone(), messages_rx, network_sender.clone());
@@ -129,34 +156,6 @@ impl RaikouManager {
         //     raikou::raikou::QC::genesis(),
         //     RoundEnterReason::Genesis
         // )).await;
-
-        // let network_service = UdpNetworkService::new(
-        //     node_id,
-        //     validator_set.active_validators[node_id].config().find_ip_addr().unwrap(),
-        //     // base_port is chosen to avoid any collisions when running
-        //     // multiple instances on the same machine.
-        //     BASE_PORT + (node_id * n_nodes) as u16,
-        //     udp_network::Config {
-        //         peers: validator_set
-        //             .active_validators
-        //             .iter()
-        //             .enumerate()
-        //             .map(|(peer_id, info)| (
-        //                 info.config().find_ip_addr().unwrap(),
-        //                 BASE_PORT + (peer_id * n_nodes) as u16,
-        //             ))
-        //             .collect(),
-        //         peer_concurrency_level: 4,
-        //     },
-        // ).await;
-
-        if validator_set.active_validators[node_id]
-            .config()
-            .find_ip_addr()
-            .is_none()
-        {
-            error!("ip missing for self: {:?}", validator_set);
-        }
 
         let network_service = TcpNetworkService::new(
             node_id,
@@ -190,7 +189,8 @@ impl RaikouManager {
                     .collect(),
                 streams_per_peer: 4,
             },
-            epoch_state.verifier.clone(),
+            signer.clone(),
+            verifier.clone(),
             // 32MB max block size
             32 * 1024 * 1024,
         )
@@ -208,8 +208,8 @@ impl RaikouManager {
             extra_wait_before_commit_vote: Duration::from_secs_f64(delta * 0.1),
             enable_round_entry_permission: false,
             enable_commit_votes: true,
-            status_interval: Duration::from_secs_f64(delta * 10.),
-            round_sync_interval: Duration::from_secs_f64(delta * 15.),
+            status_interval: Duration::from_secs_f64(delta) * 10,
+            round_sync_interval: Duration::from_secs_f64(delta) * 15,
             block_fetch_multiplicity: std::cmp::min(2, n_nodes),
             block_fetch_interval: Duration::from_secs_f64(delta) * 2,
         };
@@ -251,7 +251,8 @@ impl RaikouManager {
             diss_rx,
             network_sender.clone(),
             validator_set,
-            epoch_state.verifier.clone(),
+            signer.clone(),
+            verifier.clone(),
             enable_optimistic_dissemination,
             diss_metrics,
         )
@@ -265,6 +266,7 @@ impl RaikouManager {
             payload_manager,
             diss_module_network,
             state_sync_notifier,
+            index_to_address,
         )
         .await;
 
@@ -281,8 +283,8 @@ impl RaikouManager {
                 batch_consensus_latency: Some(batch_consensus_latency.new_sender()),
                 // indirectly_committed_slots: indirectly_committed_slots_sender,
             },
-            epoch_state.verifier.clone(),
-            validator_signer,
+            signer.clone(),
+            verifier.clone(),
             // ordered_nodes_tx,
         )));
 
@@ -407,6 +409,7 @@ impl RaikouManager {
         payload_manager: Arc<dyn TPayloadManager>,
         mut module_network: ModuleNetworkService,
         state_sync_notifier: Arc<dyn ConsensusNotificationSender>,
+        index_to_address: HashMap<usize, Author>,
     ) -> impl DisseminationLayer {
         let round_initial_timeout =
             Duration::from_millis(consensus_config.round_initial_timeout_ms);
@@ -422,19 +425,15 @@ impl RaikouManager {
 
         tokio::spawn(async move {
             loop {
-                let (consensus_module, msg) = module_network.recv().await;
+                let (consensus_module, event) = module_network.recv().await;
 
-                if msg.type_id() == TypeId::of::<dissemination::ProposalReceived>() {
-                    let msg: Box<_> = msg
+                if match_event_type::<dissemination::ProposalReceived>(&event) {
+                    let event: Box<_> = event
+                        .as_any()
                         .downcast::<dissemination::ProposalReceived>()
                         .ok()
                         .unwrap();
-                    let dissemination::ProposalReceived {
-                        round,
-                        leader_account,
-                        payload,
-                        ..
-                    } = *msg;
+                    let dissemination::ProposalReceived { round, payload, .. } = *event;
 
                     payload_manager.prefetch_payload_data(
                         &payload.inner,
@@ -443,11 +442,13 @@ impl RaikouManager {
 
                     let module_network_sender = module_network.new_sender();
                     let payload_manager = payload_manager.clone();
+                    let block_author = Some(index_to_address[&payload.author()]);
+
                     tokio::spawn(async move {
                         if let Ok(_) = payload_manager
                             .wait_for_payload(
                                 &payload.inner,
-                                leader_account,
+                                block_author,
                                 // timestamp is only used for batch expiration, which is not
                                 // supported in this prototype.
                                 0,
@@ -462,20 +463,18 @@ impl RaikouManager {
                                 .await;
                         }
                     });
-                } else if msg.type_id() == TypeId::of::<dissemination::NewQCWithPayload>() {
-                    let msg: Box<_> = msg
+                } else if match_event_type::<dissemination::NewQCWithPayload>(&event) {
+                    let event: Box<_> = event
+                        .as_any()
                         .downcast::<dissemination::NewQCWithPayload>()
                         .ok()
                         .unwrap();
-                    let dissemination::NewQCWithPayload { payload, qc } = *msg;
+                    let dissemination::NewQCWithPayload { payload, qc } = *event;
                     // TODO: add fetching here
-                } else if msg.type_id() == TypeId::of::<dissemination::Kill>() {
+                } else if match_event_type::<dissemination::Kill>(&event) {
                     break;
                 } else {
-                    panic!(
-                        "Unexpected event type received from module network. Type id: {:?}",
-                        msg.type_id()
-                    );
+                    panic!("Unhandled module event: {}", event.debug_string());
                 }
             }
         });
@@ -498,7 +497,8 @@ impl RaikouManager {
         >,
         network_sender: Arc<NetworkSender>,
         validator_set: ValidatorSet,
-        validator_verifier: Arc<ValidatorVerifier>,
+        signer: raikou::framework::crypto::Signer,
+        verifier: raikou::framework::crypto::Verifier,
         enable_optimistic_dissemination: bool,
         metrics: dissemination::Metrics,
     ) -> impl DisseminationLayer {
@@ -554,7 +554,8 @@ impl RaikouManager {
                     .collect(),
                 streams_per_peer: 4,
             },
-            validator_verifier,
+            signer.clone(),
+            verifier.clone(),
             1 * 1024 * 1024,
         )
         .await;
@@ -574,14 +575,16 @@ impl RaikouManager {
                 // penalty tracker doesn't work with 0 delays
                 enable_penalty_tracker: false,
                 penalty_tracker_report_delay: Duration::from_secs_f64(delta * 5.),
-                n_sub_blocks: 7,
                 batch_fetch_multiplicity: std::cmp::min(2, n_nodes),
                 batch_fetch_interval: Duration::from_secs_f64(delta) * 2,
+                status_interval: Duration::from_secs_f64(delta) * 10,
             },
             std::iter::repeat_with(|| vec![]),
             start_time,
             true,
             metrics,
+            signer,
+            verifier,
         );
 
         tokio::spawn(Protocol::run(
@@ -601,31 +604,36 @@ pub struct RaikouNetworkSenderInner<M> {
     n_nodes: usize,
     index_to_address: HashMap<usize, Author>,
     network_sender: Arc<NetworkSender>,
+    signer: raikou::framework::crypto::Signer,
     _phantom: PhantomData<M>,
 }
 
 impl<M> RaikouNetworkSenderInner<M>
 where
-    M: Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static,
+    M: raikou::framework::network::NetworkMessage + Serialize + for<'de> Deserialize<'de>,
 {
-    async fn send(&self, msg: M, targets: Vec<NodeId>) {
+    async fn send(&self, mut msg: M, targets: Vec<NodeId>) {
         let epoch = self.epoch;
         let remote_peer_ids = targets
             .into_iter()
             .map(|i| *self.index_to_address.get(&i).unwrap())
             .collect();
-        let network_sender = self.network_sender.clone();
 
-        // Serialization is done in a separate task to avoid blocking the main loop.
+        let aptos_network_sender = self.network_sender.clone();
+        let signer = self.signer.clone();
+
+        // Serialization and signing are done in a separate task to avoid blocking the main loop.
         tokio::spawn(async move {
+            msg.sign(&signer).unwrap();
+
             let raikou_msg = RaikouNetworkMessage {
                 epoch,
                 data: bcs::to_bytes(&msg).unwrap(),
             };
 
-            let msg: ConsensusMsg = ConsensusMsg::RaikouMessage(raikou_msg);
+            let mut msg: ConsensusMsg = ConsensusMsg::RaikouMessage(raikou_msg);
 
-            network_sender.send(msg, remote_peer_ids).await;
+            aptos_network_sender.send(msg, remote_peer_ids).await;
         });
     }
 
@@ -648,7 +656,7 @@ impl<M> Clone for RaikouNetworkSender<M> {
 
 impl<M> raikou::framework::network::NetworkSender for RaikouNetworkSender<M>
 where
-    M: Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static,
+    M: raikou::framework::network::NetworkMessage + Serialize + for<'de> Deserialize<'de>,
 {
     type Message = M;
 
@@ -677,6 +685,7 @@ where
             (Author, RaikouNetworkMessage),
         >,
         network_sender: Arc<NetworkSender>,
+        signer: raikou::framework::crypto::Signer,
     ) -> Self {
         let address_to_index = epoch_state.verifier.address_to_validator_index().clone();
         let index_to_address = address_to_index
@@ -722,6 +731,7 @@ where
                     n_nodes: epoch_state.verifier.len(),
                     index_to_address,
                     network_sender,
+                    signer,
                     _phantom: PhantomData,
                 }),
             },
@@ -732,7 +742,7 @@ where
 
 impl<M> raikou::framework::network::NetworkSender for RaikouNetworkService<M>
 where
-    M: Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static,
+    M: raikou::framework::network::NetworkMessage + Serialize + for<'de> Deserialize<'de>,
 {
     type Message = M;
 
@@ -747,7 +757,7 @@ where
 
 impl<M> NetworkService for RaikouNetworkService<M>
 where
-    M: Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static,
+    M: raikou::framework::network::NetworkMessage + Serialize + for<'de> Deserialize<'de>,
 {
     type Sender = RaikouNetworkSender<M>;
 

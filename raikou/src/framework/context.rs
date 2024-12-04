@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::framework::{
-    module_network::{ModuleEvent, ModuleId, ModuleNetworkService},
+    module_network::{ModuleEvent, ModuleEventTrait, ModuleId, ModuleNetworkService},
     network::{NetworkSender, NetworkService},
     timer::TimerService,
     NodeId,
@@ -38,7 +38,7 @@ pub trait Context: Send + Sync {
 
     fn notify<E>(&self, module: ModuleId, event: E) -> impl Future<Output = ()> + Send
     where
-        E: Send + 'static,
+        E: ModuleEventTrait,
     {
         self.notify_boxed(module, Box::new(event))
     }

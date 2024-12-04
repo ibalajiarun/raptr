@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::proof_of_store::{BatchInfo, ProofOfStore};
-use aptos_bitvec::BitVec;
 use aptos_executor_types::ExecutorResult;
 use aptos_infallible::Mutex;
 use aptos_types::{transaction::SignedTransaction, PeerId};
@@ -76,6 +75,13 @@ where
         }
     }
 
+    pub fn empty() -> Self {
+        Self {
+            batch_summary: Vec::new(),
+            data_fut: Arc::new(Mutex::new(None)),
+        }
+    }
+
     pub fn extend(&mut self, other: BatchPointer<T>) {
         let other_data_status = other.data_fut.lock().take().expect("must be initialized");
         self.batch_summary.extend(other.batch_summary);
@@ -105,6 +111,12 @@ where
 
     pub fn is_empty(&self) -> bool {
         self.batch_summary.is_empty()
+    }
+}
+
+impl Default for BatchPointer<BatchInfo> {
+    fn default() -> Self {
+        Self::empty()
     }
 }
 
@@ -290,7 +302,9 @@ impl OptQuorumStorePayloadV1 {
     }
 }
 
-pub type SubBlocks = Vec<BatchPointer<BatchInfo>>;
+pub const N_SUB_BLOCKS: usize = 8;
+
+pub type SubBlocks = [BatchPointer<BatchInfo>; N_SUB_BLOCKS];
 
 pub type Prefix = usize;
 
@@ -349,7 +363,12 @@ impl CompressedPrefixSet {
                 ]
             })
             // 0xF is used as the special value indicating that the node is not a signer.
-            .filter(|(id, prefix)| *prefix != 0xF)
+            .filter(|(_, prefix)| *prefix != 0xF)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        // NB: this works only because PrefixSet is immutable once created.
+        self.repr.is_empty()
     }
 
     pub fn sub_block_signers(&self, sub_block: usize) -> Vec<usize> {
@@ -379,6 +398,14 @@ impl CompressedPrefixSet {
 
         panic!("Not enough votes in a PrefixSet. storage_requirement cannot exceed quorum size.");
     }
+
+    pub fn node_ids(&self) -> impl Iterator<Item = usize> + '_ {
+        self.iter().map(|(id, _)| id)
+    }
+
+    pub fn prefixes(&self) -> impl Iterator<Item = Prefix> + '_ {
+        self.iter().map(|(_, prefix)| prefix)
+    }
 }
 
 impl FromIterator<(usize, usize)> for CompressedPrefixSet {
@@ -407,14 +434,14 @@ impl RaikouPayloadData {
 
     fn new_empty() -> Self {
         Self {
-            sub_blocks: Vec::new(),
+            sub_blocks: Default::default(),
             proofs: Vec::new().into(),
         }
     }
 }
 
 impl RaikouPayload {
-    pub fn new(sub_blocks: SubBlocks, proofs: ProofBatches) -> Self {
+    pub fn new(proofs: ProofBatches, sub_blocks: SubBlocks) -> Self {
         let sub_blocks_range = 0..sub_blocks.len();
         Self {
             data: Arc::new(RaikouPayloadData::new(sub_blocks, proofs)),
@@ -427,7 +454,7 @@ impl RaikouPayload {
         RaikouPayload {
             data: Arc::new(RaikouPayloadData::new_empty()),
             include_proofs: true,
-            sub_blocks: 0..0,
+            sub_blocks: 0..N_SUB_BLOCKS,
         }
     }
 
@@ -489,10 +516,6 @@ impl RaikouPayload {
 
     pub(crate) fn is_empty(&self) -> bool {
         self.sub_blocks().iter().all(|inner| inner.is_empty()) && self.proofs().is_empty()
-    }
-
-    pub(crate) fn extend(mut self, other: Self) -> Self {
-        unreachable!() // TODO: remove?
     }
 
     pub(crate) fn num_sub_block_batches(&self) -> usize {

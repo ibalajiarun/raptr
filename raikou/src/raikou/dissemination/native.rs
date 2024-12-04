@@ -3,8 +3,10 @@
 
 use crate::{
     framework::{
+        crypto,
+        crypto::{Signer, Verifier},
         module_network::ModuleId,
-        network::{NetworkSender, NetworkService, Validate},
+        network::{NetworkSender, NetworkService, Sign, Validate},
         timer::TimerService,
         ContextFor, NodeId, Protocol,
     },
@@ -22,7 +24,6 @@ use crate::{
 };
 use aptos_crypto::{bls12381::Signature, hash::CryptoHash, Genesis};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
-use aptos_types::validator_verifier::ValidatorVerifier;
 use bitvec::prelude::BitVec;
 use defaultmap::DefaultBTreeMap;
 use itertools::Itertools;
@@ -37,10 +38,34 @@ use std::{
 use tokio::time::Instant;
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(from = "BatchSerialization")]
 pub struct Batch {
     data: BatchData,
+    signature: Signature,
+
     #[serde(skip)]
-    digest: BatchHash, // Populated during the validation in `Batch::validate`.
+    digest: BatchHash,
+}
+
+#[derive(Deserialize)]
+struct BatchSerialization {
+    data: BatchData,
+    signature: Signature,
+}
+
+impl From<BatchSerialization> for Batch {
+    fn from(serialized: BatchSerialization) -> Self {
+        Self {
+            digest: serialized.data.hash(),
+            data: serialized.data,
+            signature: serialized.signature,
+        }
+    }
+}
+
+#[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
+struct BatchSignatureData {
+    hash: BatchHash,
 }
 
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
@@ -71,9 +96,8 @@ impl Batch {
         &self.data.txns
     }
 
-    pub fn validate(&mut self, validator_verifier: &ValidatorVerifier) -> anyhow::Result<()> {
-        self.digest = self.data.hash();
-        // TODO: verify the author's signature.
+    pub fn validate(&self, verifier: &Verifier) -> anyhow::Result<()> {
+        // TODO
         Ok(())
     }
 }
@@ -81,7 +105,9 @@ impl Batch {
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Message {
     Batch(Batch),
-    BatchStored(BatchId),
+    // NB: Technically, the hash is unnecessary, but it is included because the way
+    // we sign messages in the networking layer.
+    BatchStored(BatchId, BatchHash, Signature),
     AvailabilityCert(AC),
     Fetch(Vec<BatchHash>),
     FetchResp(Vec<Batch>),
@@ -92,7 +118,7 @@ impl std::fmt::Debug for Message {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Message::Batch(batch) => write!(f, "Batch({})", batch.batch_id()),
-            Message::BatchStored(batch_id) => write!(f, "BatchStored({})", batch_id),
+            Message::BatchStored(batch_id, _, _) => write!(f, "BatchStored({})", batch_id),
             Message::AvailabilityCert(ac) => write!(f, "AvailabilityCert({})", ac.info.batch_id),
             Message::Fetch(digests) => write!(f, "Fetch({} batches)", digests.len()),
             Message::FetchResp(batches) => write!(f, "FetchResp({} batches)", batches.len()),
@@ -104,13 +130,42 @@ impl std::fmt::Debug for Message {
 }
 
 impl Validate for Message {
-    fn validate(&mut self, validator_verifier: &ValidatorVerifier) -> anyhow::Result<()> {
+    fn validate(&self, sender: NodeId, verifier: &Verifier) -> anyhow::Result<()> {
         // TODO
         match self {
             Message::Batch(batch) => {
-                batch.validate(validator_verifier)?;
+                batch.validate(verifier)?;
             },
-            Message::BatchStored(_) => {},
+            Message::BatchStored(_, _, _) => {},
+            Message::AvailabilityCert(_) => {},
+            Message::Fetch(_) => {},
+            Message::FetchResp(_) => {},
+            Message::PenaltyTrackerReport(_, _) => {},
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
+struct BatchStoredSignatureData {
+    hash: BatchHash,
+}
+
+impl Sign for Message {
+    fn sign(&mut self, signer: &Signer) -> anyhow::Result<()> {
+        // TODO
+        match self {
+            Message::Batch(_) => {
+                // no-op
+                // Already signed in the main protocol.
+            },
+            Message::BatchStored(_, batch_digest, signature) => {
+                // *signature = signer.sign(&BatchStoredSignatureData {
+                //     hash: batch_digest.clone(),
+                // })?;
+                // TODO
+            },
             Message::AvailabilityCert(_) => {},
             Message::Fetch(_) => {},
             Message::FetchResp(_) => {},
@@ -125,6 +180,7 @@ impl Validate for Message {
 pub enum TimerEvent {
     NewBatch(BatchId),
     PenaltyTrackerReport(NodeId, Round, Instant, Payload),
+    Status,
 }
 
 #[derive(Clone)]
@@ -140,13 +196,13 @@ pub struct Config {
     pub enable_optimistic_dissemination: bool,
     pub enable_penalty_tracker: bool,
     pub penalty_tracker_report_delay: Duration,
-    pub n_sub_blocks: usize,
+    pub status_interval: Duration,
 }
 
 #[derive(Clone)]
 pub struct NativeDisseminationLayer<TI> {
     config: Config,
-    inner: Arc<tokio::sync::Mutex<ToyDisseminationLayerProtocol<TI>>>,
+    inner: Arc<tokio::sync::Mutex<NativeDisseminationLayerProtocol<TI>>>,
 }
 
 impl<TI> NativeDisseminationLayer<TI>
@@ -160,6 +216,8 @@ where
         start_time: Instant,
         detailed_logging: bool,
         metrics: Metrics,
+        signer: Signer,
+        verifier: Verifier,
     ) -> Self {
         if !config.enable_optimistic_dissemination && !config.enable_penalty_tracker {
             aptos_logger::warn!(
@@ -170,14 +228,18 @@ where
 
         Self {
             config: config.clone(),
-            inner: Arc::new(tokio::sync::Mutex::new(ToyDisseminationLayerProtocol::new(
-                node_id,
-                config,
-                txns_iter,
-                start_time,
-                detailed_logging,
-                metrics,
-            ))),
+            inner: Arc::new(tokio::sync::Mutex::new(
+                NativeDisseminationLayerProtocol::new(
+                    node_id,
+                    config,
+                    txns_iter,
+                    start_time,
+                    detailed_logging,
+                    metrics,
+                    signer,
+                    verifier,
+                ),
+            )),
         }
     }
 
@@ -218,7 +280,7 @@ where
             // by the order they were received.
             inner.penalty_tracker.prepare_new_block(round, batches)
         } else {
-            vec![]
+            Default::default()
         };
 
         Payload::new(round, inner.node_id, acs, batches)
@@ -279,7 +341,7 @@ where
         // At the moment, they are only tracked for optimistically committed batches.
         for payload in &payloads {
             for batch in payload.sub_blocks().flatten() {
-                if payload.leader() == inner.node_id {
+                if payload.author() == inner.node_id {
                     let block_prepare_time =
                         inner.penalty_tracker.block_prepare_time(payload.round());
                     let batch_receive_time = inner
@@ -337,7 +399,7 @@ impl FetchTaskHandle {
     }
 }
 
-pub struct ToyDisseminationLayerProtocol<TI> {
+pub struct NativeDisseminationLayerProtocol<TI> {
     txns_iter: TI,
     config: Config,
     node_id: NodeId,
@@ -360,6 +422,10 @@ pub struct ToyDisseminationLayerProtocol<TI> {
     // The set of nodes that have stored this node's batch with the given sequence number.
     batch_stored_votes: DefaultBTreeMap<BatchId, BitVec>,
 
+    // Crypto
+    signer: Signer,
+    verifier: Verifier,
+
     // Logging and metrics
     detailed_logging: bool,
     start_time: Instant,
@@ -369,13 +435,22 @@ pub struct ToyDisseminationLayerProtocol<TI> {
     execution_queue: VecDeque<BatchHash>,
 }
 
-impl<TI> ToyDisseminationLayerProtocol<TI> {
+impl<TI> NativeDisseminationLayerProtocol<TI> {
     fn to_deltas(&self, duration: Duration) -> f64 {
         duration.as_secs_f64() / self.config.delta.as_secs_f64()
     }
 
+    fn time_in_delta(&self) -> f64 {
+        self.to_deltas(Instant::now() - self.start_time)
+    }
+
     fn log_info(&self, msg: String) {
-        aptos_logger::info!("Node {}: Dissemination Layer: {}", self.node_id, msg,);
+        aptos_logger::info!(
+            "Node {} at {:.2}Δ: Dissemination Layer: {}",
+            self.node_id,
+            self.time_in_delta(),
+            msg
+        );
     }
 
     fn log_detail(&self, msg: String) {
@@ -385,7 +460,7 @@ impl<TI> ToyDisseminationLayerProtocol<TI> {
     }
 }
 
-impl<TI> ToyDisseminationLayerProtocol<TI>
+impl<TI> NativeDisseminationLayerProtocol<TI>
 where
     TI: Iterator<Item = Vec<Txn>> + Send + Sync,
 {
@@ -396,13 +471,14 @@ where
         start_time: Instant,
         detailed_logging: bool,
         metrics: Metrics,
+        signer: Signer,
+        verifier: Verifier,
     ) -> Self {
         let n_nodes = config.n_nodes;
         let penalty_tracker_config = penalty_tracker::Config {
             n_nodes: config.n_nodes,
             f: config.f,
             enable: config.enable_penalty_tracker,
-            n_sub_blocks: config.n_sub_blocks,
             batch_expiration_time: config.delta * 3,
         };
 
@@ -424,6 +500,8 @@ where
             metrics,
             batch_send_time: Default::default(),
             batch_commit_time: Default::default(),
+            signer,
+            verifier,
         }
     }
 
@@ -435,10 +513,23 @@ where
         // NB: it may happen that the same batch is received multiple times.
         self.batches.insert(digest.clone(), batch);
 
+        if let Some(handle) = self.fetch_tasks.remove(&digest) {
+            handle.kill();
+        }
+
         // NB: batches that are received ONLY through fetching will not be included in new blocks.
         if !fetched {
             self.penalty_tracker.on_new_batch(digest.clone());
-            ctx.unicast(Message::BatchStored(batch_id), author).await;
+
+            ctx.unicast(
+                Message::BatchStored(
+                    batch_id,
+                    digest.clone(),
+                    crypto::empty_signature(), // Populated in the `sign` method.
+                ),
+                author,
+            )
+            .await;
 
             // Track the list of known uncommitted uncertified batches.
             if !self.uncommitted_acs.contains_key(&digest)
@@ -529,7 +620,7 @@ where
     }
 }
 
-impl<TI> Protocol for ToyDisseminationLayerProtocol<TI>
+impl<TI> Protocol for NativeDisseminationLayerProtocol<TI>
 where
     TI: Iterator<Item = Vec<Txn>> + Send + Sync,
 {
@@ -558,7 +649,13 @@ where
                 txns: Arc::new(self.txns_iter.next().unwrap()),
             };
             let digest = batch_data.hash();
-            let batch = Batch { data: batch_data, digest: digest.clone() };
+            let signature = self.signer.sign(&BatchSignatureData { hash: digest.clone() }).unwrap();
+
+            let batch = Batch {
+                data: batch_data,
+                digest: digest.clone(),
+                signature,
+            };
 
             self.log_detail(format!(
                 "Creating batch #{} with digest {:#x}",
@@ -578,11 +675,8 @@ where
 
         // Upon receiving a batch, store it, reply with a BatchStored message,
         // and execute try_vote.
-        upon receive [Message::Batch(batch)] from node [p] {
-            // TODO: add it to the message validation.
-            // if batch.author() == p {
-            //     break 'handler;
-            // }
+        upon receive [Message::Batch(batch)] from [_any_node] {
+            assert_eq!(batch.author(), _any_node,"FOO4");
 
             // self.log_detail(format!(
             //     "Received batch #{} from node {} with digest {:#x}",
@@ -591,12 +685,15 @@ where
             //     batch.digest,
             // ));
 
-            self.on_new_batch(batch, false, ctx).await;
+            // We call `on_new_batch` on our own batches right after we create them.
+            if batch.author() != self.node_id {
+                self.on_new_batch(batch, false, ctx).await;
+            }
         };
 
         // Upon receiving a quorum of BatchStored messages for a batch,
         // form an AC and broadcast it.
-        upon receive [Message::BatchStored(batch_id)] from node [p] {
+        upon receive [Message::BatchStored(batch_id, batch_digest, signature)] from node [p] {
             self.batch_stored_votes[batch_id].set(p, true);
 
             if self.batch_stored_votes[batch_id].count_ones() == self.config.ac_quorum {
@@ -605,10 +702,15 @@ where
                     batch_id,
                     self.batches[&self.my_batches[&batch_id]].digest,
                 ));
-                ctx.multicast(Message::AvailabilityCert(AC {
+
+                // TODO: add an aggregated signature to the AC.
+
+                let ac = AC {
                     info: self.batches[&self.my_batches[&batch_id]].get_info(),
                     signers: self.batch_stored_votes[batch_id].clone(),
-                })).await;
+                };
+
+                ctx.multicast(Message::AvailabilityCert(ac)).await;
             }
         };
 
@@ -658,7 +760,7 @@ where
         upon event of type [NewQCWithPayload] from [_any_module] {
             upon [NewQCWithPayload { payload, qc }] {
                 for (idx, sub_block) in payload.sub_blocks().enumerate() {
-                    let signers = qc.signatures_with_prefixes.prefixes.sub_block_signers(idx);
+                    let signers = qc.vote_prefixes.sub_block_signers(idx);
                     for batch in sub_block {
                         if !self.batches.contains_key(&batch.digest) {
                             self.fetch_batch(batch.digest.clone(), signers.clone(), false, ctx).await;
@@ -680,12 +782,22 @@ where
         upon receive [Message::FetchResp(batches)] from node [p] {
             // If receive a FetchResp message, store the batches.
             for batch in batches {
+                if !self.fetch_tasks.contains_key(&batch.digest) {
+                    // Either we already received the batch or we never requested it.
+                    continue;
+                }
+
                 self.on_new_batch(batch, true, ctx).await;
             }
             self.execute_prefix();
         };
 
-        // Halting
+        // Logging and halting
+
+        upon start {
+            self.log_detail("Started".to_string());
+            ctx.set_timer(self.config.status_interval, TimerEvent::Status);
+        };
 
         upon event of type [Kill] from [_any_module] {
             upon [Kill()] {
@@ -697,10 +809,31 @@ where
                 }
             };
         };
+
+        upon timer [TimerEvent::Status] {
+            self.log_detail(format!(
+                "STATUS:\n\
+                \tbatches produced: {}\n\
+                \tbatches stored: {}\n\
+                \tbatches committed: {}\n\
+                \tuncommitted_acs.len(): {}\n\
+                \tuncommitted_uncertified_batches.len(): {}\n\
+                \texecution_queue.len(): {}\n\
+                \tactive fetch tasks: {}\n",
+                self.my_batches.len(),
+                self.batches.len(),
+                self.committed_batches.len(),
+                self.uncommitted_acs.len(),
+                self.uncommitted_uncertified_batches.len(),
+                self.execution_queue.len(),
+                self.fetch_tasks.len(),
+            ));
+            ctx.set_timer(self.config.status_interval, TimerEvent::Status);
+        };
     }
 }
 
-impl<TI> Drop for ToyDisseminationLayerProtocol<TI> {
+impl<TI> Drop for NativeDisseminationLayerProtocol<TI> {
     fn drop(&mut self) {
         self.log_detail("Halting by Drop".to_string());
 

@@ -8,6 +8,7 @@ use crate::framework::{
 use std::{any::Any, future::Future, sync::Arc};
 
 pub mod context;
+pub mod crypto;
 pub mod injection;
 pub mod module_network;
 pub mod network;
@@ -28,10 +29,6 @@ where
     P: Protocol + ?Sized,
     Ctx: Context<Message = P::Message, TimerEvent = P::TimerEvent>,
 {
-}
-
-pub trait NamedAny: Any {
-    fn type_name(&self) -> &'static str;
 }
 
 pub trait Protocol: Send + Sync {
@@ -250,13 +247,14 @@ macro_rules! protocol {
             let _ = $ctx;  // suppress unused variable warning
             let _ = &module;  // suppress unused variable warning
 
-            let event: Box<dyn std::any::Any> = event;
-
-            match (module, event.type_id()) {
+            match module {
                 $(
                     $(
-                        ($module_pat, id) if id == std::any::TypeId::of::<$module_event_type>() => {
-                            let event = event.downcast::<$module_event_type>().ok().unwrap();
+                        $module_pat if crate::framework::module_network::match_event_type::<$module_event_type>(
+                            &event
+                        ) => {
+
+                            let event = event.as_any().downcast::<$module_event_type>().ok().unwrap();
 
                             match *event {
                                 $(
@@ -269,7 +267,7 @@ macro_rules! protocol {
                     )?
                 )*
                 _ => {
-                    panic!("Unhandled module event with type id: {:?}", event.type_id());
+                    panic!("Unhandled module event: {}", event.debug_string());
                 }
             }
         }

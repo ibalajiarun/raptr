@@ -1,21 +1,32 @@
 // Copyright (c) Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::framework::{timer::NeverReturn, NodeId};
-use aptos_types::validator_verifier::{self, ValidatorVerifier};
+use crate::framework::{
+    crypto::{Signer, Verifier},
+    timer::NeverReturn,
+    NodeId,
+};
 use futures::poll;
 use rand::{distributions::Distribution, Rng};
 use std::{future::Future, marker::PhantomData, task::Poll::Ready, time::Duration};
 use tokio::sync::mpsc;
 
 pub trait Validate {
-    // `&mut self` is used because validation may populate untrusted fields
-    // such as the hash of the content.
-    fn validate(&mut self, validator_verifier: &ValidatorVerifier) -> anyhow::Result<()>;
+    /// Validate the message, possibly checking signatures, certificates, etc.
+    fn validate(&self, sender: NodeId, verifier: &Verifier) -> anyhow::Result<()>;
 }
 
+pub trait Sign {
+    /// Sign the message.
+    fn sign(&mut self, signer: &Signer) -> anyhow::Result<()>;
+}
+
+pub trait NetworkMessage: Validate + Sign + Send + Sync + 'static {}
+
+impl<T: Validate + Sign + Send + Sync + 'static> NetworkMessage for T {}
+
 pub trait NetworkSender: Send + Sync + 'static {
-    type Message: Send + Sync + 'static;
+    type Message: NetworkMessage;
 
     fn send(&self, data: Self::Message, targets: Vec<NodeId>) -> impl Future<Output = ()> + Send;
 
@@ -62,11 +73,12 @@ pub struct InjectedLocalNetworkSender<M, I> {
     send: Vec<mpsc::Sender<(NodeId, M)>>,
     injection: I,
     node_id: NodeId,
+    signer: Signer,
 }
 
 impl<M, I> NetworkSender for InjectedLocalNetworkSender<M, I>
 where
-    M: Send + Sync + Clone + 'static,
+    M: NetworkMessage + Clone,
     I: NetworkInjection<M>,
 {
     type Message = M;
@@ -79,9 +91,11 @@ where
     ///
     /// Since the injection happens in a new task, `send` always returns immediately, not
     /// affected by any injected delay.
-    async fn send(&self, data: M, targets: Vec<NodeId>) {
+    async fn send(&self, mut msg: M, targets: Vec<NodeId>) {
+        msg.sign(&self.signer).unwrap();
+
         for target in targets {
-            let data = data.clone();
+            let data = msg.clone();
             let sender = self.node_id;
             let channel = self.send[target].clone();
             let injection = self.injection.clone();
@@ -110,7 +124,7 @@ pub struct InjectedLocalNetworkService<M, I> {
 
 impl<M, I> NetworkSender for InjectedLocalNetworkService<M, I>
 where
-    M: Send + Sync + Clone + 'static,
+    M: NetworkMessage + Clone,
     I: NetworkInjection<M>,
 {
     type Message = M;
@@ -126,7 +140,7 @@ where
 
 impl<M, I> NetworkService for InjectedLocalNetworkService<M, I>
 where
-    M: Send + Sync + Clone + 'static,
+    M: NetworkMessage + Clone,
     I: NetworkInjection<M>,
 {
     type Sender = InjectedLocalNetworkSender<M, I>;
@@ -160,22 +174,16 @@ impl<M, I: NetworkInjection<M>> InjectedLocalNetwork<M, I> {
             injection,
         }
     }
-}
 
-impl<M, I> Network for InjectedLocalNetwork<M, I>
-where
-    M: Send + Sync + Clone + 'static,
-    I: NetworkInjection<M>,
-{
-    type Message = M;
-    type Service = InjectedLocalNetworkService<M, I>;
+    pub fn service(&mut self, signer: Signer) -> InjectedLocalNetworkService<M, I> {
+        let node_id = signer.node_id();
 
-    fn service(&mut self, node_id: NodeId) -> Self::Service {
         InjectedLocalNetworkService {
             sender: InjectedLocalNetworkSender {
                 send: self.send.clone(),
                 injection: self.injection.clone(),
                 node_id,
+                signer,
             },
             recv: self.recv[node_id].take().unwrap(),
         }
@@ -228,7 +236,7 @@ impl<M> DropAllNetworkService<M> {
 
 impl<M> NetworkSender for DropAllNetworkService<M>
 where
-    M: Send + Sync + Clone + 'static,
+    M: NetworkMessage + Clone,
 {
     type Message = M;
 
@@ -241,7 +249,7 @@ where
 
 impl<M> NetworkService for DropAllNetworkService<M>
 where
-    M: Send + Sync + Clone + 'static,
+    M: NetworkMessage + Clone,
 {
     type Sender = Self;
 

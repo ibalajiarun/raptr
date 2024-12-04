@@ -14,6 +14,8 @@ use std::{
     fmt::{Debug, Formatter},
 };
 
+pub type Txn = aptos_types::transaction::SignedTransaction;
+
 pub type Round = i64; // Round number.
 
 pub type Prefix = aptos_consensus_types::payload::Prefix;

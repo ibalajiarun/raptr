@@ -15,9 +15,6 @@ use std::{
     sync::Arc,
 };
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct Txn();
-
 pub type BatchId = i64;
 
 #[derive(Clone, Hash, Serialize, Deserialize)]

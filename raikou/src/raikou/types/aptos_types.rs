@@ -14,7 +14,6 @@ use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use std::{fmt::Debug, ops::Range};
 
-pub type Txn = aptos_types::transaction::Transaction;
 pub type AC = aptos_consensus_types::proof_of_store::ProofOfStore;
 
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]

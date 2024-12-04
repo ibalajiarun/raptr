@@ -25,9 +25,17 @@ use aptos_consensus_types::{
 use aptos_crypto::HashValue;
 use aptos_logger::error;
 use aptos_types::{
-    epoch_state::EpochState, network_address::parse_ip_tcp, on_chain_config::ValidatorSet,
-    transaction::Transaction, validator_signer::ValidatorSigner,
-    validator_verifier::ValidatorVerifier, PeerId,
+    chain_id::ChainId,
+    epoch_state::EpochState,
+    network_address::parse_ip_tcp,
+    on_chain_config::ValidatorSet,
+    transaction::{
+        authenticator::AccountAuthenticator, RawTransaction, Script, SignedTransaction,
+        Transaction, TransactionPayload,
+    },
+    validator_signer::ValidatorSigner,
+    validator_verifier::ValidatorVerifier,
+    PeerId,
 };
 use aptos_validator_transaction_pool::TransactionFilter;
 use futures::{executor::block_on, future::BoxFuture, FutureExt, StreamExt};
@@ -562,6 +570,16 @@ impl RaikouManager {
 
         let diss_timer = LocalTimerService::new();
 
+        // TODO: make these into parameters.
+        let target_tps = 100_000;
+        let n_client_workers = 5;
+
+        let batch_interval_secs = delta * 0.2;
+        let batch_size =
+            f64::ceil(target_tps as f64 * batch_interval_secs / n_nodes as f64) as usize;
+
+        let txns_iter = run_fake_client(batch_size, n_client_workers).await;
+
         let dissemination = dissemination::native::NativeDisseminationLayer::new(
             node_id,
             dissemination::native::Config {
@@ -570,7 +588,7 @@ impl RaikouManager {
                 f,
                 ac_quorum: 2 * f + 1,
                 delta: Duration::from_secs_f64(delta),
-                batch_interval: Duration::from_secs_f64(delta * 0.2),
+                batch_interval: Duration::from_secs_f64(batch_interval_secs),
                 enable_optimistic_dissemination,
                 // penalty tracker doesn't work with 0 delays
                 enable_penalty_tracker: false,
@@ -579,7 +597,7 @@ impl RaikouManager {
                 batch_fetch_interval: Duration::from_secs_f64(delta) * 2,
                 status_interval: Duration::from_secs_f64(delta) * 10,
             },
-            std::iter::repeat_with(|| vec![]),
+            txns_iter,
             start_time,
             true,
             metrics,
@@ -597,6 +615,63 @@ impl RaikouManager {
 
         dissemination
     }
+}
+
+async fn run_fake_client(
+    batch_size: usize,
+    n_workers: usize,
+) -> impl Iterator<Item = Vec<SignedTransaction>> {
+    let (txns_tx, mut txns_rx) = tokio::sync::mpsc::channel(5);
+
+    for _ in 0..n_workers {
+        let txns_tx = txns_tx.clone();
+
+        tokio::spawn(async move {
+            let mut seq_num = 0;
+            let sender = PeerId::random();
+
+            loop {
+                let mut txns = vec![];
+                txns.reserve_exact(batch_size);
+
+                for _ in 0..batch_size {
+                    let txn = SignedTransaction::new_single_sender(
+                        RawTransaction::new(
+                            sender,
+                            seq_num,
+                            TransactionPayload::Script(Script::new(
+                                Vec::new(),
+                                Vec::new(),
+                                Vec::new(),
+                            )),
+                            0,
+                            0,
+                            Duration::from_secs(60).as_secs(),
+                            ChainId::test(),
+                        ),
+                        AccountAuthenticator::NoAccountAuthenticator,
+                    );
+                    seq_num += 1;
+
+                    txns.push(txn);
+                }
+
+                if txns_tx.send(txns).await.is_err() {
+                    // The execution ended.
+                    break;
+                }
+            }
+        });
+    }
+
+    std::iter::from_fn(move || {
+        if let Ok(txns) = txns_rx.try_recv() {
+            Some(txns)
+        } else {
+            aptos_logger::warn!("Fake client is not fast enough! Consider adding more workers.");
+            None
+        }
+    })
 }
 
 pub struct RaikouNetworkSenderInner<M> {

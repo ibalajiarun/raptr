@@ -402,9 +402,11 @@ impl RaikouManager {
                 std::str::from_utf8(&metrics_output_buf).unwrap(),
             );
 
+            let executed_txns = executed_txns_counter.load(Ordering::SeqCst);
             aptos_logger::info!(
-                "Executed transactions: {}",
-                executed_txns_counter.load(Ordering::SeqCst)
+                "Executed transactions: {} ({:.0} TPS)",
+                executed_txns,
+                executed_txns as f64 / (delta * total_duration_in_delta as f64)
             );
         };
 

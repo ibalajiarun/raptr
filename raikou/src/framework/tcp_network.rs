@@ -2,9 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::framework::{
-    crypto::{Signer, Verifier},
     injection::{delay_injection, drop_injection},
-    network::{NetworkMessage, NetworkSender, NetworkService, Sign, Validate},
+    network::{MessageCertifier, MessageVerifier, NetworkMessage, NetworkSender, NetworkService},
     NodeId,
 };
 use anyhow::Context;
@@ -12,6 +11,7 @@ use aptos_channels::{aptos_channel, message_queues::QueueStyle};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::{
+    marker::PhantomData,
     mem::size_of,
     net::SocketAddr,
     sync::{atomic::AtomicUsize, Arc},
@@ -32,15 +32,15 @@ pub struct Config {
     pub streams_per_peer: usize,
 }
 
-struct TcpNetworkSenderInner<M> {
+struct TcpNetworkSenderInner<M, C> {
     node_id: NodeId,
     self_send: aptos_channel::Sender<NodeId, (NodeId, M)>,
     streams: Vec<PeerStreams>,
-    signer: Signer,
+    certifier: Arc<C>,
     max_message_size: usize,
 }
 
-impl<M> TcpNetworkSenderInner<M> {
+impl<M, C> TcpNetworkSenderInner<M, C> {
     fn self_send(&self, msg: M) {
         self.self_send
             .push(self.node_id, (self.node_id, msg))
@@ -63,11 +63,12 @@ impl PeerStreams {
     }
 }
 
-pub struct TcpNetworkSender<M> {
-    inner: Arc<TcpNetworkSenderInner<M>>,
+pub struct TcpNetworkSender<M, C> {
+    inner: Arc<TcpNetworkSenderInner<M, C>>,
 }
 
-impl<M> Clone for TcpNetworkSender<M> {
+// #[derive(Clone)] doesn't work for `M` and `C` that are not `Clone`.
+impl<M, C> Clone for TcpNetworkSender<M, C> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -86,9 +87,10 @@ async fn send_msg_to_stream(
     Ok(())
 }
 
-impl<M: NetworkMessage> NetworkSender for TcpNetworkSender<M>
+impl<M, C> NetworkSender for TcpNetworkSender<M, C>
 where
     M: NetworkMessage + Serialize + for<'de> Deserialize<'de> + std::fmt::Debug,
+    C: MessageCertifier<Message = M>,
 {
     type Message = M;
 
@@ -96,7 +98,7 @@ where
         let inner = self.inner.clone();
 
         tokio::spawn(async move {
-            if let Err(err) = msg.sign(&inner.signer) {
+            if let Err(err) = inner.certifier.certify(&mut msg).await {
                 panic!("TCPNET: Failed to sign message: {:#}", err);
             }
 
@@ -147,21 +149,24 @@ where
     }
 }
 
-pub struct TcpNetworkService<M> {
+pub struct TcpNetworkService<M, C, V> {
     recv: aptos_channel::Receiver<NodeId, (NodeId, M)>,
-    sender: TcpNetworkSender<M>,
+    sender: TcpNetworkSender<M, C>,
+    _phantom: PhantomData<V>,
 }
 
-impl<M> TcpNetworkService<M>
+impl<M, C, V> TcpNetworkService<M, C, V>
 where
     M: NetworkMessage + Serialize + for<'de> Deserialize<'de> + std::fmt::Debug,
+    C: MessageCertifier<Message = M>,
+    V: MessageVerifier<Message = M> + Send + 'static,
 {
     pub async fn new(
         node_id: NodeId,
         addr: SocketAddr,
         config: Config,
-        signer: Signer,
-        verifier: Verifier,
+        certifier: Arc<C>,
+        verifier: Arc<V>,
         max_message_size: usize,
     ) -> Self {
         aptos_logger::info!(
@@ -208,10 +213,11 @@ where
                     node_id,
                     self_send,
                     streams,
-                    signer,
+                    certifier,
                     max_message_size,
                 }),
             },
+            _phantom: PhantomData,
         }
     }
 
@@ -257,7 +263,7 @@ where
     async fn listen_loop(
         tcp_listener: TcpListener,
         self_send: aptos_channel::Sender<NodeId, (NodeId, M)>,
-        validator_verifier: Verifier,
+        verifier: Arc<V>,
         max_message_size: usize,
     ) {
         loop {
@@ -265,7 +271,7 @@ where
             tokio::spawn(Self::listen_stream(
                 stream,
                 self_send.clone(),
-                validator_verifier.clone(),
+                verifier.clone(),
                 max_message_size,
             ));
         }
@@ -274,7 +280,7 @@ where
     async fn listen_stream(
         mut stream: TcpStream,
         self_send: aptos_channel::Sender<NodeId, (NodeId, M)>,
-        validator_verifier: Verifier,
+        verifier: Arc<V>,
         max_message_size: usize,
     ) {
         let mut buf = vec![0; max_message_size];
@@ -292,7 +298,7 @@ where
             match Self::read_and_validate_message(
                 &mut stream,
                 peer_id,
-                validator_verifier.clone(),
+                verifier.clone(),
                 &mut buf,
                 max_message_size,
             )
@@ -335,7 +341,7 @@ where
     async fn read_and_validate_message(
         stream: &mut TcpStream,
         peer_id: NodeId,
-        validator_verifier: Verifier,
+        verifier: Arc<V>,
         buf: &mut [u8],
         max_message_size: usize,
     ) -> anyhow::Result<M> {
@@ -358,16 +364,21 @@ where
             .context("Error reading the message")?;
         let msg: M =
             bcs::from_bytes(&buf[..msg_size]).context("Error deserializing the message")?;
-        msg.validate(peer_id, &validator_verifier)
-            .context("Error validating the message")?;
+
+        verifier
+            .verify(peer_id, &msg)
+            .await
+            .context("Error verifying the message")?;
 
         Ok(msg)
     }
 }
 
-impl<M> NetworkSender for TcpNetworkService<M>
+impl<M, C, V> NetworkSender for TcpNetworkService<M, C, V>
 where
     M: NetworkMessage + Serialize + for<'de> Deserialize<'de> + std::fmt::Debug,
+    C: MessageCertifier<Message = M>,
+    V: MessageVerifier<Message = M>,
 {
     type Message = M;
 
@@ -380,11 +391,13 @@ where
     }
 }
 
-impl<M> NetworkService for TcpNetworkService<M>
+impl<M, C, V> NetworkService for TcpNetworkService<M, C, V>
 where
     M: NetworkMessage + Serialize + for<'de> Deserialize<'de> + std::fmt::Debug,
+    C: MessageCertifier<Message = M>,
+    V: MessageVerifier<Message = M>,
 {
-    type Sender = TcpNetworkSender<M>;
+    type Sender = TcpNetworkSender<M, C>;
 
     fn new_sender(&self) -> Self::Sender {
         self.sender.clone()

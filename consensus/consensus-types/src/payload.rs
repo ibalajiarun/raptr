@@ -371,11 +371,14 @@ impl CompressedPrefixSet {
         self.repr.is_empty()
     }
 
-    pub fn sub_block_signers(&self, sub_block: usize) -> Vec<usize> {
+    pub fn signers(&self) -> impl Iterator<Item = usize> + '_ {
+        self.iter().map(|(id, _)| id)
+    }
+
+    pub fn sub_block_signers(&self, sub_block: usize) -> impl Iterator<Item = usize> + '_ {
         self.iter()
-            .filter(|(_, prefix)| *prefix >= sub_block)
+            .filter(move |(_, prefix)| *prefix >= sub_block)
             .map(|(id, _)| id)
-            .collect()
     }
 
     pub fn prefix(&self, storage_requirement: usize) -> Prefix {
@@ -672,6 +675,7 @@ impl fmt::Display for OptQuorumStorePayload {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use itertools::Itertools;
 
     #[test]
     fn test_prefix_set() {
@@ -702,11 +706,12 @@ mod tests {
     fn test_sub_block_signers() {
         let votes = vec![(0, 3), (2, 13), (5, 0)];
         let prefix_set = PrefixSet::new(votes);
-        assert_eq!(prefix_set.sub_block_signers(3), vec![0, 2]);
-        assert_eq!(prefix_set.sub_block_signers(10), vec![2]);
-        assert_eq!(prefix_set.sub_block_signers(13), vec![2]);
-        assert_eq!(prefix_set.sub_block_signers(14), vec![] as Vec<usize>);
-        assert_eq!(prefix_set.sub_block_signers(0), vec![0, 2, 5]);
+        assert_eq!(prefix_set.sub_block_signers(3).collect_vec(), vec![0, 2]);
+        assert_eq!(prefix_set.sub_block_signers(10).collect_vec(), vec![2]);
+        assert_eq!(prefix_set.sub_block_signers(13).collect_vec(), vec![2]);
+        assert_eq!(prefix_set.sub_block_signers(14).collect_vec(), vec![]
+            as Vec<usize>);
+        assert_eq!(prefix_set.sub_block_signers(0).collect_vec(), vec![0, 2, 5]);
     }
 
     #[test]

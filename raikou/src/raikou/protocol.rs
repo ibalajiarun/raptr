@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
+    framework,
     framework::{
-        crypto::{Signer, Verifier},
-        network::{Sign, Validate},
+        crypto::{SignatureVerifier, Signer},
+        network::MessageVerifier,
         ContextFor, NodeId, Protocol,
     },
     leader_schedule::LeaderSchedule,
@@ -20,6 +21,7 @@ use crate::{
     },
     utils::kth_max_set::KthMaxMap,
 };
+use anyhow::Context;
 use aptos_consensus_types::{common::Author, payload::BatchPointer};
 use aptos_crypto::{bls12381::Signature, hash::CryptoHash, Genesis};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
@@ -74,16 +76,46 @@ impl Debug for Message {
     }
 }
 
-impl Validate for Message {
-    fn validate(&self, sender: NodeId, verifier: &Verifier) -> anyhow::Result<()> {
-        // TODO: add all verification logic, not just signatures.
+// All signatures are done in-line in the protocol.
+pub type Certifier = framework::network::NoopCertifier<Message>;
 
-        match self {
+pub struct Verifier<S> {
+    pub config: Config<S>,
+    pub sig_verifier: SignatureVerifier,
+}
+
+impl<S: LeaderSchedule> Verifier<S> {
+    pub fn new<DL>(protocol: &RaikouNode<S, DL>) -> Self {
+        Verifier {
+            config: protocol.config.clone(),
+            sig_verifier: protocol.sig_verifier.clone(),
+        }
+    }
+}
+
+impl<S: LeaderSchedule> MessageVerifier for Verifier<S> {
+    type Message = Message;
+
+    async fn verify(&self, sender: NodeId, message: &Self::Message) -> anyhow::Result<()> {
+        match message {
             Message::Propose(block) => {
-                block.validate(verifier)?;
+                if block.author() != sender {
+                    return Err(anyhow::anyhow!("Invalid author in Propose message"));
+                }
+                block
+                    .verify(self)
+                    .context("Error verifying the block in Propose message")
             },
+
             Message::QcVote(round, prefix, block_digest, signature) => {
-                verifier.verify(
+                if *prefix > N_SUB_BLOCKS {
+                    return Err(anyhow::anyhow!(
+                        "Invalid prefix in QcVote message: {}",
+                        prefix
+                    ));
+                }
+
+                self.sig_verifier.verify(
                     sender,
                     &QcVoteSignatureData {
                         round: *round,
@@ -91,48 +123,53 @@ impl Validate for Message {
                         block_digest: block_digest.clone(),
                     },
                     signature,
-                )?;
+                )
             },
+
             Message::CcVote(qc, signature) => {
-                qc.validate(verifier)?;
-                verifier.verify(
-                    sender,
-                    &CcVoteSignatureData {
-                        round: qc.round,
-                        block_digest: qc.block_digest.clone(),
-                        prefix: qc.prefix,
-                    },
-                    signature,
-                )?;
+                let sig_data = CcVoteSignatureData {
+                    round: qc.round,
+                    block_digest: qc.block_digest.clone(),
+                    prefix: qc.prefix,
+                };
+
+                self.sig_verifier
+                    .verify(sender, &sig_data, signature)
+                    .context("Error verifying the CC vote signature")?;
+
+                qc.verify(&self.sig_verifier, self.config.quorum())
+                    .context("Error verifying the QC in CcVote message")
             },
+
             Message::AdvanceRound(round, qc, reason) => {
-                if *round == 1 && qc.is_genesis() {
-                    return Ok(());
-                }
-                qc.validate(verifier)?;
-                match reason {
-                    RoundEnterReason::CC(cc) => {
-                        cc.validate(verifier)?;
-                    },
-                    RoundEnterReason::TC(tc) => {
-                        tc.validate(verifier)?;
-                    },
-                    _ => {},
-                }
+                qc.verify(&self.sig_verifier, self.config.quorum())
+                    .context("Error verifying the QC in AdvanceRound message")?;
+
+                reason
+                    .verify(*round, qc, &self.sig_verifier, self.config.quorum())
+                    .context("Error verifying the round enter reason in AdvanceRound message")
             },
-            _ => {},
+
+            Message::TcVote(round, qc, signature) => {
+                let sig_data = &TcVoteSignatureData {
+                    timeout_round: *round,
+                    qc_high_id: qc.sub_block_id(),
+                };
+
+                self.sig_verifier
+                    .verify(sender, sig_data, signature)
+                    .context("Error verifying the TC vote signature")?;
+
+                qc.verify(&self.sig_verifier, self.config.quorum())
+                    .context("Error verifying the QC in TcVote message")
+            },
+
+            Message::FetchReq(_block_digest) => Ok(()),
+
+            Message::FetchResp(block) => block
+                .verify(self)
+                .context("Error verifying the block in FetchResp message"),
         }
-
-        Ok(())
-    }
-}
-
-impl Sign for Message {
-    fn sign(&mut self, signer: &Signer) -> anyhow::Result<()> {
-        // no-op.
-        // All signatures are done in the protocol.
-        // TODO: consider moving the signature logic here.
-        Ok(())
     }
 }
 
@@ -179,6 +216,9 @@ pub struct Config<S> {
 
     pub status_interval: Duration,
     pub end_of_run: Instant,
+
+    /// Used for AC verification. Must be the same as in the Quorum Store module.
+    pub ac_quorum: usize,
 }
 
 impl<S: LeaderSchedule> Config<S> {
@@ -252,7 +292,7 @@ pub struct RaikouNode<S, DL> {
     cc_votes: DefaultBTreeMap<Round, KthMaxMap<(QC, NodeId), Signature>>,
     tc_votes: DefaultBTreeMap<Round, BTreeMap<NodeId, (SubBlockId, Signature)>>,
 
-    verifier: Verifier,
+    sig_verifier: SignatureVerifier,
     signer: Signer,
     // ordered_nodes_tx: UnboundedSender<OrderedBlocks>,
 }
@@ -266,7 +306,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         detailed_logging: bool,
         metrics: Metrics,
         signer: Signer,
-        verifier: Verifier,
+        sig_verifier: SignatureVerifier,
         // ordered_nodes_tx: UnboundedSender<OrderedBlocks>,
     ) -> Self {
         let quorum = config.quorum();
@@ -282,7 +322,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             block_create_time: Default::default(),
             r_ready: 0,
             r_allowed: 0,
-            enter_reason: RoundEnterReason::Genesis,
+            enter_reason: RoundEnterReason::FullPrefixQC,
             r_cur: 0,
             last_qc_vote: (0, 0).into(),
             last_commit_vote: (0, 0).into(),
@@ -303,7 +343,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             received_cc_vote: Default::default(),
             cc_votes: DefaultBTreeMap::new(KthMaxMap::new(quorum)),
             tc_votes: Default::default(),
-            verifier,
+            sig_verifier,
             signer,
             // ordered_nodes_tx,
         }
@@ -895,7 +935,7 @@ where
                             .map(|(_, (_, signature))| signature.clone());
 
                         let aggregated_signature =
-                            self.verifier.aggregate_signatures(partial_signatures).unwrap();
+                            self.sig_verifier.aggregate_signatures(partial_signatures).unwrap();
 
                         let vote_prefixes = votes
                             .iter()
@@ -957,7 +997,7 @@ where
                             .map(|((_, _), signature)| signature.clone());
 
                         let aggregated_signature =
-                            self.verifier.aggregate_signatures(partial_signatures).unwrap();
+                            self.sig_verifier.aggregate_signatures(partial_signatures).unwrap();
 
                         let cc = CC::new(
                             round,
@@ -1012,7 +1052,7 @@ where
                     .collect();
 
                 let signatures = votes.values().map(|(_, signature)| signature.clone());
-                let aggregated_signature = self.verifier.aggregate_signatures(signatures).unwrap();
+                let aggregated_signature = self.sig_verifier.aggregate_signatures(signatures).unwrap();
 
                 let tc = TC::new(
                     round,

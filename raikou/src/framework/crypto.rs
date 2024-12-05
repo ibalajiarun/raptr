@@ -14,13 +14,13 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 #[derive(Clone)]
-pub struct Verifier {
+pub struct SignatureVerifier {
     public_keys: Arc<Vec<PublicKey>>,
 }
 
-impl Verifier {
+impl SignatureVerifier {
     pub fn new(public_keys: Vec<PublicKey>) -> Self {
-        Verifier {
+        SignatureVerifier {
             public_keys: Arc::new(public_keys),
         }
     }
@@ -61,19 +61,14 @@ impl Verifier {
 
 #[derive(Clone)]
 pub struct Signer {
-    node_id: NodeId,
-
     // A hack to be compatible with aptos codebase.
     // ValidatorSigner does not expose the private key.
     aptos_signer: Arc<ValidatorSigner>,
 }
 
 impl Signer {
-    pub fn new(node_id: NodeId, aptos_signer: Arc<ValidatorSigner>) -> Self {
-        Signer {
-            node_id,
-            aptos_signer,
-        }
+    pub fn new(aptos_signer: Arc<ValidatorSigner>) -> Self {
+        Signer { aptos_signer }
     }
 
     pub fn sign<T: Serialize + CryptoHash>(
@@ -81,10 +76,6 @@ impl Signer {
         message: &T,
     ) -> anyhow::Result<bls12381::Signature> {
         Ok(self.aptos_signer.sign(message)?)
-    }
-
-    pub fn node_id(&self) -> NodeId {
-        self.node_id
     }
 }
 

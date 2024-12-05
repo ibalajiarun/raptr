@@ -2,9 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    framework::{crypto::Verifier, NodeId},
-    raikou::types::{BatchHash, Prefix, Round, N_SUB_BLOCKS},
+    framework::{crypto::SignatureVerifier, NodeId},
+    raikou::{
+        protocol,
+        types::{BatchHash, Prefix, Round, N_SUB_BLOCKS},
+    },
 };
+use anyhow::Context;
 use bitvec::prelude::BitVec;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -57,6 +61,11 @@ pub struct AC {
 impl AC {
     pub fn info(&self) -> &BatchInfo {
         &self.info
+    }
+
+    pub fn verify(&self, sig_verifier: &SignatureVerifier, ac_quorum: usize) -> anyhow::Result<()> {
+        // TODO
+        Ok(())
     }
 }
 
@@ -161,9 +170,10 @@ impl Payload {
             .chain(self.sub_blocks().flatten())
     }
 
-    pub fn validate(&self, verifier: &Verifier) -> anyhow::Result<()> {
+    pub fn verify<S>(&self, verifier: &protocol::Verifier<S>) -> anyhow::Result<()> {
         for ac in self.acs() {
-            // TODO: verify
+            ac.verify(&verifier.sig_verifier, verifier.config.ac_quorum)
+                .context("Invalid AC")?;
         }
         Ok(())
     }

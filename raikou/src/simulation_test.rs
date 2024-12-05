@@ -4,7 +4,7 @@
 use crate::{
     delays::{heterogeneous_symmetric_delay, DelayFunction},
     framework::{
-        crypto::{Signer, Verifier},
+        crypto::{SignatureVerifier, Signer},
         module_network::ModuleNetwork,
         network::{InjectedLocalNetwork, Network, NetworkInjection, NetworkService},
         timer::{clock_skew_injection, InjectedTimerService},
@@ -19,8 +19,8 @@ use crate::{
 use aptos_crypto::bls12381::{PrivateKey, PublicKey};
 use aptos_types::{account_address::AccountAddress, validator_signer::ValidatorSigner};
 use rand::{thread_rng, Rng};
-use std::{iter, ops::Deref, sync::Arc, time::Duration};
-use tokio::{spawn, time, time::Instant};
+use std::{collections::BTreeMap, iter, ops::Deref, sync::Arc, time::Duration};
+use tokio::{spawn, sync::RwLock, time, time::Instant};
 
 const JOLTEON_TIMEOUT: u32 = 3; // in Deltas
 
@@ -633,6 +633,7 @@ async fn test_raikou(
     let mut network = InjectedLocalNetwork::new(n_nodes, network_injection(delay_function));
 
     let f = (n_nodes - 1) / 3;
+    let ac_quorum = 2 * f + 1;
 
     let config = raikou::Config {
         n_nodes,
@@ -650,6 +651,7 @@ async fn test_raikou(
         round_sync_interval: Duration::from_secs_f64(delta * 15.),
         block_fetch_multiplicity: std::cmp::min(2, n_nodes),
         block_fetch_interval: Duration::from_secs_f64(delta) * 2,
+        ac_quorum,
     };
 
     let mut join_handles = Vec::new();
@@ -682,17 +684,18 @@ async fn test_raikou(
     for node_id in 0..n_nodes {
         let config = config.clone();
 
-        let verifier = Verifier::new(public_keys.clone());
-        let signer = Signer::new(
-            node_id,
-            Arc::new(ValidatorSigner::new(
-                AccountAddress::new([node_id as u8; 32]), // this is not actually used.
-                private_keys[node_id].clone(),
-            )),
-        );
+        let sig_verifier = SignatureVerifier::new(public_keys.clone());
+        let signer = Signer::new(Arc::new(ValidatorSigner::new(
+            AccountAddress::new([node_id as u8; 32]), // this is not actually used.
+            private_keys[node_id].clone(),
+        )));
 
-        let mut diss_network_service = diss_network.service(signer.clone());
-        let mut network_service = network.service(signer.clone());
+        let mut diss_network_service = diss_network.service(
+            node_id,
+            Arc::new(dissemination::native::Certifier::new(signer.clone())),
+        );
+        let mut network_service =
+            network.service(node_id, Arc::new(raikou::protocol::Certifier::new()));
 
         let clock_speed = { thread_rng().sample(clock_speed_distr) };
 
@@ -744,7 +747,7 @@ async fn test_raikou(
                     module_id: diss_module_network.module_id(),
                     n_nodes,
                     f,
-                    ac_quorum: 2 * f + 1,
+                    ac_quorum,
                     delta: Duration::from_secs_f64(delta),
                     batch_interval: Duration::from_secs_f64(delta * 0.1),
                     enable_optimistic_dissemination,
@@ -766,7 +769,7 @@ async fn test_raikou(
                     fetch_wait_time_after_commit: fetch_wait_time_after_commit_sender,
                 },
                 signer.clone(),
-                verifier.clone(),
+                sig_verifier.clone(),
             );
 
             // println!("Spawning node {node_id}");
@@ -784,7 +787,7 @@ async fn test_raikou(
                     // indirectly_committed_slots: indirectly_committed_slots_sender,
                 },
                 signer,
-                verifier,
+                sig_verifier,
             )));
 
             semaphore.add_permits(1);

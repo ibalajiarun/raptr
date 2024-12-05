@@ -4,7 +4,10 @@
 use crate::{
     framework,
     framework::NodeId,
-    raikou::types::common::{Prefix, Round},
+    raikou::{
+        protocol,
+        types::common::{Prefix, Round},
+    },
 };
 pub use aptos_consensus_types::proof_of_store::{BatchId, BatchInfo};
 pub use aptos_crypto::hash::HashValue;
@@ -106,7 +109,7 @@ impl Payload {
             .chain(self.sub_blocks().flatten())
     }
 
-    pub fn validate(&self, verifier: &framework::crypto::Verifier) -> anyhow::Result<()> {
+    pub fn verify<S>(&self, verifier: &protocol::Verifier<S>) -> anyhow::Result<()> {
         // TODO
         Ok(())
     }

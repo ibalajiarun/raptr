@@ -1,29 +1,76 @@
 // Copyright (c) Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::framework::{
-    crypto::{Signer, Verifier},
-    timer::NeverReturn,
-    NodeId,
-};
+use crate::framework::{timer::NeverReturn, NodeId};
 use futures::poll;
 use rand::{distributions::Distribution, Rng};
-use std::{future::Future, marker::PhantomData, task::Poll::Ready, time::Duration};
+use std::{future::Future, marker::PhantomData, sync::Arc, task::Poll::Ready, time::Duration};
 use tokio::sync::mpsc;
 
-pub trait Validate {
-    /// Validate the message, possibly checking signatures, certificates, etc.
-    fn validate(&self, sender: NodeId, verifier: &Verifier) -> anyhow::Result<()>;
+pub trait MessageVerifier: Send + Sync + 'static {
+    type Message: NetworkMessage;
+
+    /// Verify the message, possibly checking signatures, certificates, etc.
+    fn verify(
+        &self,
+        sender: NodeId,
+        message: &Self::Message,
+    ) -> impl Future<Output = anyhow::Result<()>> + Send;
 }
 
-pub trait Sign {
-    /// Sign the message.
-    fn sign(&mut self, signer: &Signer) -> anyhow::Result<()>;
+pub trait MessageCertifier: Send + Sync + 'static {
+    type Message: NetworkMessage;
+
+    /// Certify the message.
+    fn certify(
+        &self,
+        message: &mut Self::Message,
+    ) -> impl Future<Output = anyhow::Result<()>> + Send;
 }
 
-pub trait NetworkMessage: Validate + Sign + Send + Sync + 'static {}
+pub struct NoopCertifier<M> {
+    _phantom: PhantomData<M>,
+}
 
-impl<T: Validate + Sign + Send + Sync + 'static> NetworkMessage for T {}
+impl<M> NoopCertifier<M> {
+    pub fn new() -> Self {
+        NoopCertifier {
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<M: NetworkMessage> MessageCertifier for NoopCertifier<M> {
+    type Message = M;
+
+    async fn certify(&self, _message: &mut Self::Message) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+pub struct NoopVerifier<M> {
+    _phantom: PhantomData<M>,
+}
+
+impl<M> NoopVerifier<M> {
+    pub fn new() -> Self {
+        NoopVerifier {
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<M: NetworkMessage> MessageVerifier for NoopVerifier<M> {
+    type Message = M;
+
+    async fn verify(&self, _sender: NodeId, _message: &Self::Message) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+pub trait NetworkMessage: Send + Sync + 'static {}
+
+impl<T: Send + Sync + 'static> NetworkMessage for T {}
 
 pub trait NetworkSender: Send + Sync + 'static {
     type Message: NetworkMessage;
@@ -68,18 +115,30 @@ pub trait Network {
     fn service(&mut self, node_id: NodeId) -> Self::Service;
 }
 
-#[derive(Clone)]
-pub struct InjectedLocalNetworkSender<M, I> {
+pub struct InjectedLocalNetworkSender<M, I, C> {
     send: Vec<mpsc::Sender<(NodeId, M)>>,
     injection: I,
     node_id: NodeId,
-    signer: Signer,
+    certifier: Arc<C>,
 }
 
-impl<M, I> NetworkSender for InjectedLocalNetworkSender<M, I>
+// #[derive(Clone)] doesn't work for `C` that is not `Clone`.
+impl<M, I: Clone, C> Clone for InjectedLocalNetworkSender<M, I, C> {
+    fn clone(&self) -> Self {
+        InjectedLocalNetworkSender {
+            send: self.send.clone(),
+            injection: self.injection.clone(),
+            node_id: self.node_id,
+            certifier: self.certifier.clone(),
+        }
+    }
+}
+
+impl<M, I, C> NetworkSender for InjectedLocalNetworkSender<M, I, C>
 where
     M: NetworkMessage + Clone,
     I: NetworkInjection<M>,
+    C: MessageCertifier<Message = M>,
 {
     type Message = M;
 
@@ -92,7 +151,8 @@ where
     /// Since the injection happens in a new task, `send` always returns immediately, not
     /// affected by any injected delay.
     async fn send(&self, mut msg: M, targets: Vec<NodeId>) {
-        msg.sign(&self.signer).unwrap();
+        // TODO: consider spawning a co-routine to certify off the critical path.
+        self.certifier.certify(&mut msg).await.unwrap();
 
         for target in targets {
             let data = msg.clone();
@@ -117,15 +177,16 @@ where
     }
 }
 
-pub struct InjectedLocalNetworkService<M, I> {
-    sender: InjectedLocalNetworkSender<M, I>,
+pub struct InjectedLocalNetworkService<M, I, C> {
+    sender: InjectedLocalNetworkSender<M, I, C>,
     recv: mpsc::Receiver<(NodeId, M)>,
 }
 
-impl<M, I> NetworkSender for InjectedLocalNetworkService<M, I>
+impl<M, I, C> NetworkSender for InjectedLocalNetworkService<M, I, C>
 where
     M: NetworkMessage + Clone,
     I: NetworkInjection<M>,
+    C: MessageCertifier<Message = M>,
 {
     type Message = M;
 
@@ -138,18 +199,20 @@ where
     }
 }
 
-impl<M, I> NetworkService for InjectedLocalNetworkService<M, I>
+impl<M, I, C> NetworkService for InjectedLocalNetworkService<M, I, C>
 where
     M: NetworkMessage + Clone,
     I: NetworkInjection<M>,
+    C: MessageCertifier<Message = M>,
 {
-    type Sender = InjectedLocalNetworkSender<M, I>;
+    type Sender = InjectedLocalNetworkSender<M, I, C>;
 
     fn new_sender(&self) -> Self::Sender {
         self.sender.clone()
     }
 
     async fn recv(&mut self) -> (NodeId, M) {
+        // TODO: add verification
         self.recv.recv().await.unwrap()
     }
 }
@@ -160,7 +223,11 @@ pub struct InjectedLocalNetwork<M, I> {
     injection: I,
 }
 
-impl<M, I: NetworkInjection<M>> InjectedLocalNetwork<M, I> {
+impl<M, I> InjectedLocalNetwork<M, I>
+where
+    M: NetworkMessage + Clone,
+    I: NetworkInjection<M>,
+{
     pub fn new(n_nodes: usize, injection: I) -> Self {
         let (send, recv) = (0..n_nodes)
             .map(|_| {
@@ -175,15 +242,20 @@ impl<M, I: NetworkInjection<M>> InjectedLocalNetwork<M, I> {
         }
     }
 
-    pub fn service(&mut self, signer: Signer) -> InjectedLocalNetworkService<M, I> {
-        let node_id = signer.node_id();
-
+    pub fn service<C>(
+        &mut self,
+        node_id: NodeId,
+        certifier: Arc<C>,
+    ) -> InjectedLocalNetworkService<M, I, C>
+    where
+        C: MessageCertifier<Message = M>,
+    {
         InjectedLocalNetworkService {
             sender: InjectedLocalNetworkSender {
                 send: self.send.clone(),
                 injection: self.injection.clone(),
                 node_id,
-                signer,
+                certifier,
             },
             recv: self.recv[node_id].take().unwrap(),
         }

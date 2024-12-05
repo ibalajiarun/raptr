@@ -42,15 +42,12 @@ use futures::{executor::block_on, future::BoxFuture, FutureExt, StreamExt};
 use futures_channel::{mpsc::UnboundedSender, oneshot};
 use itertools::Itertools;
 use raikou::{
-    framework,
     framework::{
         injection::{delay_injection, drop_injection},
         module_network::{match_event_type, ModuleId, ModuleNetwork, ModuleNetworkService},
-        network::{Network, NetworkService},
+        network::{MessageCertifier, Network, NetworkService},
         tcp_network::TcpNetworkService,
         timer::LocalTimerService,
-        udp_network,
-        udp_network::UdpNetworkService,
         NodeId, Protocol,
     },
     metrics,
@@ -66,7 +63,7 @@ use rayon::slice::ParallelSlice;
 use serde::{Deserialize, Serialize};
 use std::{
     any::{Any, TypeId},
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     future::Future,
     marker::PhantomData,
     net::SocketAddr,
@@ -125,6 +122,7 @@ impl RaikouManager {
     ) {
         let n_nodes = epoch_state.verifier.len();
         let f = (n_nodes - 1) / 3;
+        let ac_quorum = 2 * f + 1;
         let start_time = Instant::now();
 
         let timer = LocalTimerService::new();
@@ -146,9 +144,9 @@ impl RaikouManager {
             error!("ip missing for self: {:?}", validator_set);
         }
 
-        let signer = raikou::framework::crypto::Signer::new(node_id, validator_signer.clone());
+        let signer = raikou::framework::crypto::Signer::new(validator_signer.clone());
 
-        let verifier = raikou::framework::crypto::Verifier::new(
+        let sig_verifier = raikou::framework::crypto::SignatureVerifier::new(
             index_to_address
                 .iter()
                 .sorted_by_key(|(&index, _)| index)
@@ -164,45 +162,6 @@ impl RaikouManager {
         //     raikou::raikou::QC::genesis(),
         //     RoundEnterReason::Genesis
         // )).await;
-
-        let network_service = TcpNetworkService::new(
-            node_id,
-            format!("0.0.0.0:{}", CONS_BASE_PORT + node_id as u16,)
-                .parse()
-                .unwrap(),
-            raikou::framework::tcp_network::Config {
-                peers: validator_set
-                    .active_validators
-                    .iter()
-                    .enumerate()
-                    .map(|(peer_id, info)| {
-                        let ip = info.config().find_ip_addr();
-                        let addr = if let Some(addr) = ip {
-                            addr
-                        } else {
-                            let dns = info.config().find_dns_name().unwrap();
-                            block_on(lookup_host((
-                                dns.to_string(),
-                                CONS_BASE_PORT + peer_id as u16,
-                            )))
-                            .expect(&format!("{}", dns))
-                            .next()
-                            .unwrap()
-                            .ip()
-                        };
-                        (format!("{}:{}", addr, CONS_BASE_PORT + peer_id as u16,)
-                            .parse()
-                            .unwrap())
-                    })
-                    .collect(),
-                streams_per_peer: 4,
-            },
-            signer.clone(),
-            verifier.clone(),
-            // 32MB max block size
-            32 * 1024 * 1024,
-        )
-        .await;
 
         let config = raikou::raikou::Config {
             n_nodes,
@@ -220,6 +179,7 @@ impl RaikouManager {
             round_sync_interval: Duration::from_secs_f64(delta) * 15,
             block_fetch_multiplicity: std::cmp::min(2, n_nodes),
             block_fetch_interval: Duration::from_secs_f64(delta) * 2,
+            ac_quorum,
         };
 
         let mut module_network = ModuleNetwork::new();
@@ -252,16 +212,14 @@ impl RaikouManager {
             node_id,
             n_nodes,
             f,
+            ac_quorum,
             diss_module_network,
             delta,
             cons_module_id,
             start_time,
-            epoch_state.clone(),
-            diss_rx,
-            network_sender.clone(),
-            validator_set,
+            &validator_set,
             signer.clone(),
-            verifier.clone(),
+            sig_verifier.clone(),
             enable_optimistic_dissemination,
             diss_metrics,
         )
@@ -279,7 +237,7 @@ impl RaikouManager {
         )
         .await;
 
-        let node = Arc::new(tokio::sync::Mutex::new(RaikouNode::new(
+        let raikou_node = Arc::new(tokio::sync::Mutex::new(RaikouNode::new(
             node_id,
             config,
             dissemination,
@@ -293,9 +251,50 @@ impl RaikouManager {
                 // indirectly_committed_slots: indirectly_committed_slots_sender,
             },
             signer.clone(),
-            verifier.clone(),
+            sig_verifier.clone(),
             // ordered_nodes_tx,
         )));
+
+        let network_service = TcpNetworkService::new(
+            node_id,
+            format!("0.0.0.0:{}", CONS_BASE_PORT + node_id as u16,)
+                .parse()
+                .unwrap(),
+            raikou::framework::tcp_network::Config {
+                peers: validator_set
+                    .active_validators
+                    .iter()
+                    .enumerate()
+                    .map(|(peer_id, info)| {
+                        let ip = info.config().find_ip_addr();
+                        let addr = if let Some(addr) = ip {
+                            addr
+                        } else {
+                            let dns = info.config().find_dns_name().unwrap();
+                            block_on(lookup_host((
+                                dns.to_string(),
+                                CONS_BASE_PORT + peer_id as u16,
+                            )))
+                            .expect(&format!("{}", dns))
+                            .next()
+                            .unwrap()
+                            .ip()
+                        };
+
+                        format!("{}:{}", addr, CONS_BASE_PORT + peer_id as u16)
+                            .parse()
+                            .unwrap()
+                    })
+                    .collect(),
+                streams_per_peer: 4,
+            },
+            Arc::new(raikou::raikou::protocol::Certifier::new()),
+            Arc::new(raikou::raikou::protocol::Verifier::new(
+                raikou_node.lock().await.deref(),
+            )),
+            32 * 1024 * 1024, // 32MB max block size
+        )
+        .await;
 
         let print_metrics = async {
             // Notify the protocol to stop.
@@ -404,7 +403,7 @@ impl RaikouManager {
                 print_metrics.await;
                 let _ = ack_tx.send(());
             },
-            _ = Protocol::run(node, node_id, network_service, cons_module_network, timer) => {
+            _ = Protocol::run(raikou_node, node_id, network_service, cons_module_network, timer) => {
                 print_metrics.await;
             },
         }
@@ -496,44 +495,57 @@ impl RaikouManager {
         node_id: NodeId,
         n_nodes: usize,
         f: usize,
+        ac_quorum: usize,
         diss_module_network: ModuleNetworkService,
         delta: f64,
         consensus_module_id: ModuleId,
         start_time: Instant,
-        epoch_state: Arc<EpochState>,
-        diss_rx: aptos_channels::aptos_channel::Receiver<
-            aptos_types::PeerId,
-            (Author, RaikouNetworkMessage),
-        >,
-        network_sender: Arc<NetworkSender>,
-        validator_set: ValidatorSet,
+        validator_set: &ValidatorSet,
         signer: raikou::framework::crypto::Signer,
-        verifier: raikou::framework::crypto::Verifier,
+        sig_verifier: raikou::framework::crypto::SignatureVerifier,
         enable_optimistic_dissemination: bool,
         metrics: dissemination::Metrics,
     ) -> impl DisseminationLayer {
-        // let diss_network_service =
-        //     RaikouDissNetworkService::new(epoch_state, diss_rx, network_sender);
+        let batch_interval_secs = delta * 0.2;
 
-        // let diss_network_service = UdpNetworkService::new(
-        //     node_id,
-        //     validator_set.active_validators[node_id].config().find_ip_addr().unwrap(),
-        //     // base_port is chosen to avoid any collisions when running
-        //     // multiple instances on the same machine.
-        //     DISS_BASE_PORT + (node_id * n_nodes) as u16,
-        //     udp_network::Config {
-        //         peers: validator_set
-        //             .active_validators
-        //             .iter()
-        //             .enumerate()
-        //             .map(|(peer_id, info)| (
-        //                 info.config().find_ip_addr().unwrap(),
-        //                 DISS_BASE_PORT + (peer_id * n_nodes) as u16,
-        //             ))
-        //             .collect(),
-        //         peer_concurrency_level: 4,
-        //     },
-        // ).await;
+        let config = dissemination::native::Config {
+            module_id: diss_module_network.module_id(),
+            n_nodes,
+            f,
+            ac_quorum,
+            delta: Duration::from_secs_f64(delta),
+            batch_interval: Duration::from_secs_f64(batch_interval_secs),
+            enable_optimistic_dissemination,
+            // penalty tracker doesn't work with 0 delays
+            enable_penalty_tracker: false,
+            penalty_tracker_report_delay: Duration::from_secs_f64(delta * 5.),
+            batch_fetch_multiplicity: std::cmp::min(2, n_nodes),
+            batch_fetch_interval: Duration::from_secs_f64(delta) * 2,
+            status_interval: Duration::from_secs_f64(delta) * 10,
+        };
+
+        let diss_timer = LocalTimerService::new();
+
+        // TODO: make these into parameters.
+        let target_tps = 100_000;
+        let n_client_workers = 5;
+
+        let batch_size =
+            f64::ceil(target_tps as f64 * batch_interval_secs / n_nodes as f64) as usize;
+
+        let txns_iter = run_fake_client(batch_size, n_client_workers).await;
+
+        let dissemination = dissemination::native::NativeDisseminationLayer::new(
+            node_id,
+            config,
+            txns_iter,
+            consensus_module_id,
+            start_time,
+            true,
+            metrics,
+            signer.clone(),
+            sig_verifier,
+        );
 
         let diss_network_service = TcpNetworkService::new(
             node_id,
@@ -564,49 +576,11 @@ impl RaikouManager {
                     .collect(),
                 streams_per_peer: 4,
             },
-            signer.clone(),
-            verifier.clone(),
+            Arc::new(dissemination::native::Certifier::new(signer)),
+            Arc::new(dissemination::native::Verifier::new(&dissemination).await),
             1 * 1024 * 1024,
         )
         .await;
-
-        let diss_timer = LocalTimerService::new();
-
-        // TODO: make these into parameters.
-        let target_tps = 100_000;
-        let n_client_workers = 5;
-
-        let batch_interval_secs = delta * 0.2;
-        let batch_size =
-            f64::ceil(target_tps as f64 * batch_interval_secs / n_nodes as f64) as usize;
-
-        let txns_iter = run_fake_client(batch_size, n_client_workers).await;
-
-        let dissemination = dissemination::native::NativeDisseminationLayer::new(
-            node_id,
-            dissemination::native::Config {
-                module_id: diss_module_network.module_id(),
-                n_nodes,
-                f,
-                ac_quorum: 2 * f + 1,
-                delta: Duration::from_secs_f64(delta),
-                batch_interval: Duration::from_secs_f64(batch_interval_secs),
-                enable_optimistic_dissemination,
-                // penalty tracker doesn't work with 0 delays
-                enable_penalty_tracker: false,
-                penalty_tracker_report_delay: Duration::from_secs_f64(delta * 5.),
-                batch_fetch_multiplicity: std::cmp::min(2, n_nodes),
-                batch_fetch_interval: Duration::from_secs_f64(delta) * 2,
-                status_interval: Duration::from_secs_f64(delta) * 10,
-            },
-            txns_iter,
-            consensus_module_id,
-            start_time,
-            true,
-            metrics,
-            signer,
-            verifier,
-        );
 
         tokio::spawn(Protocol::run(
             dissemination.protocol(),
@@ -677,18 +651,19 @@ async fn run_fake_client(
     })
 }
 
-pub struct RaikouNetworkSenderInner<M> {
+pub struct RaikouNetworkSenderInner<M, C> {
     epoch: u64,
     n_nodes: usize,
     index_to_address: HashMap<usize, Author>,
     network_sender: Arc<NetworkSender>,
-    signer: raikou::framework::crypto::Signer,
+    certifier: Arc<C>,
     _phantom: PhantomData<M>,
 }
 
-impl<M> RaikouNetworkSenderInner<M>
+impl<M, C> RaikouNetworkSenderInner<M, C>
 where
     M: raikou::framework::network::NetworkMessage + Serialize + for<'de> Deserialize<'de>,
+    C: raikou::framework::network::MessageCertifier<Message = M>,
 {
     async fn send(&self, mut msg: M, targets: Vec<NodeId>) {
         let epoch = self.epoch;
@@ -698,11 +673,11 @@ where
             .collect();
 
         let aptos_network_sender = self.network_sender.clone();
-        let signer = self.signer.clone();
+        let certifier = self.certifier.clone();
 
         // Serialization and signing are done in a separate task to avoid blocking the main loop.
         tokio::spawn(async move {
-            msg.sign(&signer).unwrap();
+            certifier.certify(&mut msg).await.unwrap();
 
             let raikou_msg = RaikouNetworkMessage {
                 epoch,
@@ -720,11 +695,12 @@ where
     }
 }
 
-pub struct RaikouNetworkSender<M> {
-    inner: Arc<RaikouNetworkSenderInner<M>>,
+pub struct RaikouNetworkSender<M, C> {
+    inner: Arc<RaikouNetworkSenderInner<M, C>>,
 }
 
-impl<M> Clone for RaikouNetworkSender<M> {
+// #[derive(Clone)] doesn't work for `M` and `C` that are not `Clone`.
+impl<M, C> Clone for RaikouNetworkSender<M, C> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -732,9 +708,10 @@ impl<M> Clone for RaikouNetworkSender<M> {
     }
 }
 
-impl<M> raikou::framework::network::NetworkSender for RaikouNetworkSender<M>
+impl<M, C> raikou::framework::network::NetworkSender for RaikouNetworkSender<M, C>
 where
     M: raikou::framework::network::NetworkMessage + Serialize + for<'de> Deserialize<'de>,
+    C: raikou::framework::network::MessageCertifier<Message = M>,
 {
     type Message = M;
 
@@ -747,14 +724,15 @@ where
     }
 }
 
-pub struct RaikouNetworkService<M> {
-    sender: RaikouNetworkSender<M>,
+pub struct RaikouNetworkService<M, C> {
+    sender: RaikouNetworkSender<M, C>,
     deserialized_messages_rx: tokio::sync::mpsc::Receiver<(NodeId, M)>,
 }
 
-impl<M> RaikouNetworkService<M>
+impl<M, C> RaikouNetworkService<M, C>
 where
     M: Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static,
+    C: MessageCertifier<Message = M> + Send + Sync + 'static,
 {
     pub async fn new(
         epoch_state: Arc<EpochState>,
@@ -763,7 +741,7 @@ where
             (Author, RaikouNetworkMessage),
         >,
         network_sender: Arc<NetworkSender>,
-        signer: raikou::framework::crypto::Signer,
+        certifier: Arc<C>,
     ) -> Self {
         let address_to_index = epoch_state.verifier.address_to_validator_index().clone();
         let index_to_address = address_to_index
@@ -809,7 +787,7 @@ where
                     n_nodes: epoch_state.verifier.len(),
                     index_to_address,
                     network_sender,
-                    signer,
+                    certifier,
                     _phantom: PhantomData,
                 }),
             },
@@ -818,9 +796,10 @@ where
     }
 }
 
-impl<M> raikou::framework::network::NetworkSender for RaikouNetworkService<M>
+impl<M, C> raikou::framework::network::NetworkSender for RaikouNetworkService<M, C>
 where
     M: raikou::framework::network::NetworkMessage + Serialize + for<'de> Deserialize<'de>,
+    C: raikou::framework::network::MessageCertifier<Message = M>,
 {
     type Message = M;
 
@@ -833,11 +812,12 @@ where
     }
 }
 
-impl<M> NetworkService for RaikouNetworkService<M>
+impl<M, C> NetworkService for RaikouNetworkService<M, C>
 where
     M: raikou::framework::network::NetworkMessage + Serialize + for<'de> Deserialize<'de>,
+    C: raikou::framework::network::MessageCertifier<Message = M>,
 {
-    type Sender = RaikouNetworkSender<M>;
+    type Sender = RaikouNetworkSender<M, C>;
 
     fn new_sender(&self) -> Self::Sender {
         self.sender.clone()

@@ -206,8 +206,8 @@ impl MessageVerifier for Verifier {
                     return Err(anyhow::anyhow!("Invalid batch digest in AcVote"));
                 }
 
-                let sig_data = BatchSignatureData {
-                    digest: digest.clone(),
+                let sig_data = AcVoteSignatureData {
+                    batch_digest: digest.clone(),
                 };
 
                 self.sig_verifier

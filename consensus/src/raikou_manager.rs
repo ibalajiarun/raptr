@@ -68,7 +68,10 @@ use std::{
     marker::PhantomData,
     net::SocketAddr,
     ops::Deref,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 use tokio::{net::lookup_host, time::Instant};
@@ -198,6 +201,7 @@ impl RaikouManager {
         let mut queueing_time = metrics::UnorderedBuilder::new();
         let mut penalty_wait_time = metrics::UnorderedBuilder::new();
         let mut fetch_wait_time_after_commit = metrics::UnorderedBuilder::new();
+        let executed_txns_counter = Arc::new(AtomicUsize::new(0));
 
         let diss_metrics = dissemination::Metrics {
             batch_commit_time: Some(batch_commit_time.new_sender()),
@@ -222,6 +226,7 @@ impl RaikouManager {
             sig_verifier.clone(),
             enable_optimistic_dissemination,
             diss_metrics,
+            executed_txns_counter.clone(),
         )
         .await;
 
@@ -396,6 +401,11 @@ impl RaikouManager {
                 "Metrics: \n{}",
                 std::str::from_utf8(&metrics_output_buf).unwrap(),
             );
+
+            aptos_logger::info!(
+                "Executed transactions: {}",
+                executed_txns_counter.load(Ordering::SeqCst)
+            );
         };
 
         tokio::select! {
@@ -505,6 +515,7 @@ impl RaikouManager {
         sig_verifier: raikou::framework::crypto::SignatureVerifier,
         enable_optimistic_dissemination: bool,
         metrics: dissemination::Metrics,
+        executed_txns_counter: Arc<AtomicUsize>,
     ) -> impl DisseminationLayer {
         let batch_interval_secs = delta * 0.2;
 
@@ -535,6 +546,15 @@ impl RaikouManager {
 
         let txns_iter = run_fake_client(batch_size, n_client_workers).await;
 
+        let (execute_tx, mut execute_rx) =
+            tokio::sync::mpsc::channel::<dissemination::native::Batch>(1024);
+
+        tokio::spawn(async move {
+            while let Some(batch) = execute_rx.recv().await {
+                executed_txns_counter.fetch_add(batch.txns().len(), Ordering::SeqCst);
+            }
+        });
+
         let dissemination = dissemination::native::NativeDisseminationLayer::new(
             node_id,
             config,
@@ -545,6 +565,7 @@ impl RaikouManager {
             metrics,
             signer.clone(),
             sig_verifier,
+            execute_tx,
         );
 
         let diss_network_service = TcpNetworkService::new(

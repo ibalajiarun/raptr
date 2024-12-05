@@ -14,12 +14,25 @@ use crate::{
     metrics,
     metrics::display_metric,
     raikou,
-    raikou::{dissemination, dissemination::native::NativeDisseminationLayer, RaikouNode},
+    raikou::{
+        dissemination,
+        dissemination::native::{Batch, NativeDisseminationLayer},
+        RaikouNode,
+    },
 };
 use aptos_crypto::bls12381::{PrivateKey, PublicKey};
 use aptos_types::{account_address::AccountAddress, validator_signer::ValidatorSigner};
 use rand::{thread_rng, Rng};
-use std::{collections::BTreeMap, iter, ops::Deref, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    iter,
+    ops::Deref,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 use tokio::{spawn, sync::RwLock, time, time::Instant};
 
 const JOLTEON_TIMEOUT: u32 = 3; // in Deltas
@@ -668,6 +681,7 @@ async fn test_raikou(
     let mut batch_execute_time = metrics::UnorderedBuilder::new();
     let mut fetch_wait_time_after_commit = metrics::UnorderedBuilder::new();
     // let mut indirectly_committed_slots = metrics::UnorderedBuilder::new();
+    let executed_txns_counter = Arc::new(AtomicUsize::new(0));
 
     let private_keys: Vec<_> = (0..n_nodes)
         .map(|node_id| {
@@ -716,6 +730,7 @@ async fn test_raikou(
         let batch_consensus_latency_sender = Some(batch_consensus_latency.new_sender());
         let batch_execute_time_sender = Some(batch_execute_time.new_sender());
         let fetch_wait_time_after_commit_sender = Some(fetch_wait_time_after_commit.new_sender());
+        let executed_txns_counter = executed_txns_counter.clone();
         // let indirectly_committed_slots_sender = if node_id == monitored_node {
         //     Some(indirectly_committed_slots.new_sender())
         // } else {
@@ -740,6 +755,17 @@ async fn test_raikou(
             let mut module_network = ModuleNetwork::new();
             let diss_module_network = module_network.register().await;
             let cons_module_network = module_network.register().await;
+
+            let (execute_tx, mut execute_rx) = tokio::sync::mpsc::channel::<Batch>(1024);
+
+            let executed_txns_counter = executed_txns_counter.clone();
+            tokio::spawn(async move {
+                while let Some(batch) = execute_rx.recv().await {
+                    if node_id == monitored_node {
+                        executed_txns_counter.fetch_add(batch.txns().len(), Ordering::SeqCst);
+                    }
+                }
+            });
 
             let dissemination = NativeDisseminationLayer::new(
                 node_id,
@@ -770,6 +796,7 @@ async fn test_raikou(
                 },
                 signer.clone(),
                 sig_verifier.clone(),
+                execute_tx,
             );
 
             // println!("Spawning node {node_id}");
@@ -907,6 +934,11 @@ async fn test_raikou(
         warmup_period_in_delta,
     )
     .await;
+
+    println!(
+        "Executed transactions: {}",
+        executed_txns_counter.load(Ordering::SeqCst)
+    );
 }
 
 pub async fn main() {

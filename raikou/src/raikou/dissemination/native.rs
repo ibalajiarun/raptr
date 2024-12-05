@@ -277,6 +277,7 @@ where
         metrics: Metrics,
         signer: Signer,
         verifier: SignatureVerifier,
+        execute_tx: tokio::sync::mpsc::Sender<Batch>,
     ) -> Self {
         if !config.enable_optimistic_dissemination && !config.enable_penalty_tracker {
             aptos_logger::warn!(
@@ -298,6 +299,7 @@ where
                     metrics,
                     signer,
                     verifier,
+                    execute_tx,
                 ),
             )),
         }
@@ -434,7 +436,7 @@ where
                 .flat_map(|payload| payload.all())
                 .map(|batch_info| batch_info.digest.clone()),
         );
-        inner.execute_prefix();
+        inner.execute_prefix().await;
     }
 }
 
@@ -496,6 +498,9 @@ pub struct NativeDisseminationLayerProtocol<TI> {
     signer: Signer,
     sig_verifier: SignatureVerifier,
 
+    // Execution
+    execute_tx: tokio::sync::mpsc::Sender<Batch>,
+
     // Logging and metrics
     detailed_logging: bool,
     start_time: Instant,
@@ -544,6 +549,7 @@ where
         metrics: Metrics,
         signer: Signer,
         sig_verifier: SignatureVerifier,
+        execute_tx: tokio::sync::mpsc::Sender<Batch>,
     ) -> Self {
         let penalty_tracker_config = penalty_tracker::Config {
             n_nodes: config.n_nodes,
@@ -574,6 +580,7 @@ where
             batch_commit_time: Default::default(),
             signer,
             sig_verifier,
+            execute_tx,
         }
     }
 
@@ -680,13 +687,16 @@ where
         });
     }
 
-    fn execute_prefix(&mut self) {
+    async fn execute_prefix(&mut self) {
         let now = Instant::now();
 
-        while let Some(batch_digest) = self.execution_queue.pop_front() {
-            if !self.batches.contains_key(&batch_digest) {
+        while let Some(batch_digest) = self.execution_queue.front() {
+            let Some(batch) = self.batches.get(batch_digest) else {
                 break;
-            }
+            };
+
+            let batch_digest = self.execution_queue.pop_front().unwrap();
+            self.execute_tx.send(batch.clone()).await.unwrap();
 
             if let Some(&send_time) = self.batch_send_time.get(&batch_digest) {
                 self.metrics

@@ -32,10 +32,6 @@ impl Debug for Payload {
     }
 }
 
-pub fn hash(x: &impl CryptoHash) -> HashValue {
-    x.hash()
-}
-
 impl Payload {
     /// Creates a new block payload.
     pub fn new(

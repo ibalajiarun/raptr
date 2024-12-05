@@ -7,7 +7,6 @@ use crate::{
 };
 use bitvec::prelude::BitVec;
 use serde::{Deserialize, Serialize};
-use siphasher::sip::SipHasher13;
 use std::{
     fmt::{Debug, Formatter},
     hash::{Hash, Hasher},
@@ -38,11 +37,11 @@ impl BatchInfo {
     }
 }
 
-impl std::fmt::Debug for BatchInfo {
+impl Debug for BatchInfo {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{{ node: {}, sn: {}, hash: {:#x} }}",
+            "{{ node: {}, sn: {}, digest: {:#x} }}",
             self.author, self.batch_id, &self.digest
         )
     }

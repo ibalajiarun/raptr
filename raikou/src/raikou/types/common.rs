@@ -61,7 +61,7 @@ pub struct BlockData {
 
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
 pub struct BlockSignatureData {
-    pub hash: BlockHash,
+    pub digest: BlockHash,
 }
 
 impl Block {
@@ -124,7 +124,7 @@ impl Block {
             .verify(
                 self.author(),
                 &BlockSignatureData {
-                    hash: self.digest.clone(),
+                    digest: self.digest.clone(),
                 },
                 &self.signature,
             )
@@ -138,7 +138,7 @@ impl Block {
 pub struct QcVoteSignatureData {
     pub round: Round,
     pub prefix: Prefix,
-    pub hash: BlockHash,
+    pub block_digest: BlockHash,
 }
 
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
@@ -188,7 +188,7 @@ impl From<(Round, Prefix)> for SubBlockId {
 pub struct QC {
     pub round: Round,
     pub prefix: Prefix,
-    pub hash: HashValue,
+    pub block_digest: HashValue,
     pub vote_prefixes: PrefixSet,
     pub aggregated_signature: Option<Signature>, // `None` only for the genesis QC.
 }
@@ -207,7 +207,7 @@ impl QC {
         QC {
             round: 0,
             prefix: N_SUB_BLOCKS,
-            hash: HashValue::zero(),
+            block_digest: HashValue::zero(),
             vote_prefixes: PrefixSet::empty(),
             aggregated_signature: None,
         }
@@ -232,7 +232,7 @@ impl QC {
     fn validate_structure(&self) -> bool {
         if self.is_genesis() {
             return self.vote_prefixes.is_empty()
-                && self.hash == HashValue::zero()
+                && self.block_digest == HashValue::zero()
                 && self.aggregated_signature.is_none();
         }
 
@@ -261,7 +261,7 @@ impl QC {
             .map(|prefix| QcVoteSignatureData {
                 round: self.round,
                 prefix,
-                hash: self.hash.clone(),
+                block_digest: self.block_digest.clone(),
             })
             .collect();
 
@@ -297,7 +297,7 @@ impl Ord for QC {
 #[serde(from = "CcSerialization")]
 pub struct CC {
     round: Round,
-    hash: HashValue,
+    block_digest: HashValue,
     vote_prefixes: PrefixSet,
     aggregated_signature: Signature,
 
@@ -310,7 +310,7 @@ pub struct CC {
 #[derive(Deserialize)]
 struct CcSerialization {
     round: Round,
-    hash: HashValue,
+    block_digest: HashValue,
     vote_prefixes: PrefixSet,
     aggregated_signature: Signature,
 }
@@ -319,7 +319,7 @@ impl From<CcSerialization> for CC {
     fn from(serialized: CcSerialization) -> Self {
         CC::new(
             serialized.round,
-            serialized.hash,
+            serialized.block_digest,
             serialized.vote_prefixes,
             serialized.aggregated_signature,
         )
@@ -329,20 +329,20 @@ impl From<CcSerialization> for CC {
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
 pub struct CcVoteSignatureData {
     pub round: Round,
-    pub hash: BlockHash,
+    pub block_digest: BlockHash,
     pub prefix: Prefix,
 }
 
 impl CC {
     pub fn new(
         round: Round,
-        hash: BlockHash,
+        block_digest: BlockHash,
         vote_prefixes: PrefixSet,
         aggregated_signature: Signature,
     ) -> Self {
         CC {
             round,
-            hash,
+            block_digest,
             aggregated_signature,
             min_prefix: vote_prefixes.prefixes().min().unwrap(),
             max_prefix: vote_prefixes.prefixes().max().unwrap(),
@@ -365,7 +365,7 @@ impl CC {
             .map(|prefix| CcVoteSignatureData {
                 round: self.round,
                 prefix,
-                hash: self.hash,
+                block_digest: self.block_digest,
             })
             .collect();
 

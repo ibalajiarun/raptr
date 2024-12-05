@@ -66,7 +66,7 @@ impl From<BatchSerialization> for Batch {
 
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
 struct BatchSignatureData {
-    hash: BatchHash,
+    digest: BatchHash,
 }
 
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
@@ -150,7 +150,7 @@ impl Validate for Message {
 
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
 struct BatchStoredSignatureData {
-    hash: BatchHash,
+    digest: BatchHash,
 }
 
 impl Sign for Message {
@@ -163,9 +163,8 @@ impl Sign for Message {
             },
             Message::BatchStored(_, batch_digest, signature) => {
                 // *signature = signer.sign(&BatchStoredSignatureData {
-                //     hash: batch_digest.clone(),
+                //     digest: batch_digest.clone(),
                 // })?;
-                // TODO
             },
             Message::AvailabilityCert(_) => {},
             Message::Fetch(_) => {},
@@ -267,8 +266,8 @@ where
         let acs = inner
             .uncommitted_acs
             .iter()
-            .filter(|&(batch_hash, _ac)| !exclude.contains(batch_hash))
-            .map(|(_batch_hash, ac)| ac.clone())
+            .filter(|&(batch_digest, _ac)| !exclude.contains(batch_digest))
+            .map(|(_batch_digest, ac)| ac.clone())
             .collect();
 
         let batches = if inner.config.enable_optimistic_dissemination {
@@ -319,7 +318,7 @@ where
                     // e.g., if the block for the parent QC is not available, we will
                     // go ahead with an incomplete `exclude` set.
                     aptos_logger::warn!(
-                        "Duplicate commit for batch {} (hash: {:#x})",
+                        "Duplicate commit for batch {} (digest: {:#x})",
                         batch.batch_id,
                         batch.digest,
                     );
@@ -675,7 +674,7 @@ where
                 txns: Arc::new(self.txns_iter.next().unwrap()),
             };
             let digest = batch_data.hash();
-            let signature = self.signer.sign(&BatchSignatureData { hash: digest.clone() }).unwrap();
+            let signature = self.signer.sign(&BatchSignatureData { digest: digest.clone() }).unwrap();
 
             let batch = Batch {
                 data: batch_data,
@@ -702,8 +701,6 @@ where
         // Upon receiving a batch, store it, reply with a BatchStored message,
         // and execute try_vote.
         upon receive [Message::Batch(batch)] from [_any_node] {
-            assert_eq!(batch.author(), _any_node,"FOO4");
-
             // self.log_detail(format!(
             //     "Received batch #{} from node {} with digest {:#x}",
             //     batch.batch_id(),
@@ -744,7 +741,7 @@ where
             self.on_new_ac(ac, ctx).await;
         };
 
-        upon event of type [ProposalReceived] from [consensus] {
+        upon event of type [ProposalReceived] from [_any_module] {
             upon [ProposalReceived { leader, round, payload, .. }] {
                 for ac in payload.acs() {
                     if !self.uncommitted_acs.contains_key(&ac.info.digest)

@@ -99,15 +99,17 @@ impl Batch {
     }
 
     pub fn verify(&self, verifier: &SignatureVerifier) -> anyhow::Result<()> {
-        // TODO
-        Ok(())
+        let sig_data = &BatchSignatureData {
+            digest: self.digest.clone(),
+        };
+        verifier.verify(self.author(), sig_data, &self.signature)
     }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Message {
     Batch(Batch),
-    AcVote(BatchId, Signature),
+    AcVote(BatchId, BatchHash, Signature),
     AvailabilityCert(AC),
     Fetch(Vec<BatchHash>),
     FetchResp(Vec<Batch>),
@@ -118,7 +120,7 @@ impl std::fmt::Debug for Message {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Message::Batch(batch) => write!(f, "Batch({})", batch.batch_id()),
-            Message::AcVote(batch_id, _) => write!(f, "BatchStored({})", batch_id),
+            Message::AcVote(batch_id, _, _) => write!(f, "BatchStored({})", batch_id),
             Message::AvailabilityCert(ac) => write!(f, "AvailabilityCert({})", ac.info.batch_id),
             Message::Fetch(digests) => write!(f, "Fetch({} batches)", digests.len()),
             Message::FetchResp(batches) => write!(f, "FetchResp({} batches)", batches.len()),
@@ -143,7 +145,22 @@ impl MessageCertifier for Certifier {
     type Message = Message;
 
     async fn certify(&self, message: &mut Self::Message) -> anyhow::Result<()> {
-        // TODO
+        match message {
+            Message::Batch(_batch) => {},
+            Message::AcVote(_batch_id, batch_digest, signature) => {
+                *signature = self
+                    .signer
+                    .sign(&AcVoteSignatureData {
+                        batch_digest: batch_digest.clone(),
+                    })
+                    .unwrap();
+            },
+            Message::AvailabilityCert(_) => {},
+            Message::Fetch(_) => {},
+            Message::FetchResp(_) => {},
+            Message::PenaltyTrackerReport(_, _) => {},
+        }
+
         Ok(())
     }
 }
@@ -177,7 +194,7 @@ impl MessageVerifier for Verifier {
                 batch.verify(&self.sig_verifier).context("Invalid batch")
             },
 
-            Message::AcVote(batch_id, signature) => {
+            Message::AcVote(batch_id, batch_digest, signature) => {
                 let Some(digest) = self.my_batches.read().await.get(batch_id).cloned() else {
                     return Err(anyhow::anyhow!(
                         "AcVote for an unknown batch id {}",
@@ -185,12 +202,17 @@ impl MessageVerifier for Verifier {
                     ));
                 };
 
-                // TODO: uncomment once signing is there
-                // let sig_data = &BatchSignatureData { digest: digest.clone() };
-                // self.sig_verifier.verify(sender, &sig_data, signature)
-                //     .context("Invalid signature in AcVote")
+                if digest != *batch_digest {
+                    return Err(anyhow::anyhow!("Invalid batch digest in AcVote"));
+                }
 
-                Ok(())
+                let sig_data = BatchSignatureData {
+                    digest: digest.clone(),
+                };
+
+                self.sig_verifier
+                    .verify(sender, &sig_data, signature)
+                    .context("Invalid signature in AcVote")
             },
 
             Message::AvailabilityCert(ac) => ac
@@ -210,11 +232,6 @@ impl MessageVerifier for Verifier {
             Message::PenaltyTrackerReport(_round, _reports) => Ok(()),
         }
     }
-}
-
-#[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
-struct BatchStoredSignatureData {
-    digest: BatchHash,
 }
 
 #[derive(Clone)]
@@ -469,7 +486,7 @@ pub struct NativeDisseminationLayerProtocol<TI> {
     uncommitted_uncertified_batches: BTreeSet<BatchHash>,
 
     // The set of nodes that have stored this node's batch with the given sequence number.
-    batch_stored_votes: DefaultBTreeMap<BatchId, BitVec>,
+    batch_stored_votes: DefaultBTreeMap<BatchId, BTreeMap<NodeId, Signature>>,
 
     // Tracking the missing batches in the current proposal.
     current_proposal_status: CurrentProposalStatus,
@@ -528,7 +545,6 @@ where
         signer: Signer,
         sig_verifier: SignatureVerifier,
     ) -> Self {
-        let n_nodes = config.n_nodes;
         let penalty_tracker_config = penalty_tracker::Config {
             n_nodes: config.n_nodes,
             f: config.f,
@@ -547,7 +563,7 @@ where
             committed_batches: BTreeSet::new(),
             uncommitted_acs: BTreeMap::new(),
             uncommitted_uncertified_batches: BTreeSet::new(),
-            batch_stored_votes: DefaultBTreeMap::new(BitVec::repeat(false, n_nodes)),
+            batch_stored_votes: Default::default(),
             current_proposal_status: Default::default(),
             consensus_module_id,
             execution_queue: Default::default(),
@@ -590,6 +606,7 @@ where
             ctx.unicast(
                 Message::AcVote(
                     batch_id,
+                    digest.clone(),
                     crypto::empty_signature(), // Populated in the `sign` method.
                 ),
                 author,
@@ -756,28 +773,35 @@ where
 
         // Upon receiving a quorum of BatchStored messages for a batch,
         // form an AC and broadcast it.
-        upon receive [Message::AcVote(batch_id, signature)] from node [p] {
-            self.batch_stored_votes[batch_id].set(p, true);
+        upon receive [Message::AcVote(batch_id, batch_digest, signature)] from node [p] {
+            self.batch_stored_votes[batch_id].insert(p, signature);
 
-            if self.batch_stored_votes[batch_id].count_ones() == self.config.ac_quorum {
-                let batch_digest = self.my_batches.read().await[&batch_id].clone();
-
+            if self.batch_stored_votes[batch_id].len() == self.config.ac_quorum {
                 self.log_detail(format!(
                     "Forming the AC for batch #{} with digest {:#x}",
                     batch_id,
                     batch_digest,
                 ));
 
-                // TODO: add an aggregated signature to the AC.
+                let mut signers = BitVec::repeat(false, self.config.n_nodes);
+                for (node, _) in self.batch_stored_votes[batch_id].iter() {
+                    signers.set(*node, true);
+                }
+
+                let multi_signature = self.sig_verifier.aggregate_signatures(
+                    self.batch_stored_votes[batch_id].values().cloned()
+                ).unwrap();
 
                 let ac = AC {
                     info: self.batches[&batch_digest].get_info(),
-                    signers: self.batch_stored_votes[batch_id].clone(),
+                    signers,
+                    multi_signature,
                 };
 
                 ctx.multicast(Message::AvailabilityCert(ac)).await;
             }
         };
+
 
         upon receive [Message::AvailabilityCert(ac)] from [_any_node] {
             self.on_new_ac(ac, ctx).await;
@@ -864,7 +888,7 @@ where
             ctx.unicast(Message::FetchResp(resp), p).await;
         };
 
-        upon receive [Message::FetchResp(batches)] from node [p] {
+        upon receive [Message::FetchResp(batches)] from [_any_node] {
             // If receive a FetchResp message, store the batches.
             for batch in batches {
                 if !self.fetch_tasks.contains_key(&batch.digest) {

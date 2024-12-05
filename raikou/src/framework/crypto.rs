@@ -6,7 +6,7 @@ use aptos_crypto::{
     bls12381,
     bls12381::{PrivateKey, PublicKey},
     hash::CryptoHash,
-    Genesis, SigningKey, VerifyingKey,
+    Genesis, Signature, SigningKey, VerifyingKey,
 };
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
 use aptos_types::validator_signer::ValidatorSigner;
@@ -32,7 +32,7 @@ impl SignatureVerifier {
         message: &T,
         signature: &bls12381::Signature,
     ) -> anyhow::Result<()> {
-        self.public_keys[author].verify_struct_signature(message, signature)
+        signature.verify(message, &self.public_keys[author])
     }
 
     pub fn verify_aggregate_signatures<T: CryptoHash + Serialize>(
@@ -47,6 +47,22 @@ impl SignatureVerifier {
             .collect();
 
         signature.verify_aggregate(&messages, &public_keys)
+    }
+
+    pub fn verify_multi_signature<T: CryptoHash + Serialize>(
+        &self,
+        nodes: impl IntoIterator<Item = NodeId>,
+        message: &T,
+        multi_sig: &bls12381::Signature,
+    ) -> anyhow::Result<()> {
+        let pub_keys: Vec<_> = nodes
+            .into_iter()
+            .map(|node| &self.public_keys[node])
+            .collect();
+
+        let aggregated_key = PublicKey::aggregate(pub_keys)?;
+
+        multi_sig.verify(message, &aggregated_key)
     }
 
     pub fn aggregate_signatures(

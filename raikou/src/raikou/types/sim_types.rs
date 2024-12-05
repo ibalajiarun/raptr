@@ -9,7 +9,10 @@ use crate::{
     },
 };
 use anyhow::Context;
+use aptos_crypto::bls12381::Signature;
+use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
 use bitvec::prelude::BitVec;
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use std::{
     fmt::{Debug, Formatter},
@@ -53,9 +56,14 @@ impl Debug for BatchInfo {
 
 #[derive(Clone, Hash, Serialize, Deserialize)]
 pub struct AC {
-    // In practice, this would be a hash pointer.
     pub info: BatchInfo,
     pub signers: BitVec,
+    pub multi_signature: Signature,
+}
+
+#[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
+pub struct AcVoteSignatureData {
+    pub batch_digest: BatchHash,
 }
 
 impl AC {
@@ -64,8 +72,17 @@ impl AC {
     }
 
     pub fn verify(&self, sig_verifier: &SignatureVerifier, ac_quorum: usize) -> anyhow::Result<()> {
-        // TODO
-        Ok(())
+        let signers = self.signers.iter_ones().collect_vec();
+
+        if signers.len() < ac_quorum {
+            return Err(anyhow::anyhow!("AC has too few signers"));
+        }
+
+        let sig_data = AcVoteSignatureData {
+            batch_digest: self.info.digest,
+        };
+
+        sig_verifier.verify_multi_signature(signers, &sig_data, &self.multi_signature)
     }
 }
 

@@ -130,7 +130,7 @@ async fn transaction(
     client: &aptos_rest_client::Client,
     txn_payload: Vec<u8>,
 ) -> anyhow::Result<()> {
-    // #[cfg(any(not(feature = "sim-types"), feature = "force-aptos-types"))]
+    // #[cfg(none)]
     // {
     //     let response = client
     //         .post(client.build_path("submit_txn").unwrap())

@@ -12,10 +12,10 @@ use crate::{
 use std::{any::Any, collections::HashSet, fmt::Debug, future::Future};
 use tokio::time::Instant;
 
-#[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
+// #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
 pub mod native;
 
-#[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
+// #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
 pub mod penalty_tracker;
 
 /// Event sent by the consensus module to the dissemination layer to notify of a new block.

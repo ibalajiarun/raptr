@@ -302,7 +302,6 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         id: NodeId,
         config: Config<S>,
         dissemination: DL,
-        start_time: Instant,
         detailed_logging: bool,
         metrics: Metrics,
         signer: Signer,
@@ -316,7 +315,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             node_id: id,
             config: config.clone(),
             dissemination,
-            start_time,
+            start_time: Instant::now(), // Will be overwritten once the protocol is actually started.
             detailed_logging,
             metrics,
             block_create_time: Default::default(),
@@ -1151,8 +1150,9 @@ where
         // Logging and halting
 
         upon start {
+            self.start_time = Instant::now();
             self.log_detail("Started".to_string());
-            ctx.set_timer(self.config.end_of_run - Instant::now(), TimerEvent::EndOfRun);
+            ctx.set_timer(self.config.end_of_run - self.start_time, TimerEvent::EndOfRun);
             ctx.set_timer(self.config.status_interval, TimerEvent::Status);
         };
 

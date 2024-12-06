@@ -804,7 +804,6 @@ async fn test_raikou(
                 node_id,
                 config,
                 dissemination.clone(),
-                start_time,
                 node_id == monitored_node,
                 raikou::Metrics {
                     block_consensus_latency: block_consensus_latency_sender,

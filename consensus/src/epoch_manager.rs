@@ -1355,7 +1355,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
 
         let delta = 0.16;
 
-        #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
+        // #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
         let total_duration_in_delta = 200;
         #[cfg(any(not(feature = "sim-types"), feature = "force-aptos-types"))]
         let total_duration_in_delta = 10000; // infinity

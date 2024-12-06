@@ -211,7 +211,7 @@ impl RaikouManager {
             fetch_wait_time_after_commit: Some(fetch_wait_time_after_commit.new_sender()),
         };
 
-        #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
+        // #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
         let dissemination = Self::spawn_fake_dissemination_layer(
             node_id,
             n_nodes,
@@ -230,7 +230,7 @@ impl RaikouManager {
         )
         .await;
 
-        #[cfg(any(feature = "force-aptos-types", not(feature = "sim-types")))]
+        #[cfg(none)]
         let dissemination = Self::spawn_qs_dissemination_layer(
             node_id,
             payload_client,
@@ -246,7 +246,6 @@ impl RaikouManager {
             node_id,
             config,
             dissemination,
-            start_time,
             true,
             raikou::raikou::Metrics {
                 // propose_time: propose_time_sender,
@@ -421,7 +420,7 @@ impl RaikouManager {
         }
     }
 
-    #[cfg(any(feature = "force-aptos-types", not(feature = "sim-types")))]
+    #[cfg(none)]
     async fn spawn_qs_dissemination_layer(
         node_id: NodeId,
         payload_client: Arc<dyn PayloadClient>,
@@ -502,7 +501,7 @@ impl RaikouManager {
         dissemination
     }
 
-    #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
+    // #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
     async fn spawn_fake_dissemination_layer(
         node_id: NodeId,
         n_nodes: usize,
@@ -851,7 +850,7 @@ where
     }
 }
 
-#[cfg(any(feature = "force-aptos-types", not(feature = "sim-types")))]
+#[cfg(none)]
 struct RaikouQSDisseminationLayer {
     node_id: usize,
     payload_client: Arc<dyn PayloadClient>,
@@ -861,10 +860,10 @@ struct RaikouQSDisseminationLayer {
     state_sync_notifier: Arc<dyn ConsensusNotificationSender>,
 }
 
-#[cfg(any(feature = "force-aptos-types", not(feature = "sim-types")))]
+#[cfg(none)]
 impl RaikouQSDisseminationLayer {}
 
-#[cfg(any(feature = "force-aptos-types", not(feature = "sim-types")))]
+#[cfg(none)]
 impl DisseminationLayer for RaikouQSDisseminationLayer {
     fn module_id(&self) -> ModuleId {
         self.module_id

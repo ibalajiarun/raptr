@@ -78,7 +78,7 @@ use tokio::{net::lookup_host, time::Instant};
 
 const JOLTEON_TIMEOUT: u32 = 3; // in Deltas
 const CONS_BASE_PORT: u16 = 12000;
-const DISS_BASE_PORT: u16 = 32000;
+const DISS_BASE_PORT: u16 = 12500;
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct RaikouNetworkMessage {
@@ -261,7 +261,7 @@ impl RaikouManager {
 
         let network_service = TcpNetworkService::new(
             node_id,
-            format!("0.0.0.0:{}", CONS_BASE_PORT + node_id as u16,)
+            format!("0.0.0.0:{}", CONS_BASE_PORT + node_id as u16)
                 .parse()
                 .unwrap(),
             raikou::framework::tcp_network::Config {
@@ -571,29 +571,33 @@ impl RaikouManager {
 
         let diss_network_service = TcpNetworkService::new(
             node_id,
-            format!(
-                "{}:{}",
-                validator_set.active_validators[node_id]
-                    .config()
-                    .find_ip_addr()
-                    .unwrap(),
-                DISS_BASE_PORT + node_id as u16,
-            )
-            .parse()
-            .unwrap(),
+            format!("0.0.0.0:{}", DISS_BASE_PORT + node_id as u16)
+                .parse()
+                .unwrap(),
             raikou::framework::tcp_network::Config {
                 peers: validator_set
                     .active_validators
                     .iter()
                     .enumerate()
                     .map(|(peer_id, info)| {
-                        format!(
-                            "{}:{}",
-                            info.config().find_ip_addr().unwrap(),
-                            DISS_BASE_PORT + peer_id as u16,
-                        )
-                        .parse()
-                        .unwrap()
+                        let ip = info.config().find_ip_addr();
+                        let addr = if let Some(addr) = ip {
+                            addr
+                        } else {
+                            let dns = info.config().find_dns_name().unwrap();
+                            block_on(lookup_host((
+                                dns.to_string(),
+                                DISS_BASE_PORT + peer_id as u16,
+                            )))
+                            .expect(&format!("{}", dns))
+                            .next()
+                            .unwrap()
+                            .ip()
+                        };
+
+                        format!("{}:{}", addr, DISS_BASE_PORT + peer_id as u16)
+                            .parse()
+                            .unwrap()
                     })
                     .collect(),
                 streams_per_peer: 4,

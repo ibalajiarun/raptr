@@ -36,7 +36,7 @@ spec:
   - name: api
     port: 8080
   {{- end }}
-  {{ range untilStep 12000 12010 1 }}   # start stop step
+  {{ range untilStep 12000 13000 1 }}   # start stop step
   - port: {{ . }}
     name: exposed-port-{{ . }}
   {{ end }}

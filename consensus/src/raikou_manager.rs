@@ -74,6 +74,7 @@ use std::{
     },
     time::Duration,
 };
+use std::net::IpAddr;
 use tokio::{net::lookup_host, time::Instant};
 
 const JOLTEON_TIMEOUT: u32 = 3; // in Deltas
@@ -211,6 +212,35 @@ impl RaikouManager {
             fetch_wait_time_after_commit: Some(fetch_wait_time_after_commit.new_sender()),
         };
 
+        let ip_addresses = validator_set
+            .active_validators
+            .iter()
+            .enumerate()
+            .map(|(peer_id, info)| {
+                let ip = info.config().find_ip_addr();
+                let addr = if let Some(addr) = ip {
+                    addr
+                } else {
+                    let dns = info.config().find_dns_name().unwrap();
+                    aptos_logger::info!("Looking up IP address for peer {} ({})", peer_id, dns);
+
+                    let addr = block_on(lookup_host((
+                        dns.to_string(),
+                        CONS_BASE_PORT + peer_id as u16,
+                    )))
+                        .expect(&format!("Failed to resolve dns for peer {} ({})", peer_id, dns))
+                        .next()
+                        .unwrap()
+                        .ip();
+
+                    aptos_logger::info!("Resolved IP address for peer {} ({}): {}", peer_id, dns, addr);
+                    addr
+                };
+
+                addr
+            })
+            .collect_vec();
+
         // #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
         let dissemination = Self::spawn_fake_dissemination_layer(
             node_id,
@@ -221,7 +251,7 @@ impl RaikouManager {
             delta,
             cons_module_id,
             start_time,
-            &validator_set,
+            &ip_addresses,
             signer.clone(),
             sig_verifier.clone(),
             enable_optimistic_dissemination,
@@ -265,31 +295,11 @@ impl RaikouManager {
                 .parse()
                 .unwrap(),
             raikou::framework::tcp_network::Config {
-                peers: validator_set
-                    .active_validators
-                    .iter()
-                    .enumerate()
-                    .map(|(peer_id, info)| {
-                        let ip = info.config().find_ip_addr();
-                        let addr = if let Some(addr) = ip {
-                            addr
-                        } else {
-                            let dns = info.config().find_dns_name().unwrap();
-                            block_on(lookup_host((
-                                dns.to_string(),
-                                CONS_BASE_PORT + peer_id as u16,
-                            )))
-                            .expect(&format!("{}", dns))
-                            .next()
-                            .unwrap()
-                            .ip()
-                        };
-
-                        format!("{}:{}", addr, CONS_BASE_PORT + peer_id as u16)
-                            .parse()
-                            .unwrap()
-                    })
-                    .collect(),
+                peers: ip_addresses.iter().enumerate().map(|(peer_id, addr)| {
+                    format!("{}:{}", addr, CONS_BASE_PORT + peer_id as u16)
+                        .parse()
+                        .unwrap()
+                }).collect(),
                 streams_per_peer: 4,
             },
             Arc::new(raikou::raikou::protocol::Certifier::new()),
@@ -511,7 +521,7 @@ impl RaikouManager {
         delta: f64,
         consensus_module_id: ModuleId,
         start_time: Instant,
-        validator_set: &ValidatorSet,
+        ip_addresses: &Vec<IpAddr>,
         signer: raikou::framework::crypto::Signer,
         sig_verifier: raikou::framework::crypto::SignatureVerifier,
         enable_optimistic_dissemination: bool,
@@ -575,31 +585,11 @@ impl RaikouManager {
                 .parse()
                 .unwrap(),
             raikou::framework::tcp_network::Config {
-                peers: validator_set
-                    .active_validators
-                    .iter()
-                    .enumerate()
-                    .map(|(peer_id, info)| {
-                        let ip = info.config().find_ip_addr();
-                        let addr = if let Some(addr) = ip {
-                            addr
-                        } else {
-                            let dns = info.config().find_dns_name().unwrap();
-                            block_on(lookup_host((
-                                dns.to_string(),
-                                DISS_BASE_PORT + peer_id as u16,
-                            )))
-                            .expect(&format!("{}", dns))
-                            .next()
-                            .unwrap()
-                            .ip()
-                        };
-
-                        format!("{}:{}", addr, DISS_BASE_PORT + peer_id as u16)
-                            .parse()
-                            .unwrap()
-                    })
-                    .collect(),
+                peers: ip_addresses.iter().enumerate().map(|(peer_id, addr)| {
+                    format!("{}:{}", addr, DISS_BASE_PORT + peer_id as u16)
+                        .parse()
+                        .unwrap()
+                }).collect(),
                 streams_per_peer: 4,
             },
             Arc::new(dissemination::native::Certifier::new(signer)),

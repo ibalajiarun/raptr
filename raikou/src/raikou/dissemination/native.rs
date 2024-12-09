@@ -366,15 +366,27 @@ where
     async fn prepare_block(&self, round: Round, exclude: HashSet<BatchHash>) -> Payload {
         let mut inner = self.inner.lock().await;
 
-        let acs: Vec<AC> = inner
+        let mut acs: Vec<AC> = inner
             .uncommitted_acs
             .iter()
             .filter(|&(batch_digest, _ac)| !exclude.contains(batch_digest))
             .map(|(_batch_digest, ac)| ac.clone())
-            .take(inner.config.block_size_limit.ac_limit())
             .collect();
 
-        let batches = if inner.config.enable_optimistic_dissemination {
+        let limit = inner.config.block_size_limit.ac_limit();
+        if acs.len() > limit {
+            aptos_logger::warn!(
+                "Block size limit reached: {} ACs, {} allowed",
+                acs.len(),
+                limit
+            );
+            acs.truncate(limit);
+        }
+
+        let batches = if
+            inner.config.enable_optimistic_dissemination
+            && acs.len() < limit
+        {
             let mut batches: Vec<BatchInfo> = inner
                 .uncommitted_uncertified_batches
                 .iter()

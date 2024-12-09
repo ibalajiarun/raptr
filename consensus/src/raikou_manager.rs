@@ -171,7 +171,7 @@ impl RaikouManager {
             n_nodes,
             f,
             storage_requirement: f + 1, // f + (f / 2 + 1),
-            leader_timeout: JOLTEON_TIMEOUT,
+            leader_timeout: Duration::from_secs_f64(delta * 3.5),
             leader_schedule: round_robin(n_nodes),
             delta: Duration::from_secs_f64(delta),
             end_of_run: Instant::now() + Duration::from_secs_f64(delta) * total_duration_in_delta,
@@ -549,7 +549,7 @@ impl RaikouManager {
         let diss_timer = LocalTimerService::new();
 
         // TODO: make these into parameters.
-        let target_tps = 100_000;
+        let target_tps = 100;
         let n_client_workers = 5;
 
         let batch_size =

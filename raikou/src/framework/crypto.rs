@@ -97,7 +97,7 @@ impl Signer {
 
 /// Returns a nonsense signature.
 /// Used as a placeholder.
-pub fn empty_signature() -> bls12381::Signature {
+pub fn dummy_signature() -> bls12381::Signature {
     static SIGNATURE: std::sync::OnceLock<bls12381::Signature> = std::sync::OnceLock::new();
 
     #[derive(CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]

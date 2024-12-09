@@ -38,6 +38,7 @@ use std::{
     time::Duration,
 };
 use tokio::{sync::RwLock, time::Instant};
+use crate::framework::crypto::dummy_signature;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(from = "BatchSerialization")]
@@ -242,6 +243,47 @@ pub enum TimerEvent {
 }
 
 #[derive(Clone)]
+pub struct BlockSizeLimit {
+    ac_size: usize,
+    batch_size: usize,
+    byte_limit: usize,
+}
+
+impl BlockSizeLimit {
+    pub fn from_max_number_of_acs(ac_limit: usize, n_nodes: usize) -> Self {
+        let dummy_batch_info = BatchInfo {
+            author: n_nodes,
+            batch_id: 1234,
+            digest: BatchHash::random(),
+        };
+
+        let batch_size = bcs::to_bytes(&dummy_batch_info).unwrap().len();
+
+        let dummy_ac = AC {
+            info: dummy_batch_info,
+            signers: BitVec::repeat(true, n_nodes),
+            multi_signature: dummy_signature(),
+        };
+
+        let ac_size = bcs::to_bytes(&dummy_ac).unwrap().len();
+
+         Self {
+            ac_size,
+            batch_size,
+            byte_limit: ac_limit * ac_size,
+         }
+    }
+
+    pub fn ac_limit(&self) -> usize {
+        self.byte_limit / self.ac_size
+    }
+
+    pub fn batch_limit(&self, n_acs: usize) -> usize {
+        (self.byte_limit - n_acs * self.ac_size) / self.batch_size
+    }
+}
+
+#[derive(Clone)]
 pub struct Config {
     pub module_id: ModuleId,
     pub n_nodes: usize,
@@ -255,6 +297,7 @@ pub struct Config {
     pub enable_penalty_tracker: bool,
     pub penalty_tracker_report_delay: Duration,
     pub status_interval: Duration,
+    pub block_size_limit: BlockSizeLimit,
 }
 
 #[derive(Clone)]
@@ -323,20 +366,43 @@ where
     async fn prepare_block(&self, round: Round, exclude: HashSet<BatchHash>) -> Payload {
         let mut inner = self.inner.lock().await;
 
-        let acs = inner
+        let mut acs: Vec<AC> = inner
             .uncommitted_acs
             .iter()
             .filter(|&(batch_digest, _ac)| !exclude.contains(batch_digest))
             .map(|(_batch_digest, ac)| ac.clone())
             .collect();
 
-        let batches = if inner.config.enable_optimistic_dissemination {
-            let batches = inner
+        let limit = inner.config.block_size_limit.ac_limit();
+        if acs.len() > limit {
+            aptos_logger::warn!(
+                "Block size limit reached: {} ACs, {} allowed",
+                acs.len(),
+                limit
+            );
+            acs.truncate(limit);
+        }
+
+        let batches = if
+            inner.config.enable_optimistic_dissemination
+            && acs.len() < limit
+        {
+            let mut batches: Vec<BatchInfo> = inner
                 .uncommitted_uncertified_batches
                 .iter()
                 .filter(|&batch_hash| !exclude.contains(batch_hash))
                 .map(|batch_hash| inner.batches[batch_hash].get_info())
                 .collect();
+
+            let limit = inner.config.block_size_limit.batch_limit(acs.len());
+            if batches.len() > limit {
+                aptos_logger::warn!(
+                    "Block size limit reached: {} batches, {} allowed",
+                    batches.len(),
+                    limit
+                );
+                batches.truncate(limit);
+            }
 
             // If the penalty tracker is disabled, this will sort the batches
             // by the order they were received.
@@ -614,7 +680,7 @@ where
                 Message::AcVote(
                     batch_id,
                     digest.clone(),
-                    crypto::empty_signature(), // Populated in the `sign` method.
+                    crypto::dummy_signature(), // Populated in the `sign` method.
                 ),
                 author,
             )

@@ -197,7 +197,7 @@ pub struct Config<S> {
     pub n_nodes: usize,
     pub f: usize,
     pub storage_requirement: usize,
-    pub leader_timeout: u32, // in deltas
+    pub leader_timeout: Duration,
     pub leader_schedule: S,
     pub delta: Duration,
     pub enable_commit_votes: bool,
@@ -450,6 +450,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                     })
                     .unwrap();
 
+                self.log_detail(format!("CC-voting for QC {:?}", new_qc.sub_block_id()));
                 ctx.multicast(Message::CcVote(new_qc.clone(), signature))
                     .await;
             }
@@ -791,8 +792,7 @@ where
             }
 
             // Upon entering round r, the node starts a timer for leader timeout.
-            let timeout = self.config.leader_timeout * self.config.delta;
-            ctx.set_timer(timeout, TimerEvent::Timeout(round));
+            ctx.set_timer(self.config.leader_timeout, TimerEvent::Timeout(round));
         };
 
         // Upon receiving a valid block B = [r, parent_qc, cc, tc, acs, batches] from L_r
@@ -804,9 +804,11 @@ where
                 && !self.leader_proposal.contains_key(&block.round())
             {
                 self.log_detail(format!(
-                    "Received block {} proposed by node {}",
+                    "Received block {} proposed by node {} with {} ACs and {} optimistically proposed batches",
                     block.round(),
-                    leader
+                    leader,
+                    block.acs().len(),
+                    block.sub_blocks().map(|b| b.len()).sum::<usize>(),
                 ));
 
                 self.leader_proposal.insert(block.round(), block.digest.clone());
@@ -961,6 +963,13 @@ where
                             .map(|(node_id, (prefix, _signature))| (*node_id, *prefix))
                             .collect();
 
+                        self.log_detail(format!(
+                            "Forming a QC for block {} with prefix {}/{}",
+                            round,
+                            certified_prefix,
+                            N_SUB_BLOCKS,
+                        ));
+
                         let qc = QC {
                             round,
                             prefix: certified_prefix,
@@ -994,6 +1003,13 @@ where
                     // Form a CC each time we can commit something new, possibly several
                     // times for the same round.
                     if *committed_qc > self.committed_qc {
+                        self.log_detail(format!(
+                            "Forming a CC for block {} with prefix {}/{}",
+                            committed_qc.round,
+                            committed_qc.prefix,
+                            N_SUB_BLOCKS,
+                        ));
+
                         let committed_qc_id = committed_qc.sub_block_id();
                         let committed_block_digest = committed_qc.block_digest.clone();
 
@@ -1051,6 +1067,11 @@ where
                 )
                 .unwrap();
 
+                self.log_detail(format!(
+                    "TC-voting in round {}. qc_high: {:?}",
+                    round,
+                    self.qc_high.sub_block_id(),
+                ));
                 ctx.multicast(Message::TcVote(round, self.qc_high.clone(), signature)).await;
             }
         };
@@ -1065,6 +1086,8 @@ where
             let votes = &self.tc_votes[round];
 
             if votes.len() >= self.quorum() {
+                self.log_detail(format!("Forming a TC for round {}", round));
+
                 let vote_data = votes
                     .iter()
                     .map(|(node_id, (sub_block_id, _))| (*node_id, *sub_block_id))
@@ -1078,6 +1101,7 @@ where
                     vote_data,
                     aggregated_signature,
                 );
+
                 self.advance_r_ready(round + 1, RoundEnterReason::TC(tc), ctx).await;
             }
         };

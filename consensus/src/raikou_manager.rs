@@ -529,6 +529,7 @@ impl RaikouManager {
         executed_txns_counter: Arc<AtomicUsize>,
     ) -> impl DisseminationLayer {
         let batch_interval_secs = delta;
+        let expected_load = f64::ceil(n_nodes as f64 * (3. * delta) / batch_interval_secs) as usize;
 
         let config = dissemination::native::Config {
             module_id: diss_module_network.module_id(),
@@ -544,6 +545,10 @@ impl RaikouManager {
             batch_fetch_multiplicity: std::cmp::min(2, n_nodes),
             batch_fetch_interval: Duration::from_secs_f64(delta) * 2,
             status_interval: Duration::from_secs_f64(delta) * 10,
+            block_size_limit: dissemination::native::BlockSizeLimit::from_max_number_of_acs(
+                f64::ceil(expected_load as f64 * 1.5) as usize,
+                n_nodes,
+            ),
         };
 
         let diss_timer = LocalTimerService::new();

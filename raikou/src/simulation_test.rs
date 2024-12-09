@@ -767,6 +767,9 @@ async fn test_raikou(
                 }
             });
 
+            let batch_interval_secs = delta * 0.1;
+            let expected_load = f64::ceil(n_nodes as f64 * (3. * delta) / batch_interval_secs) as usize;
+
             let dissemination = NativeDisseminationLayer::new(
                 node_id,
                 dissemination::native::Config {
@@ -775,13 +778,17 @@ async fn test_raikou(
                     f,
                     ac_quorum,
                     delta: Duration::from_secs_f64(delta),
-                    batch_interval: Duration::from_secs_f64(delta * 0.1),
+                    batch_interval: Duration::from_secs_f64(batch_interval_secs),
                     enable_optimistic_dissemination,
                     enable_penalty_tracker: true,
                     penalty_tracker_report_delay: Duration::from_secs_f64(delta * 5.),
                     batch_fetch_multiplicity: std::cmp::min(2, n_nodes),
                     batch_fetch_interval: Duration::from_secs_f64(delta) * 2,
                     status_interval: Duration::from_secs_f64(delta) * 10,
+                    block_size_limit: dissemination::native::BlockSizeLimit::from_max_number_of_acs(
+                        f64::ceil(expected_load as f64 * 1.5) as usize,
+                        n_nodes,
+                    ),
                 },
                 txns_iter,
                 cons_module_network.module_id(),

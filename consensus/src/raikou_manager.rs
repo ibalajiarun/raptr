@@ -16,14 +16,14 @@ use aptos_consensus_types::{
     block::Block,
     block_data::{BlockData, BlockType},
     common::{Author, Payload, PayloadFilter},
-    payload::{InlineBatches, OptQuorumStorePayload},
+    payload::{InlineBatches, OptQuorumStorePayload, RaikouPayload},
     payload_pull_params::{OptQSPayloadPullParams, PayloadPullParameters},
     proof_of_store::BatchInfo,
     quorum_cert::QuorumCert,
     utils::PayloadTxnsSize,
 };
 use aptos_crypto::HashValue;
-use aptos_logger::error;
+use aptos_logger::{error, info};
 use aptos_types::{
     chain_id::ChainId,
     epoch_state::EpochState,
@@ -66,7 +66,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     future::Future,
     marker::PhantomData,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     ops::Deref,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -74,7 +74,6 @@ use std::{
     },
     time::Duration,
 };
-use std::net::IpAddr;
 use tokio::{net::lookup_host, time::Instant};
 
 const JOLTEON_TIMEOUT: u32 = 3; // in Deltas
@@ -211,6 +210,7 @@ impl RaikouManager {
             penalty_wait_time: Some(penalty_wait_time.new_sender()),
             fetch_wait_time_after_commit: Some(fetch_wait_time_after_commit.new_sender()),
         };
+        drop(diss_metrics);
 
         let ip_addresses = validator_set
             .active_validators
@@ -228,12 +228,20 @@ impl RaikouManager {
                         dns.to_string(),
                         CONS_BASE_PORT + peer_id as u16,
                     )))
-                        .expect(&format!("Failed to resolve dns for peer {} ({})", peer_id, dns))
-                        .next()
-                        .unwrap()
-                        .ip();
+                    .expect(&format!(
+                        "Failed to resolve dns for peer {} ({})",
+                        peer_id, dns
+                    ))
+                    .next()
+                    .unwrap()
+                    .ip();
 
-                    aptos_logger::info!("Resolved IP address for peer {} ({}): {}", peer_id, dns, addr);
+                    aptos_logger::info!(
+                        "Resolved IP address for peer {} ({}): {}",
+                        peer_id,
+                        dns,
+                        addr
+                    );
                     addr
                 };
 
@@ -241,7 +249,7 @@ impl RaikouManager {
             })
             .collect_vec();
 
-        // #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
+        #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
         let dissemination = Self::spawn_fake_dissemination_layer(
             node_id,
             n_nodes,
@@ -260,7 +268,7 @@ impl RaikouManager {
         )
         .await;
 
-        #[cfg(none)]
+        #[cfg(any(not(feature = "sim-types"), feature = "force-aptos-types"))]
         let dissemination = Self::spawn_qs_dissemination_layer(
             node_id,
             payload_client,
@@ -295,11 +303,15 @@ impl RaikouManager {
                 .parse()
                 .unwrap(),
             raikou::framework::tcp_network::Config {
-                peers: ip_addresses.iter().enumerate().map(|(peer_id, addr)| {
-                    format!("{}:{}", addr, CONS_BASE_PORT + peer_id as u16)
-                        .parse()
-                        .unwrap()
-                }).collect(),
+                peers: ip_addresses
+                    .iter()
+                    .enumerate()
+                    .map(|(peer_id, addr)| {
+                        format!("{}:{}", addr, CONS_BASE_PORT + peer_id as u16)
+                            .parse()
+                            .unwrap()
+                    })
+                    .collect(),
                 streams_per_peer: 4,
             },
             Arc::new(raikou::raikou::protocol::Certifier::new()),
@@ -425,12 +437,13 @@ impl RaikouManager {
                 let _ = ack_tx.send(());
             },
             _ = Protocol::run(raikou_node, node_id, network_service, cons_module_network, timer) => {
+                info!("run terminated");
                 print_metrics.await;
             },
         }
     }
 
-    #[cfg(none)]
+    #[cfg(any(not(feature = "sim-types"), feature = "force-aptos-types"))]
     async fn spawn_qs_dissemination_layer(
         node_id: NodeId,
         payload_client: Arc<dyn PayloadClient>,
@@ -511,7 +524,7 @@ impl RaikouManager {
         dissemination
     }
 
-    // #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
+    #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
     async fn spawn_fake_dissemination_layer(
         node_id: NodeId,
         n_nodes: usize,
@@ -549,7 +562,7 @@ impl RaikouManager {
         let diss_timer = LocalTimerService::new();
 
         // TODO: make these into parameters.
-        let target_tps = 100_000;
+        let target_tps = 100;
         let n_client_workers = 5;
 
         let batch_size =
@@ -585,11 +598,15 @@ impl RaikouManager {
                 .parse()
                 .unwrap(),
             raikou::framework::tcp_network::Config {
-                peers: ip_addresses.iter().enumerate().map(|(peer_id, addr)| {
-                    format!("{}:{}", addr, DISS_BASE_PORT + peer_id as u16)
-                        .parse()
-                        .unwrap()
-                }).collect(),
+                peers: ip_addresses
+                    .iter()
+                    .enumerate()
+                    .map(|(peer_id, addr)| {
+                        format!("{}:{}", addr, DISS_BASE_PORT + peer_id as u16)
+                            .parse()
+                            .unwrap()
+                    })
+                    .collect(),
                 streams_per_peer: 4,
             },
             Arc::new(dissemination::native::Certifier::new(signer)),
@@ -844,7 +861,7 @@ where
     }
 }
 
-#[cfg(none)]
+#[cfg(any(feature = "force-aptos-types", not(feature = "sim-types")))]
 struct RaikouQSDisseminationLayer {
     node_id: usize,
     payload_client: Arc<dyn PayloadClient>,
@@ -854,10 +871,10 @@ struct RaikouQSDisseminationLayer {
     state_sync_notifier: Arc<dyn ConsensusNotificationSender>,
 }
 
-#[cfg(none)]
+#[cfg(any(feature = "force-aptos-types", not(feature = "sim-types")))]
 impl RaikouQSDisseminationLayer {}
 
-#[cfg(none)]
+#[cfg(any(feature = "force-aptos-types", not(feature = "sim-types")))]
 impl DisseminationLayer for RaikouQSDisseminationLayer {
     fn module_id(&self) -> ModuleId {
         self.module_id
@@ -866,9 +883,8 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
     async fn prepare_block(
         &self,
         round: raikou_types::Round,
-        exclude: HashSet<raikou_types::BatchHash>,
+        exclude: HashSet<raikou_types::BatchInfo>,
     ) -> raikou_types::Payload {
-        // TODO: Fix the payload filter
         let (_, payload) = self
             .payload_client
             .pull_payload(
@@ -884,7 +900,7 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
                         self.config.max_sending_inline_txns,
                         self.config.max_sending_inline_bytes,
                     ),
-                    user_txn_filter: PayloadFilter::Empty,
+                    user_txn_filter: PayloadFilter::InQuorumStore(exclude),
                     pending_ordering: false,
                     pending_uncommitted_blocks: 0,
                     recent_max_fill_fraction: 0.0,
@@ -898,7 +914,10 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
                 async {}.boxed(),
             )
             .await
-            .unwrap();
+            .unwrap_or_else(|e| {
+                error!("pull failed {:?}", e);
+                (Vec::new(), Payload::Raikou(RaikouPayload::new_empty()))
+            });
 
         raikou_types::Payload::new(round, self.node_id, payload)
     }
@@ -908,10 +927,8 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
         payload: &raikou_types::Payload,
         cached_value: Prefix,
     ) -> Prefix {
-        self.payload_manager.prefetch_payload_data(
-            &payload.inner,
-            aptos_infallible::duration_since_epoch().as_micros() as u64,
-        );
+        self.payload_manager
+            .prefetch_payload_data(&payload.inner, 0);
         self.payload_manager
             .available_prefix(payload.inner.as_raikou_payload(), cached_value)
     }
@@ -925,22 +942,21 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
                 payloads.into_iter().map(|payload| payload.inner).collect();
 
             for payload in &payloads {
-                payload_manager.prefetch_payload_data(
-                    payload,
-                    aptos_infallible::duration_since_epoch().as_micros() as u64,
-                );
+                payload_manager.prefetch_payload_data(payload, 0);
             }
             payload_manager.notify_commit(
-                aptos_infallible::duration_since_epoch().as_micros() as u64,
+                aptos_infallible::duration_since_epoch()
+                    .saturating_sub(Duration::from_secs(30))
+                    .as_micros() as u64,
                 payloads.clone(),
             );
 
             for payload in payloads {
-                while let Err(_) = payload_manager
+                while let Err(e) = payload_manager
                     .wait_for_payload(&payload, None, 0, Duration::from_secs(1))
                     .await
                 {
-                    // TODO: add a logging / metric?
+                    error!("error {:?}", e);
                 }
 
                 let block = Block::new_for_dag(

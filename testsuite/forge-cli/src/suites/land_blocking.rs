@@ -18,8 +18,8 @@ pub(crate) fn get_land_blocking_test(
 ) -> Option<ForgeConfig> {
     let test = match test_name {
         "land_blocking" | "realistic_env_max_load" => {
-            multiregion_benchmark_test()
-            // realistic_env_max_load_test(duration, test_cmd, 7, 5)
+            // multiregion_benchmark_test()
+            realistic_env_max_load_test(duration, test_cmd, 20, 5)
         },
         "compat" => compat(),
         "framework_upgrade" => framework_upgrade(),

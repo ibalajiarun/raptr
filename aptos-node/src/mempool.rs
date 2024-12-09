@@ -5,11 +5,12 @@ use aptos_consensus_notifications::{
 use aptos_crypto::HashValue;
 use aptos_framework::natives::debug;
 use aptos_infallible::Mutex;
-use aptos_logger::{debug, info};
+use aptos_logger::{debug, error, info, sample, sample::SampleRate};
 use aptos_mempool::{QuorumStoreRequest, QuorumStoreResponse};
 use aptos_mempool_notifications::{
     CommittedTransaction, MempoolCommitNotification, MempoolNotificationListener, MempoolNotifier,
 };
+use aptos_metrics_core::{register_histogram, Histogram};
 use aptos_types::{
     transaction::{SignedTransaction, Transaction},
     PeerId,
@@ -23,6 +24,7 @@ use futures::{
     select, StreamExt,
 };
 use itertools::zip_eq;
+use once_cell::sync::Lazy;
 use std::{
     cmp::min,
     collections::{BTreeMap, HashMap, VecDeque},
@@ -30,7 +32,11 @@ use std::{
     iter::zip,
     mem,
     net::SocketAddr,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant},
 };
 use tokio::{runtime::Runtime, task::JoinHandle};
 use warp::{
@@ -40,27 +46,53 @@ use warp::{
     Filter,
 };
 
-pub type TransactionStore = VecDeque<(SignedTransaction, oneshot::Sender<()>)>;
+pub type TransactionStore = VecDeque<(SignedTransaction, oneshot::Sender<()>, Instant)>;
+
+struct TrackingItem {
+    tx: oneshot::Sender<()>,
+    insert_time: Instant,
+}
 
 pub struct PendingTracker {
-    tracker: HashMap<(PeerId, u64), oneshot::Sender<()>>,
+    tracker: HashMap<(PeerId, u64), TrackingItem>,
 }
 
 impl PendingTracker {
-    fn register(&mut self, txn: &SignedTransaction, tx: oneshot::Sender<()>) {
-        debug!("register: {}, {}", txn.sender(), txn.sequence_number());
+    fn register(&mut self, txn: &SignedTransaction, tx: oneshot::Sender<()>, insert_time: Instant) {
         self.tracker
-            .insert((txn.sender(), txn.sequence_number()), tx);
+            .insert((txn.sender(), txn.sequence_number()), TrackingItem {
+                tx,
+                insert_time,
+            });
     }
 
     fn notify(&mut self, txn: &Transaction) {
         let txn = txn.try_as_signed_user_txn().unwrap();
-        debug!("notify: {}. {}", txn.sender(), txn.sequence_number());
-        if let Some(sender) = self.tracker.remove(&(txn.sender(), txn.sequence_number())) {
-            sender.send(()).unwrap();
+        if let Some(item) = self.tracker.remove(&(txn.sender(), txn.sequence_number())) {
+            RAIKOU_MEMPOOL_INSERT_TO_COMMIT_LATENCY
+                .observe(item.insert_time.elapsed().as_secs_f64());
+            if item.tx.send(()).is_err() {
+                error!("client timedout: {}", txn.sender());
+            }
         }
     }
 }
+
+pub static RAIKOU_MEMPOOL_PULL_LATENCY: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "raikou_mempool_insert_to_pull_latency",
+        "Raikou Mempool Insert to Pull Latency",
+    )
+    .unwrap()
+});
+
+pub static RAIKOU_MEMPOOL_INSERT_TO_COMMIT_LATENCY: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "raikou_mempool_insert_to_commit_latency",
+        "Raikou Pull to Commit Latnecy"
+    )
+    .unwrap()
+});
 
 pub struct SimpleMempool {
     pub transaction_store: Arc<Mutex<TransactionStore>>,
@@ -78,11 +110,19 @@ impl SimpleMempool {
         let pulled = store.drain(..to_pull);
         let mut pulled_txns = Vec::with_capacity(to_pull);
 
-        for (txn, tx) in pulled {
-            self.pending_tracker.register(&txn, tx);
+        for (txn, tx, insert_time) in pulled {
+            RAIKOU_MEMPOOL_PULL_LATENCY.observe(insert_time.elapsed().as_secs_f64());
+            self.pending_tracker.register(&txn, tx, insert_time);
             pulled_txns.push(txn);
         }
-        info!("pulled txns: {}", pulled_txns.len());
+        if pulled_txns.is_empty() {
+            sample!(
+                SampleRate::Duration(Duration::from_secs(10)),
+                info!("pulled_txns empty");
+            );
+        } else {
+            info!("pulled txns: {}", pulled_txns.len());
+        }
         drop(store);
         sender
             .send(Ok(QuorumStoreResponse::GetBatchResponse(pulled_txns)))
@@ -125,6 +165,7 @@ impl SimpleMempool {
 
 pub fn create_mempool_runtime(
     config: &NodeConfig,
+    health_check: Arc<AtomicBool>,
 ) -> (Runtime, Sender<QuorumStoreRequest>, ConsensusNotifier) {
     let (consensus_to_mempool_sender, consensus_to_mempool_receiver) =
         futures::channel::mpsc::channel(100);
@@ -143,7 +184,7 @@ pub fn create_mempool_runtime(
     };
 
     runtime.spawn(mempool.run(consensus_to_mempool_receiver, consensus_listener));
-    runtime.spawn(start_mempool_api(store, config.api.address));
+    runtime.spawn(start_mempool_api(health_check, store, config.api.address));
 
     (runtime, consensus_to_mempool_sender, consensus_notifier)
 }
@@ -151,6 +192,7 @@ pub fn create_mempool_runtime(
 #[derive(Clone)]
 pub struct SimpleMempoolApiContext {
     store: Arc<Mutex<TransactionStore>>,
+    health_check: Arc<AtomicBool>,
 }
 
 impl SimpleMempoolApiContext {
@@ -161,15 +203,38 @@ impl SimpleMempoolApiContext {
     }
 }
 
-async fn start_mempool_api(store: Arc<Mutex<TransactionStore>>, api_address: SocketAddr) {
-    let context = SimpleMempoolApiContext { store };
+async fn start_mempool_api(
+    health_check: Arc<AtomicBool>,
+    store: Arc<Mutex<TransactionStore>>,
+    api_address: SocketAddr,
+) {
+    let context = SimpleMempoolApiContext {
+        health_check,
+        store,
+    };
+    let ctx_filter = context.filter().clone();
 
-    let api = warp::path!("submit_txn")
+    let submit = warp::path!("submit_txn")
         .and(warp::post())
-        .and(context.filter())
+        .and(ctx_filter.clone())
         .and(warp::body::bytes())
         .and_then(handle_txn)
         .boxed();
+
+    let submit_batch = warp::path!("submit_txn_batch")
+        .and(warp::post())
+        .and(ctx_filter.clone())
+        .and(warp::body::bytes())
+        .and_then(handle_txn_batch)
+        .boxed();
+
+    let health_check = warp::path!("health_check")
+        .and(warp::get())
+        .and(ctx_filter)
+        .and_then(handle_health_check)
+        .boxed();
+
+    let api = submit.or(health_check).or(submit_batch);
 
     warp::serve(api).bind(api_address).await
 }
@@ -178,22 +243,75 @@ pub async fn handle_txn(
     context: SimpleMempoolApiContext,
     request: bytes::Bytes,
 ) -> anyhow::Result<impl Reply, Rejection> {
-    debug!("api: handle_txn");
+    if !context.health_check.load(Ordering::Relaxed) {
+        return Err(warp::reject::not_found());
+    }
 
     let txn: SignedTransaction = bcs::from_bytes(&request).unwrap();
     let (tx, rx) = oneshot::channel();
 
-    context.store.lock().push_back((txn, tx));
+    context.store.lock().push_back((txn, tx, Instant::now()));
 
     if let Err(_) = rx.await {
         debug!("api: response channel dropped unexpectedly");
         return Ok(reply::with_status(
             reply::reply(),
-            warp::hyper::StatusCode::NOT_FOUND,
+            warp::hyper::StatusCode::BAD_REQUEST,
         ));
     }
 
     debug!("api: txn successfully committed");
+    Ok(reply::with_status(
+        reply::reply(),
+        warp::hyper::StatusCode::CREATED,
+    ))
+}
+
+pub async fn handle_health_check(
+    context: SimpleMempoolApiContext,
+) -> anyhow::Result<impl Reply, Rejection> {
+    if context.health_check.load(Ordering::Relaxed) {
+        Ok(reply::with_status(
+            reply::reply(),
+            warp::hyper::StatusCode::CREATED,
+        ))
+    } else {
+        Err(warp::reject::not_found())
+    }
+}
+
+pub async fn handle_txn_batch(
+    context: SimpleMempoolApiContext,
+    request: bytes::Bytes,
+) -> anyhow::Result<impl Reply, Rejection> {
+    if !context.health_check.load(Ordering::Relaxed) {
+        return Err(warp::reject::not_found());
+    }
+
+    let txn_batch: Vec<SignedTransaction> = bcs::from_bytes(&request).unwrap();
+
+    let now = Instant::now();
+    let mut rxs = Vec::new();
+    {
+        let mut locked_store = context.store.lock();
+        for txn in txn_batch {
+            let (tx, rx) = oneshot::channel();
+            locked_store.push_back((txn, tx, now));
+            rxs.push(rx);
+        }
+    }
+
+    for rx in rxs {
+        if let Err(_) = rx.await {
+            debug!("api: response channel dropped unexpectedly");
+            return Ok(reply::with_status(
+                reply::reply(),
+                warp::hyper::StatusCode::BAD_REQUEST,
+            ));
+        }
+    }
+
+    debug!("api: batch txn successfully committed");
     Ok(reply::with_status(
         reply::reply(),
         warp::hyper::StatusCode::CREATED,

@@ -908,7 +908,7 @@ where
 
                 self.on_new_batch(batch, true, ctx).await;
             }
-            self.execute_prefix();
+            self.execute_prefix().await;
         };
 
         // Logging and halting

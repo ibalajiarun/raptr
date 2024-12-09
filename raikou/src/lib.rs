@@ -8,7 +8,7 @@ pub mod metrics;
 pub mod raikou;
 pub mod utils;
 
-// #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
+#[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
 pub mod simulation_test;
 
 pub type Slot = i64;

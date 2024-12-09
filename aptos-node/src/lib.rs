@@ -49,7 +49,11 @@ use aptos_types::{
     write_set::WriteSet,
 };
 use clap::Parser;
-use futures::channel::{mpsc, oneshot};
+use futures::{
+    channel::{mpsc, oneshot},
+    executor::block_on,
+    StreamExt,
+};
 use hex::{FromHex, FromHexError};
 use rand::{rngs::StdRng, SeedableRng};
 use std::{
@@ -1045,8 +1049,10 @@ pub fn consensus_only_setup_environment_and_start_node(
     //         peers_and_metadata,
     //     );
 
+    let health_check = Arc::new(AtomicBool::new(false));
+
     let (mempool_runtime, consensus_to_mempool_sender, consensus_notifier) =
-        mempool::create_mempool_runtime(&node_config);
+        mempool::create_mempool_runtime(&node_config, health_check.clone());
 
     // Create the DKG runtime and get the VTxn pool
     // let (vtxn_pool, dkg_runtime) =
@@ -1076,27 +1082,32 @@ pub fn consensus_only_setup_environment_and_start_node(
     //         consensus_observer_reconfig_subscription,
     //     );
 
+    let consensus_reconfig_subscription = event_subscription_service
+        .subscribe_to_reconfigurations()
+        .ok();
+    event_subscription_service
+        .notify_initial_configs(0)
+        .unwrap();
+
+    info!("sleeping for some time hoping trusted peers is updated");
+    thread::sleep(Duration::from_secs(5));
+
     loop {
         let connected_peers = peers_and_metadata
             .get_connected_peers_and_metadata()
             .unwrap();
-        debug!("current peers {}", connected_peers.len());
-        if connected_peers.len()
-            == peers_and_metadata
-                .get_trusted_peers(&NetworkId::Validator)
-                .unwrap()
-                .len()
-                .saturating_sub(1)
-        {
-            thread::sleep(Duration::from_secs(30));
+        let trusted_peers = peers_and_metadata
+            .get_trusted_peers(&NetworkId::Validator)
+            .unwrap();
+        error!("current_peers {}", connected_peers.len());
+        error!("trusted_peers {}", trusted_peers.len());
+        if connected_peers.len() == trusted_peers.len() && trusted_peers.len() > 0 {
+            error!("connected peer len met: {}", connected_peers.len());
+            thread::sleep(Duration::from_secs(2));
             break;
         }
         thread::sleep(Duration::from_secs(1));
     }
-
-    let consensus_reconfig_subscription = event_subscription_service
-        .subscribe_to_reconfigurations()
-        .ok();
 
     let vtxn_pool = aptos_validator_transaction_pool::VTxnPoolState::default();
 
@@ -1112,9 +1123,10 @@ pub fn consensus_only_setup_environment_and_start_node(
         None,
         &mut admin_service,
     );
-    event_subscription_service
-        .notify_initial_configs(0)
-        .unwrap();
+
+    thread::sleep(Duration::from_secs(10));
+
+    health_check.store(true, Ordering::Relaxed);
 
     Ok(AptosHandle {
         _admin_service: admin_service,

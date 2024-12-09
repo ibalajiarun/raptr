@@ -24,6 +24,7 @@ use std::{
     path::PathBuf,
     process::{Child, Command},
     str::FromStr,
+    time::Duration,
 };
 use url::Url;
 
@@ -252,7 +253,14 @@ impl LocalNode {
         //     .map_err(|err| HealthCheckError::Failure(err.into()))
         //     .context("rest client")
 
-        Ok(())
+        let client = self.rest_client();
+        client
+            .get_raw(client.build_path("health_check").unwrap())
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .map(|_| ())
+            .map_err(|e| HealthCheckError::Failure(e.into()))
     }
 }
 

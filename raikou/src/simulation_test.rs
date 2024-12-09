@@ -1,6 +1,8 @@
 // Copyright (c) Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(any(not(feature = "sim-types"), feature = "force-aptos-types"))]
+use crate::raikou::dissemination::native::{Batch, NativeDisseminationLayer};
 use crate::{
     delays::{heterogeneous_symmetric_delay, DelayFunction},
     framework::{
@@ -14,11 +16,7 @@ use crate::{
     metrics,
     metrics::display_metric,
     raikou,
-    raikou::{
-        dissemination,
-        dissemination::native::{Batch, NativeDisseminationLayer},
-        RaikouNode,
-    },
+    raikou::{dissemination, RaikouNode},
 };
 use aptos_crypto::bls12381::{PrivateKey, PublicKey};
 use aptos_types::{account_address::AccountAddress, validator_signer::ValidatorSigner};

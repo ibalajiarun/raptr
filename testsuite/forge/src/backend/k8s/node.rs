@@ -246,7 +246,16 @@ impl Node for K8sNode {
         //         HealthCheckError::Failure(format_err!("K8s node health_check failed: {}", e))
         //     })
 
-        Ok(())
+        let client = self.rest_client();
+        client
+            .get_raw(client.build_path("health_check").unwrap())
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .map(|_| ())
+            .map_err(|e| {
+                HealthCheckError::Failure(format_err!("K8s node health_check failed: {}", e))
+            })
     }
 
     // TODO: verify this still works

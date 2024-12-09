@@ -193,7 +193,7 @@ where
     args.push("--package=aptos-node");
 
     // #[cfg(feature = "sim-types")]
-    args.append(&mut vec!["--features", "sim-types"]);
+    // args.append(&mut vec!["--features", "sim-types"]);
 
     // #[cfg(feature = "force-aptos-types")]
     // args.append(&mut vec!["--features", "force-aptos-types"]);

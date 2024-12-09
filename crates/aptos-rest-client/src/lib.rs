@@ -172,6 +172,10 @@ impl Client {
         self.inner.post(url)
     }
 
+    pub fn get_raw(&self, url: Url) -> RequestBuilder {
+        self.inner.get(url)
+    }
+
     pub async fn get_block_by_height(
         &self,
         height: u64,

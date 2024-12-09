@@ -2,20 +2,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    framework,
     framework::{
+        self,
         crypto::{SignatureVerifier, Signer},
         network::MessageVerifier,
         ContextFor, NodeId, Protocol,
     },
     leader_schedule::LeaderSchedule,
-    metrics,
-    metrics::Sender,
+    metrics::{self, Sender},
     protocol,
     raikou::{
-        dissemination,
+        counters::{RAIKOU_BATCH_CONSENSUS_LATENCY, RAIKOU_BLOCK_CONSENSUS_LATENCY},
         dissemination::{
-            DisseminationLayer, FullBlockAvailable, Kill, NewQCWithPayload, ProposalReceived,
+            self, DisseminationLayer, FullBlockAvailable, Kill, NewQCWithPayload, ProposalReceived,
         },
         types::*,
     },
@@ -580,6 +579,10 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             let now = Instant::now();
             if self.config.leader(qc.round) == self.node_id {
                 for _ in 0..(qc.prefix - self.committed_qc.prefix) {
+                    RAIKOU_BATCH_CONSENSUS_LATENCY.observe(
+                        now.saturating_duration_since(self.block_create_time[&qc.round])
+                            .as_secs_f64(),
+                    );
                     self.metrics
                         .batch_consensus_latency
                         .push((now, self.to_deltas(now - self.block_create_time[&qc.round])));
@@ -611,14 +614,31 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             // Record the metrics
             let now = Instant::now();
             if self.config.leader(qc.round) == self.node_id {
+                RAIKOU_BLOCK_CONSENSUS_LATENCY
+                    .with_label_values(&["yes"])
+                    .observe(
+                        now.saturating_duration_since(self.block_create_time[&qc.round])
+                            .as_secs_f64(),
+                    );
                 self.metrics
                     .block_consensus_latency
                     .push((now, self.to_deltas(now - self.block_create_time[&qc.round])));
                 for _ in 0..(block.acs().len() + qc.prefix) {
+                    RAIKOU_BATCH_CONSENSUS_LATENCY.observe(
+                        now.saturating_duration_since(self.block_create_time[&qc.round])
+                            .as_secs_f64(),
+                    );
                     self.metrics
                         .batch_consensus_latency
                         .push((now, self.to_deltas(now - self.block_create_time[&qc.round])));
                 }
+            } else {
+                RAIKOU_BLOCK_CONSENSUS_LATENCY
+                    .with_label_values(&["no"])
+                    .observe(
+                        now.saturating_duration_since(self.block_create_time[&qc.round])
+                            .as_secs_f64(),
+                    );
             }
         }
 
@@ -627,7 +647,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         res
     }
 
-    fn uncommitted_batches(&self, qc: &QC) -> HashSet<BatchHash> {
+    fn uncommitted_batches(&self, qc: &QC) -> HashSet<BatchInfo> {
         let mut uncommitted = HashSet::new();
 
         let mut cur = qc;
@@ -650,13 +670,13 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             }
 
             let block = &self.blocks[&cur.block_digest];
-            uncommitted.extend(block.acs().iter().map(|ac| ac.info().digest.clone()));
+            uncommitted.extend(block.acs().iter().map(|ac| ac.info().clone()));
             uncommitted.extend(
                 block
                     .sub_blocks()
                     .take(cur.prefix)
                     .flatten()
-                    .map(|batch| batch.digest().clone()),
+                    .map(|batch| batch.clone()),
             );
             cur = block.parent_qc();
         }
@@ -669,7 +689,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                     .take(cur.prefix)
                     .skip(self.committed_qc.prefix)
                     .flatten()
-                    .map(|batch| batch.digest().clone()),
+                    .map(|batch| batch.clone()),
             );
         }
 

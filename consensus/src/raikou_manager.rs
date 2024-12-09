@@ -528,7 +528,7 @@ impl RaikouManager {
         metrics: dissemination::Metrics,
         executed_txns_counter: Arc<AtomicUsize>,
     ) -> impl DisseminationLayer {
-        let batch_interval_secs = delta * 0.2;
+        let batch_interval_secs = delta;
 
         let config = dissemination::native::Config {
             module_id: diss_module_network.module_id(),

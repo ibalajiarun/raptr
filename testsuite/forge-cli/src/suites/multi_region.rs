@@ -40,7 +40,7 @@ pub(crate) fn get_multi_region_test(test_name: &str) -> Option<ForgeConfig> {
 /// the multiregion forge cluster.
 pub(crate) fn multiregion_benchmark_test() -> ForgeConfig {
     ForgeConfig::default()
-        .with_initial_validator_count(NonZeroUsize::new(20).unwrap())
+        .with_initial_validator_count(NonZeroUsize::new(10).unwrap())
         .add_network_test(ConsensusOnlyBenchmark)
         .with_genesis_helm_config_fn(Arc::new(|helm_values| {
             // Have single epoch change in land blocking

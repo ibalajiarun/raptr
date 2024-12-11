@@ -24,11 +24,11 @@ spec:
           {FORGE_ARGS}
       resources:
         limits:
-          cpu: 15.5
-          memory: 26Gi
+          cpu: 7.5
+          memory: 15Gi
         requests:
-          cpu: 15
-          memory: 26Gi
+          cpu: 7
+          memory: 15Gi
       env:
         - name: FORGE_TRIGGERED_BY
           value: {FORGE_TRIGGERED_BY}
@@ -81,6 +81,9 @@ spec:
     - effect: NoExecute
       key: aptos.org/nodepool
       value: validators
+    - effect: NoExecute
+      key: AptosNodeOnly
+      value: "false"
   volumes:
     - name: multiregion-kubeconfig
       secret:

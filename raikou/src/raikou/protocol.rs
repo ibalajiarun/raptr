@@ -12,7 +12,10 @@ use crate::{
     metrics::{self, Sender},
     protocol,
     raikou::{
-        counters::{RAIKOU_BATCH_CONSENSUS_LATENCY, RAIKOU_BLOCK_CONSENSUS_LATENCY},
+        counters::{
+            BLOCK_TRACING, RAIKOU_BATCH_CONSENSUS_LATENCY, RAIKOU_BLOCK_COMMIT_RATE,
+            RAIKOU_BLOCK_CONSENSUS_LATENCY,
+        },
         dissemination::{
             self, DisseminationLayer, FullBlockAvailable, Kill, NewQCWithPayload, ProposalReceived,
         },
@@ -39,7 +42,7 @@ use std::{
     num::NonZeroU8,
     ops::Deref,
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::time::Instant;
 
@@ -400,9 +403,20 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         .await;
     }
 
-    async fn on_new_block(&mut self, block: &Block, ctx: &mut impl ContextFor<Self>) {
+    async fn on_new_block(
+        &mut self,
+        block: &Block,
+        ctx: &mut impl ContextFor<Self>,
+        is_fetch: bool,
+    ) {
         if self.blocks.contains_key(&block.digest) {
             return;
+        }
+
+        if is_fetch {
+            observe_block(block.data.timestamp_usecs, "FETCHRECEIVED");
+        } else {
+            observe_block(block.data.timestamp_usecs, "RECEIVED");
         }
 
         for qc in self
@@ -451,12 +465,18 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                     .unwrap();
 
                 self.log_detail(format!("CC-voting for QC {:?}", new_qc.sub_block_id()));
+                if let Some(block) = self.blocks.get(&new_qc.block_digest) {
+                    observe_block(block.data.timestamp_usecs, "CCVote");
+                }
                 ctx.multicast(Message::CcVote(new_qc.clone(), signature))
                     .await;
             }
         }
 
         if new_qc.is_full() {
+            if let Some(block) = self.blocks.get(&new_qc.block_digest) {
+                observe_block(block.data.timestamp_usecs, "QCReady");
+            }
             // If form or receive a qc for the largest possible prefix of a round,
             // advance to the next round after that.
             self.advance_r_ready(new_qc.round + 1, RoundEnterReason::FullPrefixQC, ctx)
@@ -612,15 +632,15 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
 
             res.push(block.payload().with_prefix(qc.prefix));
 
+            RAIKOU_BLOCK_COMMIT_RATE.inc();
+
             // Record the metrics
             let now = Instant::now();
             if self.config.leader(qc.round) == self.node_id {
-                RAIKOU_BLOCK_CONSENSUS_LATENCY
-                    .with_label_values(&["yes"])
-                    .observe(
-                        now.saturating_duration_since(self.block_create_time[&qc.round])
-                            .as_secs_f64(),
-                    );
+                RAIKOU_BLOCK_CONSENSUS_LATENCY.observe(
+                    now.saturating_duration_since(self.block_create_time[&qc.round])
+                        .as_secs_f64(),
+                );
                 self.metrics
                     .block_consensus_latency
                     .push((now, self.to_deltas(now - self.block_create_time[&qc.round])));
@@ -633,13 +653,6 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                         .batch_consensus_latency
                         .push((now, self.to_deltas(now - self.block_create_time[&qc.round])));
                 }
-            } else {
-                RAIKOU_BLOCK_CONSENSUS_LATENCY
-                    .with_label_values(&["no"])
-                    .observe(
-                        now.saturating_duration_since(self.block_create_time[&qc.round])
-                            .as_secs_f64(),
-                    );
             }
         }
 
@@ -725,6 +738,21 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
     }
 }
 
+pub fn duration_since_epoch() -> Duration {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("System time is before the UNIX_EPOCH")
+}
+
+/// Record the time during each stage of a block.
+pub fn observe_block(timestamp: u64, stage: &'static str) {
+    if let Some(t) = duration_since_epoch().checked_sub(Duration::from_micros(timestamp)) {
+        BLOCK_TRACING
+            .with_label_values(&[stage])
+            .observe(t.as_secs_f64());
+    }
+}
+
 impl<S, DL> Protocol for RaikouNode<S, DL>
 where
     S: LeaderSchedule,
@@ -770,6 +798,7 @@ where
                 ).await;
 
                 let block_data = BlockData {
+                    timestamp_usecs: duration_since_epoch().as_micros() as u64,
                     payload,
                     parent_qc,
                     reason: self.enter_reason.clone(),
@@ -786,6 +815,8 @@ where
                     block.acs().len(),
                     N_SUB_BLOCKS,
                 ));
+
+                observe_block(block.data.timestamp_usecs, "Propose");
 
                 self.block_create_time.insert(round, Instant::now());
                 ctx.multicast(Message::Propose(block)).await;
@@ -812,7 +843,7 @@ where
                 ));
 
                 self.leader_proposal.insert(block.round(), block.digest.clone());
-                self.on_new_block(&block, ctx).await;
+                self.on_new_block(&block, ctx, false).await;
 
                 let round = block.round();
                 let BlockData { payload, reason, .. } = block.data;
@@ -879,6 +910,11 @@ where
                     }
                 )
                 .unwrap();
+
+                if let Some(block) = self.blocks.get(&block_digest) {
+                    observe_block(block.data.timestamp_usecs, "TimerQCVote");
+                }
+
                 ctx.multicast(Message::QcVote(round, prefix, block_digest, signature)).await;
             }
         };
@@ -907,6 +943,11 @@ where
                         }
                     )
                     .unwrap();
+
+                    if let Some(block) = self.blocks.get(&block_digest) {
+                        observe_block(block.data.timestamp_usecs, "FullBlockQCVote");
+                    }
+
                     ctx.multicast(Message::QcVote(round, prefix, block_digest, signature)).await;
                 }
             };
@@ -1040,6 +1081,9 @@ where
                             vote_prefixes,
                             aggregated_signature,
                         );
+                        if let Some(block) = self.blocks.get(&committed_block_digest) {
+                            observe_block(block.data.timestamp_usecs, "CCReady");
+                        }
                         self.advance_r_ready(round + 1, RoundEnterReason::CC(cc), ctx).await;
                     }
                 }
@@ -1072,6 +1116,7 @@ where
                     round,
                     self.qc_high.sub_block_id(),
                 ));
+
                 ctx.multicast(Message::TcVote(round, self.qc_high.clone(), signature)).await;
             }
         };
@@ -1081,6 +1126,7 @@ where
         // form the TC and execute advance_round.
         upon receive [Message::TcVote(round, qc, signature)] from node [p] {
             self.tc_votes[round].insert(p, (qc.sub_block_id(), signature));
+            let digest = qc.block_digest;
             self.on_new_qc(qc, ctx).await;
 
             let votes = &self.tc_votes[round];
@@ -1101,6 +1147,10 @@ where
                     vote_data,
                     aggregated_signature,
                 );
+
+                if let Some(block) = self.blocks.get(&digest) {
+                    observe_block(block.data.timestamp_usecs, "TCAggregate");
+                }
 
                 self.advance_r_ready(round + 1, RoundEnterReason::TC(tc), ctx).await;
             }
@@ -1155,7 +1205,7 @@ where
         };
 
         upon receive [Message::FetchResp(block)] from [_any_node] {
-            self.on_new_block(&block, ctx).await;
+            self.on_new_block(&block, ctx, true).await;
         };
 
         // State sync

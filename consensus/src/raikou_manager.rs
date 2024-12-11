@@ -45,17 +45,15 @@ use raikou::{
     framework::{
         injection::{delay_injection, drop_injection},
         module_network::{match_event_type, ModuleId, ModuleNetwork, ModuleNetworkService},
-        network::{MessageCertifier, Network, NetworkService},
+        network::{MessageCertifier, NetworkService},
         tcp_network::TcpNetworkService,
         timer::LocalTimerService,
         NodeId, Protocol,
     },
-    metrics,
-    metrics::{display_metric, display_metric_to},
+    metrics::{self, display_metric_to},
     raikou::{
         dissemination::{self, DisseminationLayer},
-        types as raikou_types,
-        types::Prefix,
+        types::{self as raikou_types, Prefix},
         RaikouNode,
     },
 };
@@ -103,7 +101,7 @@ impl RaikouManager {
         self,
         self_author: Author,
         epoch_state: Arc<EpochState>,
-        network_sender: Arc<NetworkSender>,
+        network_sender: Arc<crate::network::NetworkSender>,
         delta: f64,
         total_duration_in_delta: u32,
         enable_optimistic_dissemination: bool,
@@ -157,14 +155,13 @@ impl RaikouManager {
                 .collect(),
         );
 
-        // let network_service: RaikouNetworkService<raikou::raikou::Message> =
-        //     RaikouNetworkService::new(epoch_state.clone(), messages_rx, network_sender.clone());
-        //
-        // network_service.multicast(raikou::raikou::Message::AdvanceRound(
-        //     0,
-        //     raikou::raikou::QC::genesis(),
-        //     RoundEnterReason::Genesis
-        // )).await;
+        let network_service = RaikouNetworkService::new(
+            epoch_state.clone(),
+            messages_rx,
+            network_sender.clone(),
+            Arc::new(raikou::raikou::protocol::Certifier::new()),
+        )
+        .await;
 
         let config = raikou::raikou::Config {
             n_nodes,
@@ -297,30 +294,30 @@ impl RaikouManager {
             // ordered_nodes_tx,
         )));
 
-        let network_service = TcpNetworkService::new(
-            node_id,
-            format!("0.0.0.0:{}", CONS_BASE_PORT + node_id as u16)
-                .parse()
-                .unwrap(),
-            raikou::framework::tcp_network::Config {
-                peers: ip_addresses
-                    .iter()
-                    .enumerate()
-                    .map(|(peer_id, addr)| {
-                        format!("{}:{}", addr, CONS_BASE_PORT + peer_id as u16)
-                            .parse()
-                            .unwrap()
-                    })
-                    .collect(),
-                streams_per_peer: 4,
-            },
-            Arc::new(raikou::raikou::protocol::Certifier::new()),
-            Arc::new(raikou::raikou::protocol::Verifier::new(
-                raikou_node.lock().await.deref(),
-            )),
-            32 * 1024 * 1024, // 32MB max block size
-        )
-        .await;
+        // let network_service = TcpNetworkService::new(
+        //     node_id,
+        //     format!("0.0.0.0:{}", CONS_BASE_PORT + node_id as u16)
+        //         .parse()
+        //         .unwrap(),
+        //     raikou::framework::tcp_network::Config {
+        //         peers: ip_addresses
+        //             .iter()
+        //             .enumerate()
+        //             .map(|(peer_id, addr)| {
+        //                 format!("{}:{}", addr, CONS_BASE_PORT + peer_id as u16)
+        //                     .parse()
+        //                     .unwrap()
+        //             })
+        //             .collect(),
+        //         streams_per_peer: 4,
+        //     },
+        //     Arc::new(raikou::raikou::protocol::Certifier::new()),
+        //     Arc::new(raikou::raikou::protocol::Verifier::new(
+        //         raikou_node.lock().await.deref(),
+        //     )),
+        //     32 * 1024 * 1024, // 32MB max block size
+        // )
+        // .await;
 
         let print_metrics = async {
             // Notify the protocol to stop.
@@ -778,7 +775,7 @@ where
             PeerId,
             (Author, RaikouNetworkMessage),
         >,
-        network_sender: Arc<NetworkSender>,
+        network_sender: Arc<crate::network::NetworkSender>,
         certifier: Arc<C>,
     ) -> Self {
         let address_to_index = epoch_state.verifier.address_to_validator_index().clone();

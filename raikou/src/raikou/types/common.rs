@@ -15,6 +15,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::{
     cmp::Ordering,
     fmt::{Debug, Formatter},
+    time::Instant,
 };
 
 pub type Txn = aptos_types::transaction::SignedTransaction;
@@ -57,6 +58,7 @@ impl From<BlockSerialization> for Block {
 
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
 pub struct BlockData {
+    pub timestamp_usecs: u64,
     pub payload: Payload,
     pub parent_qc: QC,
     pub reason: RoundEnterReason,

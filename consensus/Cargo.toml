@@ -30,7 +30,6 @@ aptos-executor = { workspace = true }
 aptos-executor-types = { workspace = true }
 aptos-experimental-runtimes = { workspace = true }
 aptos-fallible = { workspace = true }
-aptos-global-constants = { workspace = true }
 aptos-infallible = { workspace = true }
 aptos-logger = { workspace = true }
 aptos-mempool = { workspace = true }
@@ -48,6 +47,7 @@ aptos-temppath = { workspace = true }
 aptos-time-service = { workspace = true }
 aptos-types = { workspace = true }
 aptos-validator-transaction-pool = { workspace = true }
+aptos-vm = { workspace = true }
 async-trait = { workspace = true }
 bcs = { workspace = true }
 byteorder = { workspace = true }

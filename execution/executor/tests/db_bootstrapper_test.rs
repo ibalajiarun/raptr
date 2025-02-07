@@ -8,14 +8,16 @@ use aptos_cached_packages::aptos_stdlib;
 use aptos_crypto::{ed25519::Ed25519PrivateKey, HashValue, PrivateKey, Uniform};
 use aptos_db::AptosDB;
 use aptos_executor::{
-    block_executor::{AptosVMBlockExecutor, BlockExecutor},
+    block_executor::BlockExecutor,
     db_bootstrapper::{generate_waypoint, maybe_bootstrap},
 };
 use aptos_executor_test_helpers::{
     bootstrap_genesis, gen_ledger_info_with_sigs, get_test_signed_transaction,
 };
 use aptos_executor_types::BlockExecutorTrait;
-use aptos_storage_interface::{state_view::LatestDbStateCheckpointView, DbReaderWriter};
+use aptos_storage_interface::{
+    state_store::state_view::db_state_view::LatestDbStateCheckpointView, DbReaderWriter,
+};
 use aptos_temppath::TempPath;
 use aptos_types::{
     account_address::AccountAddress,
@@ -35,7 +37,7 @@ use aptos_types::{
     write_set::{WriteOp, WriteSetMut},
     AptosCoinType,
 };
-use aptos_vm::AptosVM;
+use aptos_vm::aptos_vm::AptosVMBlockExecutor;
 use move_core_types::{language_storage::TypeTag, move_resource::MoveStructType};
 use rand::SeedableRng;
 use std::sync::Arc;
@@ -54,8 +56,9 @@ fn test_empty_db() {
         .is_none());
 
     // Bootstrap empty DB.
-    let waypoint = generate_waypoint::<AptosVM>(&db_rw, &genesis_txn).expect("Should not fail.");
-    maybe_bootstrap::<AptosVM>(&db_rw, &genesis_txn, waypoint).unwrap();
+    let waypoint =
+        generate_waypoint::<AptosVMBlockExecutor>(&db_rw, &genesis_txn).expect("Should not fail.");
+    maybe_bootstrap::<AptosVMBlockExecutor>(&db_rw, &genesis_txn, waypoint).unwrap();
     let ledger_info = db_rw.reader.get_latest_ledger_info().unwrap();
     assert_eq!(
         Waypoint::new_epoch_boundary(ledger_info.ledger_info()).unwrap(),
@@ -71,9 +74,11 @@ fn test_empty_db() {
     assert!(trusted_state_change.is_epoch_change());
 
     // `maybe_bootstrap()` does nothing on non-empty DB.
-    assert!(maybe_bootstrap::<AptosVM>(&db_rw, &genesis_txn, waypoint)
-        .unwrap()
-        .is_none());
+    assert!(
+        maybe_bootstrap::<AptosVMBlockExecutor>(&db_rw, &genesis_txn, waypoint)
+            .unwrap()
+            .is_none()
+    );
 }
 
 fn execute_and_commit(txns: Vec<Transaction>, db: &DbReaderWriter, signer: &ValidatorSigner) {
@@ -189,7 +194,7 @@ fn test_new_genesis() {
     // Create bootstrapped DB.
     let tmp_dir = TempPath::new();
     let db = DbReaderWriter::new(AptosDB::new_for_test(&tmp_dir));
-    let waypoint = bootstrap_genesis::<AptosVM>(&db, &genesis_txn).unwrap();
+    let waypoint = bootstrap_genesis::<AptosVMBlockExecutor>(&db, &genesis_txn).unwrap();
     let signer = ValidatorSigner::new(
         genesis.1[0].data.owner_address,
         Arc::new(genesis.1[0].consensus_key.clone()),
@@ -256,10 +261,12 @@ fn test_new_genesis() {
     )));
 
     // Bootstrap DB into new genesis.
-    let waypoint = generate_waypoint::<AptosVM>(&db, &genesis_txn).unwrap();
-    assert!(maybe_bootstrap::<AptosVM>(&db, &genesis_txn, waypoint)
-        .unwrap()
-        .is_some());
+    let waypoint = generate_waypoint::<AptosVMBlockExecutor>(&db, &genesis_txn).unwrap();
+    assert!(
+        maybe_bootstrap::<AptosVMBlockExecutor>(&db, &genesis_txn, waypoint)
+            .unwrap()
+            .is_some()
+    );
     assert_eq!(waypoint.version(), 6);
 
     // Client bootable from waypoint.

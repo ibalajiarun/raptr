@@ -20,70 +20,32 @@ use crate::{
 use anyhow::Result;
 use aptos_crypto::HashValue;
 use aptos_executor_types::{
-    execution_output::ExecutionOutput, state_compute_result::StateComputeResult,
-    BlockExecutorTrait, ExecutorError, ExecutorResult,
+    state_compute_result::StateComputeResult, BlockExecutorTrait, ExecutorError, ExecutorResult,
 };
 use aptos_experimental_runtimes::thread_manager::THREAD_MANAGER;
 use aptos_infallible::RwLock;
 use aptos_logger::prelude::*;
 use aptos_metrics_core::{IntGaugeHelper, TimerHelper};
 use aptos_storage_interface::{
-    async_proof_fetcher::AsyncProofFetcher, cached_state_view::CachedStateView, DbReaderWriter,
+    state_store::state_view::{
+        async_proof_fetcher::AsyncProofFetcher, cached_state_view::CachedStateView,
+    },
+    DbReaderWriter,
 };
 use aptos_types::{
     block_executor::{
-        config::BlockExecutorConfigFromOnchain,
-        partitioner::{ExecutableBlock, ExecutableTransactions},
+        config::BlockExecutorConfigFromOnchain, partitioner::ExecutableBlock,
+        transaction_slice_metadata::TransactionSliceMetadata,
     },
     ledger_info::LedgerInfoWithSignatures,
     state_store::StateViewId,
 };
-use aptos_vm::AptosVM;
+use aptos_vm::VMBlockExecutor;
 use block_tree::BlockTree;
 use fail::fail_point;
 use std::sync::Arc;
 
 pub mod block_tree;
-
-pub trait TransactionBlockExecutor: Send + Sync {
-    fn new() -> Self;
-
-    fn execute_transaction_block(
-        &self,
-        transactions: ExecutableTransactions,
-        state_view: CachedStateView,
-        onchain_config: BlockExecutorConfigFromOnchain,
-        append_state_checkpoint_to_block: Option<HashValue>,
-    ) -> Result<ExecutionOutput>;
-}
-
-/// Production implementation of TransactionBlockExecutor.
-///
-/// Transaction execution: AptosVM
-/// Executing conflicts: in the input order, via BlockSTM,
-/// State: BlockSTM-provided MVHashMap-based view with caching
-pub struct AptosVMBlockExecutor;
-
-impl TransactionBlockExecutor for AptosVMBlockExecutor {
-    fn new() -> Self {
-        Self
-    }
-
-    fn execute_transaction_block(
-        &self,
-        transactions: ExecutableTransactions,
-        state_view: CachedStateView,
-        onchain_config: BlockExecutorConfigFromOnchain,
-        append_state_checkpoint_to_block: Option<HashValue>,
-    ) -> Result<ExecutionOutput> {
-        DoGetExecutionOutput::by_transaction_execution::<AptosVM>(
-            transactions,
-            state_view,
-            onchain_config,
-            append_state_checkpoint_to_block,
-        )
-    }
-}
 
 pub struct BlockExecutor<V> {
     pub db: DbReaderWriter,
@@ -92,7 +54,7 @@ pub struct BlockExecutor<V> {
 
 impl<V> BlockExecutor<V>
 where
-    V: TransactionBlockExecutor,
+    V: VMBlockExecutor,
 {
     pub fn new(db: DbReaderWriter) -> Self {
         Self {
@@ -111,7 +73,7 @@ where
 
 impl<V> BlockExecutorTrait for BlockExecutor<V>
 where
-    V: TransactionBlockExecutor,
+    V: VMBlockExecutor,
 {
     fn committed_block_id(&self) -> HashValue {
         let _guard = CONCURRENCY_GAUGE.concurrency_with(&["block", "committed_block_id"]);
@@ -197,7 +159,7 @@ struct BlockExecutorInner<V> {
 
 impl<V> BlockExecutorInner<V>
 where
-    V: TransactionBlockExecutor,
+    V: VMBlockExecutor,
 {
     pub fn new(db: DbReaderWriter) -> Result<Self> {
         let block_tree = BlockTree::new(&db.reader)?;
@@ -211,7 +173,7 @@ where
 
 impl<V> BlockExecutorInner<V>
 where
-    V: TransactionBlockExecutor,
+    V: VMBlockExecutor,
 {
     fn committed_block_id(&self) -> HashValue {
         self.block_tree.root_block().id
@@ -275,11 +237,13 @@ where
                             "Injected error in block_executor_execute_block"
                         )))
                     });
-                    self.block_executor.execute_transaction_block(
+
+                    DoGetExecutionOutput::by_transaction_execution(
+                        &self.block_executor,
                         transactions,
                         state_view,
                         onchain_config.clone(),
-                        Some(block_id),
+                        TransactionSliceMetadata::block(parent_block_id, block_id),
                     )?
                 };
 

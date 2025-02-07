@@ -158,14 +158,6 @@ impl RaikouManager {
                 .collect(),
         );
 
-        let network_service = RaikouNetworkService::new(
-            epoch_state.clone(),
-            messages_rx,
-            network_sender.clone(),
-            Arc::new(raikou::raikou::protocol::Certifier::new()),
-        )
-        .await;
-
         let config = raikou::raikou::Config {
             n_nodes,
             f,
@@ -296,6 +288,17 @@ impl RaikouManager {
             sig_verifier.clone(),
             // ordered_nodes_tx,
         )));
+
+        let network_service = RaikouNetworkService::new(
+            epoch_state.clone(),
+            messages_rx,
+            network_sender.clone(),
+            Arc::new(raikou::raikou::protocol::Certifier::new()),
+            Arc::new(raikou::raikou::protocol::Verifier::new(
+                &*raikou_node.lock().await,
+            )),
+        )
+        .await;
 
         // let network_service = TcpNetworkService::new(
         //     node_id,
@@ -805,7 +808,6 @@ where
 
         let (deserialized_messages_tx, deserialized_messages_rx) = tokio::sync::mpsc::channel(1024);
 
-        let verifier = verifier.clone();
         // Spawn a separate task to deserialize messages.
         // This helps to avoid blocking the main loop.
         tokio::spawn(async move {
@@ -817,6 +819,8 @@ where
                     aptos_logger::info!("APTNET: CONS: Dropping a message from {}", sender);
                     continue;
                 }
+
+                let verifier = verifier.clone();
 
                 // Deserialize the message concurrently.
                 let deserialized_messages_tx = deserialized_messages_tx.clone();

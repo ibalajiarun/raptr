@@ -7,7 +7,7 @@ use anyhow::{format_err, Result};
 use aptos_channels::{aptos_channel, message_queues::QueueStyle};
 use aptos_id_generator::{IdGenerator, U64IdGenerator};
 use aptos_storage_interface::{
-    state_view::{DbStateView, DbStateViewAtVersion},
+    state_store::state_view::db_state_view::{DbStateView, DbStateViewAtVersion},
     DbReader,
 };
 use aptos_types::{

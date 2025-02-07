@@ -1311,7 +1311,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
 
     async fn start_new_epoch_with_raikou(
         &mut self,
-        consensus_key: Option<Arc<PrivateKey>>,
+        consensus_key: Arc<PrivateKey>,
         epoch_state: Arc<EpochState>,
         onchain_consensus_config: OnChainConsensusConfig,
         on_chain_execution_config: OnChainExecutionConfig,
@@ -1326,10 +1326,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
         validator_set: ValidatorSet,
     ) {
         let epoch = epoch_state.epoch;
-        let signer = Arc::new(ValidatorSigner::new(
-            self.author,
-            consensus_key.clone().unwrap(),
-        ));
+        let signer = Arc::new(ValidatorSigner::new(self.author, consensus_key.clone()));
         let commit_signer = Arc::new(DagCommitSigner::new(signer.clone()));
 
         assert!(

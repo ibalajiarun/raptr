@@ -10,7 +10,7 @@ use aptos_mempool::{QuorumStoreRequest, QuorumStoreResponse};
 use aptos_mempool_notifications::{
     CommittedTransaction, MempoolCommitNotification, MempoolNotificationListener, MempoolNotifier,
 };
-use aptos_metrics_core::{register_histogram, Histogram};
+use aptos_metrics_core::{register_gauge, register_histogram, Gauge, Histogram};
 use aptos_types::{
     transaction::{SignedTransaction, Transaction},
     PeerId,
@@ -94,6 +94,14 @@ pub static RAIKOU_MEMPOOL_INSERT_TO_COMMIT_LATENCY: Lazy<Histogram> = Lazy::new(
     .unwrap()
 });
 
+pub static RAIKOU_MEMPOOL_SIZE: Lazy<Gauge> = Lazy::new(|| {
+    register_gauge!("raikou_mempool_size", "Raikou mempool size").unwrap()
+});
+
+pub static RAIKOU_MEMPOOL_SIZE_HISTOGRAM: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!("raikou_mempool_size_histogram", "raikou mempool size").unwrap()
+});
+
 pub struct SimpleMempool {
     pub transaction_store: Arc<Mutex<TransactionStore>>,
     pub pending_tracker: PendingTracker,
@@ -105,6 +113,8 @@ impl SimpleMempool {
             unreachable!();
         };
         let mut store = self.transaction_store.lock();
+
+        info!("pulling: store len: {}", store.len());
 
         let to_pull = min(store.len(), max_txns as usize);
         let pulled = store.drain(..to_pull);
@@ -121,8 +131,11 @@ impl SimpleMempool {
                 info!("pulled_txns empty");
             );
         } else {
-            info!("pulled txns: {}", pulled_txns.len());
+            info!("pulled txns: {}; store len: {}", pulled_txns.len(), store.len());
         }
+        RAIKOU_MEMPOOL_SIZE.set(store.len() as f64);
+        RAIKOU_MEMPOOL_SIZE_HISTOGRAM.observe(store.len() as f64);
+
         drop(store);
         sender
             .send(Ok(QuorumStoreResponse::GetBatchResponse(pulled_txns)))

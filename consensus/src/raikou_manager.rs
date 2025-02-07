@@ -7,8 +7,10 @@ use crate::{
     payload_client::PayloadClient,
     payload_manager::{QuorumStorePayloadManager, TPayloadManager},
     pipeline::buffer_manager::OrderedBlocks,
+    quorum_store,
 };
 use ::raikou::leader_schedule::round_robin;
+use anyhow::Context;
 use aptos_bitvec::BitVec;
 use aptos_config::config::ConsensusConfig;
 use aptos_consensus_notifications::ConsensusNotificationSender;
@@ -45,7 +47,7 @@ use raikou::{
     framework::{
         injection::{delay_injection, drop_injection},
         module_network::{match_event_type, ModuleId, ModuleNetwork, ModuleNetworkService},
-        network::{MessageCertifier, NetworkService},
+        network::{MessageCertifier, MessageVerifier, NetworkService},
         tcp_network::TcpNetworkService,
         timer::LocalTimerService,
         NodeId, Protocol,
@@ -53,7 +55,7 @@ use raikou::{
     metrics::{self, display_metric_to},
     raikou::{
         dissemination::{self, DisseminationLayer},
-        types::{self as raikou_types, Prefix},
+        types::{self as raikou_types, Prefix, N_SUB_BLOCKS},
         RaikouNode,
     },
 };
@@ -136,6 +138,7 @@ impl RaikouManager {
             .collect::<HashMap<_, _>>();
 
         let node_id = *address_to_index.get(&self_author).unwrap();
+        info!("my node id is {}", node_id);
 
         if validator_set.active_validators[node_id]
             .config()
@@ -482,24 +485,36 @@ impl RaikouManager {
                     let module_network_sender = module_network.new_sender();
                     let payload_manager = payload_manager.clone();
                     let block_author = Some(index_to_address[&payload.author()]);
-
                     tokio::spawn(async move {
-                        if let Ok(_) = payload_manager
-                            .wait_for_payload(
-                                &payload.inner,
-                                block_author,
-                                // timestamp is only used for batch expiration, which is not
-                                // supported in this prototype.
-                                0,
-                                round_initial_timeout,
-                            )
-                            .await
-                        {
+                        let prefix =
+                            payload_manager.available_prefix(&payload.inner.as_raikou_payload(), 0);
+                        if prefix == N_SUB_BLOCKS {
+                            info!("Full prefix available {}/{}", prefix, N_SUB_BLOCKS);
                             module_network_sender
                                 .notify(consensus_module, dissemination::FullBlockAvailable {
                                     round,
                                 })
                                 .await;
+                        } else {
+                            info!("Partial prefix available {}/{}", prefix, N_SUB_BLOCKS);
+                            if let Ok(_) = payload_manager
+                                .wait_for_payload(
+                                    &payload.inner,
+                                    block_author,
+                                    // timestamp is only used for batch expiration, which is not
+                                    // supported in this prototype.
+                                    0,
+                                    round_initial_timeout,
+                                    false,
+                                )
+                                .await
+                            {
+                                module_network_sender
+                                    .notify(consensus_module, dissemination::FullBlockAvailable {
+                                        round,
+                                    })
+                                    .await;
+                            }
                         }
                     });
                 } else if match_event_type::<dissemination::NewQCWithPayload>(&event) {
@@ -759,15 +774,17 @@ where
     }
 }
 
-pub struct RaikouNetworkService<M, C> {
+pub struct RaikouNetworkService<M, C, V> {
     sender: RaikouNetworkSender<M, C>,
     deserialized_messages_rx: tokio::sync::mpsc::Receiver<(NodeId, M)>,
+    _phantom: PhantomData<V>,
 }
 
-impl<M, C> RaikouNetworkService<M, C>
+impl<M, C, V> RaikouNetworkService<M, C, V>
 where
     M: Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static,
     C: MessageCertifier<Message = M> + Send + Sync + 'static,
+    V: MessageVerifier<Message = M> + Send + 'static,
 {
     pub async fn new(
         epoch_state: Arc<EpochState>,
@@ -777,6 +794,7 @@ where
         >,
         network_sender: Arc<crate::network::NetworkSender>,
         certifier: Arc<C>,
+        verifier: Arc<V>,
     ) -> Self {
         let address_to_index = epoch_state.verifier.address_to_validator_index().clone();
         let index_to_address = address_to_index
@@ -787,6 +805,7 @@ where
 
         let (deserialized_messages_tx, deserialized_messages_rx) = tokio::sync::mpsc::channel(1024);
 
+        let verifier = verifier.clone();
         // Spawn a separate task to deserialize messages.
         // This helps to avoid blocking the main loop.
         tokio::spawn(async move {
@@ -806,7 +825,11 @@ where
 
                     delay_injection().await;
 
-                    // TODO: add validation
+                    verifier
+                        .verify(sender, &msg)
+                        .await
+                        .context("Error verifying the message")
+                        .unwrap();
 
                     if deserialized_messages_tx.send((sender, msg)).await.is_err() {
                         // no-op.
@@ -827,14 +850,16 @@ where
                 }),
             },
             deserialized_messages_rx,
+            _phantom: PhantomData,
         }
     }
 }
 
-impl<M, C> raikou::framework::network::NetworkSender for RaikouNetworkService<M, C>
+impl<M, C, V> raikou::framework::network::NetworkSender for RaikouNetworkService<M, C, V>
 where
     M: raikou::framework::network::NetworkMessage + Serialize + for<'de> Deserialize<'de>,
     C: raikou::framework::network::MessageCertifier<Message = M>,
+    V: raikou::framework::network::MessageVerifier<Message = M>,
 {
     type Message = M;
 
@@ -847,10 +872,11 @@ where
     }
 }
 
-impl<M, C> NetworkService for RaikouNetworkService<M, C>
+impl<M, C, V> NetworkService for RaikouNetworkService<M, C, V>
 where
     M: raikou::framework::network::NetworkMessage + Serialize + for<'de> Deserialize<'de>,
     C: raikou::framework::network::MessageCertifier<Message = M>,
+    V: raikou::framework::network::MessageVerifier<Message = M>,
 {
     type Sender = RaikouNetworkSender<M, C>;
 
@@ -909,7 +935,7 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
                     block_timestamp: aptos_infallible::duration_since_epoch(),
                     maybe_optqs_payload_pull_params: Some(OptQSPayloadPullParams {
                         exclude_authors: HashSet::new(),
-                        minimum_batch_age_usecs: 0,
+                        minimum_batch_age_usecs: Duration::from_millis(30).as_micros() as u64,
                     }),
                 },
                 TransactionFilter::no_op(),
@@ -944,6 +970,10 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
                 payloads.into_iter().map(|payload| payload.inner).collect();
 
             for payload in &payloads {
+                quorum_store::counters::NUM_BATCH_PER_BLOCK
+                    .observe(payload.as_raikou_payload().num_batches() as f64);
+                quorum_store::counters::NUM_TXNS_PER_BLOCK
+                    .observe(payload.as_raikou_payload().num_txns() as f64);
                 payload_manager.prefetch_payload_data(payload, 0);
             }
             payload_manager.notify_commit(
@@ -955,7 +985,7 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
 
             for payload in payloads {
                 while let Err(e) = payload_manager
-                    .wait_for_payload(&payload, None, 0, Duration::from_secs(1))
+                    .wait_for_payload(&payload, None, 0, Duration::from_secs(1), true)
                     .await
                 {
                     error!("error {:?}", e);

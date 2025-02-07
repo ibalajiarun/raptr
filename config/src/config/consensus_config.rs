@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, u64};
 
 // NOTE: when changing, make sure to update QuorumStoreBackPressureConfig::backlog_txn_limit_count as well.
-const MAX_SENDING_BLOCK_TXNS_AFTER_FILTERING: u64 = 3000;
-const MAX_SENDING_BLOCK_TXNS: u64 = 7000;
+const MAX_SENDING_BLOCK_TXNS_AFTER_FILTERING: u64 = 21000;
+const MAX_SENDING_BLOCK_TXNS: u64 = 21000;
 pub(crate) static MAX_RECEIVING_BLOCK_TXNS: Lazy<u64> =
     Lazy::new(|| 10000.max(2 * MAX_SENDING_BLOCK_TXNS));
 // stop reducing size at this point, so 1MB transactions can still go through
@@ -318,7 +318,7 @@ impl Default for ConsensusConfig {
                 backoff_policy_max_delay_ms: 10000,
                 rpc_timeout_ms: 10000,
             },
-            num_bounded_executor_tasks: 16,
+            num_bounded_executor_tasks: 32,
             enable_pre_commit: true,
             max_pending_rounds_in_commit_vote_cache: 100,
             optimistic_sig_verification: false,

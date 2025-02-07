@@ -66,6 +66,7 @@ pub trait TPayloadManager: Send + Sync {
         block_author: Option<Author>,
         block_timestamp: u64,
         timeout: Duration,
+        wait_for_proof: bool,
     ) -> anyhow::Result<()> {
         unimplemented!()
     }
@@ -454,6 +455,7 @@ impl TPayloadManager for QuorumStorePayloadManager {
         block_author: Option<Author>,
         block_timestamp: u64,
         timeout: Duration,
+        wait_for_proof: bool,
     ) -> anyhow::Result<()> {
         tokio::time::timeout(timeout, async move {
             let Payload::Raikou(payload) = payload else {
@@ -472,14 +474,16 @@ impl TPayloadManager for QuorumStorePayloadManager {
                 .await?;
             }
 
-            process_payload_helper(
-                payload.proof_with_data(),
-                self.batch_reader.clone(),
-                block_author,
-                block_timestamp,
-                &self.ordered_authors,
-            )
-            .await?;
+            if wait_for_proof {
+                process_payload_helper(
+                    payload.proof_with_data(),
+                    self.batch_reader.clone(),
+                    block_author,
+                    block_timestamp,
+                    &self.ordered_authors,
+                )
+                .await?;
+            }
 
             Ok(())
         })

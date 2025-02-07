@@ -40,6 +40,7 @@ use aptos_types::{
 use futures::StreamExt;
 use futures_channel::mpsc::{Receiver, Sender};
 use std::{sync::Arc, time::Duration};
+use tokio::time::MissedTickBehavior;
 
 pub enum QuorumStoreBuilder {
     DirectMempool(DirectMempoolInnerBuilder),
@@ -276,9 +277,10 @@ impl InnerBuilder {
         aptos_channel::Sender<AccountAddress, IncomingBatchRetrievalRequest>,
     ) {
         // TODO: parameter? bring back back-off?
-        let interval = tokio::time::interval(Duration::from_millis(
+        let mut interval = tokio::time::interval(Duration::from_millis(
             self.config.batch_generation_poll_interval_ms as u64,
         ));
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         let coordinator_rx = self.coordinator_rx.take().unwrap();
         let quorum_store_coordinator = QuorumStoreCoordinator::new(

@@ -10,6 +10,10 @@ use crate::{
     suites::ungrouped::{optimize_for_maximum_throughput, optimize_state_sync_for_throughput},
     TestCommand,
 };
+use aptos_config::{
+    config::{DiscoveryMethod, Identity, NetworkConfig, NodeConfig},
+    network_id::NetworkId,
+};
 use aptos_forge::{
     args::TransactionTypeArg,
     prometheus_metrics::LatencyBreakdownSlice,
@@ -281,6 +285,28 @@ pub(crate) fn realistic_env_max_load_test(
     // Create the test
     ForgeConfig::default()
         .with_initial_validator_count(NonZeroUsize::new(num_validators).unwrap())
+        .with_validator_override_node_config_fn(Arc::new(|config, base| {
+            base.validator_network2 = Some(NetworkConfig::default());
+            base.validator_network3 = Some(NetworkConfig::default());
+
+            let mut net2config = NetworkConfig::default();
+            net2config.listen_address = "/ip4/0.0.0.0/tcp/12000".parse().unwrap();
+            net2config.mutual_authentication = true;
+            net2config.identity =
+                Identity::from_file("/opt/aptos/genesis/validator-identity.yaml".into());
+            net2config.discovery_method = DiscoveryMethod::Onchain;
+            net2config.network_id = NetworkId::Validator;
+            config.validator_network2 = Some(net2config);
+
+            let mut net3config = NetworkConfig::default();
+            net3config.listen_address = "/ip4/0.0.0.0/tcp/12001".parse().unwrap();
+            net3config.mutual_authentication = true;
+            net3config.identity =
+                Identity::from_file("/opt/aptos/genesis/validator-identity.yaml".into());
+            net3config.discovery_method = DiscoveryMethod::Onchain;
+            net3config.network_id = NetworkId::Validator;
+            config.validator_network3 = Some(net3config);
+        }))
         .add_network_test(wrap_with_realistic_env(
             num_validators,
             ConsensusOnlyBenchmark,

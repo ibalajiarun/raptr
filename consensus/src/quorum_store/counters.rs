@@ -159,6 +159,15 @@ pub static NUM_BATCH_PER_BLOCK: Lazy<Histogram> = Lazy::new(|| {
     .unwrap()
 });
 
+pub static NUM_TXNS_PER_BLOCK: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "quorum_store_num_txns_per_block",
+        "Histogram for the number of txns per (committed) blocks.",
+        TRANSACTION_COUNT_BUCKETS.clone(),
+    )
+    .unwrap()
+});
+
 /// Histogram for the number of transactions per batch.
 static NUM_TXN_PER_BATCH: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
@@ -382,8 +391,40 @@ static POS_TO_PULL: Lazy<HistogramVec> = Lazy::new(|| {
     .unwrap()
 });
 
+static BATCH_TO_PULL: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "quorum_store_batch_to_pull",
+        "Histogram for how long it took a batch to go from created to pulled into a proposed block",
+        &["bucket"],
+        QUORUM_STORE_LATENCY_BUCKETS.to_vec()
+    )
+    .unwrap()
+});
+
+static BATCH_INSERT_TO_PULL: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "quorum_store_batch_insert_to_pull",
+        "Histogram for how long it took a batch to go from inserted to pulled into a proposed block",
+        &["bucket"],
+        QUORUM_STORE_LATENCY_BUCKETS.to_vec()
+    )
+    .unwrap()
+});
+
 pub fn pos_to_pull(bucket: u64, secs: f64) {
     POS_TO_PULL
+        .with_label_values(&[bucket.to_string().as_str()])
+        .observe(secs)
+}
+
+pub fn batch_to_pull(bucket: u64, secs: f64) {
+    BATCH_TO_PULL
+        .with_label_values(&[bucket.to_string().as_str()])
+        .observe(secs)
+}
+
+pub fn batch_insert_to_pull(bucket: u64, secs: f64) {
+    BATCH_INSERT_TO_PULL
         .with_label_values(&[bucket.to_string().as_str()])
         .observe(secs)
 }

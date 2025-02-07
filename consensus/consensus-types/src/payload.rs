@@ -513,7 +513,7 @@ impl RaikouPayload {
             .sum::<usize>()
     }
 
-    pub(crate) fn num_txns(&self) -> usize {
+    pub fn num_txns(&self) -> usize {
         self.num_sub_block_txns() + self.proofs().num_txns()
     }
 
@@ -521,8 +521,16 @@ impl RaikouPayload {
         self.sub_blocks().iter().all(|inner| inner.is_empty()) && self.proofs().is_empty()
     }
 
-    pub(crate) fn num_sub_block_batches(&self) -> usize {
+    pub fn num_sub_block_batches(&self) -> usize {
         self.sub_blocks().iter().map(|inner| inner.len()).sum()
+    }
+
+    pub fn num_proof_batches(&self) -> usize {
+        self.proofs().len()
+    }
+
+    pub fn num_batches(&self) -> usize {
+        self.num_sub_block_batches() + self.num_proof_batches()
     }
 
     pub(crate) fn num_bytes(&self) -> usize {

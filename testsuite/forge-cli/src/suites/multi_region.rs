@@ -21,6 +21,7 @@ use aptos_testcases::{
     CompositeNetworkTest,
 };
 use std::{num::NonZeroUsize, sync::Arc};
+use aptos_config::config::NetworkConfig;
 
 /// Attempts to match the test name to a multi-region test
 pub(crate) fn get_multi_region_test(test_name: &str) -> Option<ForgeConfig> {
@@ -42,6 +43,9 @@ pub(crate) fn multiregion_benchmark_test() -> ForgeConfig {
     ForgeConfig::default()
         .with_initial_validator_count(NonZeroUsize::new(10).unwrap())
         .add_network_test(ConsensusOnlyBenchmark)
+        .with_validator_override_node_config_fn(Arc::new(|config, _| {
+            config.validator_network2 = Some(NetworkConfig::default());
+        }))
         .with_genesis_helm_config_fn(Arc::new(|helm_values| {
             // Have single epoch change in land blocking
             helm_values["chain"]["epoch_duration_secs"] = 3600.into();

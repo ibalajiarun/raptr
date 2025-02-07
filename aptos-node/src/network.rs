@@ -227,6 +227,20 @@ fn extract_network_configs(node_config: &NodeConfig) -> Vec<NetworkConfig> {
         }
         network_configs.push(network_config.clone());
     }
+    if let Some(network_config) = node_config.validator_network2.as_ref() {
+        // Ensure that mutual authentication is enabled by default!
+        if !network_config.mutual_authentication {
+            panic!("Validator networks must always have mutual_authentication enabled!");
+        }
+        network_configs.push(network_config.clone());
+    }
+    if let Some(network_config) = node_config.validator_network3.as_ref() {
+        // Ensure that mutual authentication is enabled by default!
+        if !network_config.mutual_authentication {
+            panic!("Validator networks must always have mutual_authentication enabled!");
+        }
+        network_configs.push(network_config.clone());
+    }
     network_configs
 }
 
@@ -250,8 +264,12 @@ pub fn setup_networks_and_get_interfaces(
     chain_id: ChainId,
     peers_and_metadata: Arc<PeersAndMetadata>,
     event_subscription_service: &mut EventSubscriptionService,
+    event_subscription_service2: &mut EventSubscriptionService,
+    event_subscription_service3: &mut EventSubscriptionService,
 ) -> (
     Vec<Runtime>,
+    Option<ApplicationNetworkInterfaces<ConsensusMsg>>,
+    Option<ApplicationNetworkInterfaces<ConsensusMsg>>,
     Option<ApplicationNetworkInterfaces<ConsensusMsg>>,
     Option<ApplicationNetworkInterfaces<ConsensusObserverMessage>>,
     Option<ApplicationNetworkInterfaces<DKGMessage>>,
@@ -266,6 +284,8 @@ pub fn setup_networks_and_get_interfaces(
     // Create each network and register the application handles
     let mut network_runtimes = vec![];
     let mut consensus_network_handle = None;
+    let mut consensus_network_handle2 = None;
+    let mut consensus_network_handle3 = None;
     let mut consensus_observer_network_handles: Option<
         Vec<ApplicationNetworkHandle<ConsensusObserverMessage>>,
     > = None;
@@ -282,22 +302,39 @@ pub fn setup_networks_and_get_interfaces(
         // Entering gives us a runtime to instantiate all the pieces of the builder
         let _enter = runtime.enter();
 
+        let ess = if consensus_network_handle.is_none() {
+            &mut *event_subscription_service
+        } else if consensus_network_handle2.is_none() {
+            &mut *event_subscription_service2
+        } else {
+            &mut *event_subscription_service3
+        };
+
+        let peers_and_metadata = if consensus_network_handle.is_none() {
+            peers_and_metadata.clone()
+        } else {
+            PeersAndMetadata::new(&[NetworkId::Validator])
+        };
+
         // Create a new network builder
         let mut network_builder = NetworkBuilder::create(
             chain_id,
             node_config.base.role,
             &network_config,
             TimeService::real(),
-            Some(event_subscription_service),
-            peers_and_metadata.clone(),
+            Some(ess),
+            peers_and_metadata,
         );
 
         // Register consensus (both client and server) with the network
         let network_id = network_config.network_id;
         if network_id.is_validator_network() {
             // A validator node must have only a single consensus network handle
-            if consensus_network_handle.is_some() {
-                panic!("There can be at most one validator network!");
+            if consensus_network_handle.is_some()
+                && consensus_network_handle2.is_some()
+                && consensus_network_handle3.is_some()
+            {
+                panic!("There can be at most two validator network!");
             } else {
                 let network_handle = register_client_and_service_with_network(
                     &mut network_builder,
@@ -306,34 +343,40 @@ pub fn setup_networks_and_get_interfaces(
                     consensus_network_configuration(node_config),
                     true,
                 );
-                consensus_network_handle = Some(network_handle);
+                if consensus_network_handle.is_none() {
+                    consensus_network_handle = Some(network_handle);
+                } else if consensus_network_handle2.is_none() {
+                    consensus_network_handle2 = Some(network_handle);
+                } else {
+                    consensus_network_handle3 = Some(network_handle);
+                }
             }
 
-            if dkg_network_handle.is_some() {
-                panic!("There can be at most one validator network!");
-            } else {
-                let network_handle = register_client_and_service_with_network(
-                    &mut network_builder,
-                    network_id,
-                    &network_config,
-                    dkg_network_configuration(node_config),
-                    true,
-                );
-                dkg_network_handle = Some(network_handle);
-            }
-
-            if jwk_consensus_network_handle.is_some() {
-                panic!("There can be at most one validator network!");
-            } else {
-                let network_handle = register_client_and_service_with_network(
-                    &mut network_builder,
-                    network_id,
-                    &network_config,
-                    jwk_consensus_network_configuration(node_config),
-                    true,
-                );
-                jwk_consensus_network_handle = Some(network_handle);
-            }
+            // if dkg_network_handle.is_some() {
+            //     panic!("There can be at most one validator network!");
+            // } else {
+            //     let network_handle = register_client_and_service_with_network(
+            //         &mut network_builder,
+            //         network_id,
+            //         &network_config,
+            //         dkg_network_configuration(node_config),
+            //         true,
+            //     );
+            //     dkg_network_handle = Some(network_handle);
+            // }
+            //
+            // if jwk_consensus_network_handle.is_some() {
+            //     panic!("There can be at most one validator network!");
+            // } else {
+            //     let network_handle = register_client_and_service_with_network(
+            //         &mut network_builder,
+            //         network_id,
+            //         &network_config,
+            //         jwk_consensus_network_configuration(node_config),
+            //         true,
+            //     );
+            //     jwk_consensus_network_handle = Some(network_handle);
+            // }
         }
 
         // Register consensus observer (both client and server) with the network
@@ -415,6 +458,8 @@ pub fn setup_networks_and_get_interfaces(
     // Transform all network handles into application interfaces
     let (
         consensus_interfaces,
+        qs_interfaces,
+        qs2_interfaces,
         consensus_observer_interfaces,
         dkg_interfaces,
         jwk_consensus_interfaces,
@@ -424,6 +469,8 @@ pub fn setup_networks_and_get_interfaces(
     ) = transform_network_handles_into_interfaces(
         node_config,
         consensus_network_handle,
+        consensus_network_handle2,
+        consensus_network_handle3,
         consensus_observer_network_handles,
         dkg_network_handle,
         jwk_consensus_network_handle,
@@ -449,6 +496,8 @@ pub fn setup_networks_and_get_interfaces(
     (
         network_runtimes,
         consensus_interfaces,
+        qs_interfaces,
+        qs2_interfaces,
         consensus_observer_interfaces,
         dkg_interfaces,
         jwk_consensus_interfaces,
@@ -498,6 +547,8 @@ fn register_client_and_service_with_network<
 fn transform_network_handles_into_interfaces(
     node_config: &NodeConfig,
     consensus_network_handle: Option<ApplicationNetworkHandle<ConsensusMsg>>,
+    consensus_network_handle2: Option<ApplicationNetworkHandle<ConsensusMsg>>,
+    consensus_network_handle3: Option<ApplicationNetworkHandle<ConsensusMsg>>,
     consensus_observer_network_handles: Option<
         Vec<ApplicationNetworkHandle<ConsensusObserverMessage>>,
     >,
@@ -511,6 +562,8 @@ fn transform_network_handles_into_interfaces(
     peers_and_metadata: Arc<PeersAndMetadata>,
 ) -> (
     Option<ApplicationNetworkInterfaces<ConsensusMsg>>,
+    Option<ApplicationNetworkInterfaces<ConsensusMsg>>,
+    Option<ApplicationNetworkInterfaces<ConsensusMsg>>,
     Option<ApplicationNetworkInterfaces<ConsensusObserverMessage>>,
     Option<ApplicationNetworkInterfaces<DKGMessage>>,
     Option<ApplicationNetworkInterfaces<JWKConsensusMsg>>,
@@ -519,6 +572,22 @@ fn transform_network_handles_into_interfaces(
     ApplicationNetworkInterfaces<StorageServiceMessage>,
 ) {
     let consensus_interfaces = consensus_network_handle.map(|consensus_network_handle| {
+        create_network_interfaces(
+            vec![consensus_network_handle],
+            consensus_network_configuration(node_config),
+            peers_and_metadata.clone(),
+        )
+    });
+
+    let consensus_interfaces2 = consensus_network_handle2.map(|consensus_network_handle| {
+        create_network_interfaces(
+            vec![consensus_network_handle],
+            consensus_network_configuration(node_config),
+            peers_and_metadata.clone(),
+        )
+    });
+
+    let consensus_interfaces3 = consensus_network_handle3.map(|consensus_network_handle| {
         create_network_interfaces(
             vec![consensus_network_handle],
             consensus_network_configuration(node_config),
@@ -571,6 +640,8 @@ fn transform_network_handles_into_interfaces(
 
     (
         consensus_interfaces,
+        consensus_interfaces2,
+        consensus_interfaces3,
         consensus_observer_interfaces,
         dkg_interfaces,
         jwk_consensus_interfaces,

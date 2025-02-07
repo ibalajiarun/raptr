@@ -47,6 +47,10 @@ pub fn start_consensus(
     node_config: &NodeConfig,
     network_client: NetworkClient<ConsensusMsg>,
     network_service_events: NetworkServiceEvents<ConsensusMsg>,
+    qs_network_client: NetworkClient<ConsensusMsg>,
+    qs_network_service_events: NetworkServiceEvents<ConsensusMsg>,
+    qs2_network_client: NetworkClient<ConsensusMsg>,
+    qs2_network_service_events: NetworkServiceEvents<ConsensusMsg>,
     state_sync_notifier: Arc<dyn ConsensusNotificationSender>,
     consensus_to_mempool_sender: mpsc::Sender<QuorumStoreRequest>,
     aptos_db: DbReaderWriter,
@@ -79,6 +83,8 @@ pub fn start_consensus(
     let (self_sender, self_receiver) =
         aptos_channels::new_unbounded(&counters::PENDING_SELF_MESSAGES);
     let consensus_network_client = ConsensusNetworkClient::new(network_client);
+    let qs_network_client = ConsensusNetworkClient::new(qs_network_client);
+    let qs2_network_client = ConsensusNetworkClient::new(qs2_network_client);
     let bounded_executor = BoundedExecutor::new(
         node_config.consensus.num_bounded_executor_tasks as usize,
         runtime.handle().clone(),
@@ -103,6 +109,8 @@ pub fn start_consensus(
         time_service,
         self_sender,
         consensus_network_client,
+        qs_network_client,
+        qs2_network_client,
         timeout_sender,
         consensus_to_mempool_sender,
         execution_client,
@@ -117,7 +125,12 @@ pub fn start_consensus(
         state_sync_notifier,
     );
 
-    let (network_task, network_receiver) = NetworkTask::new(network_service_events, self_receiver);
+    let (network_task, network_receiver) = NetworkTask::new(
+        network_service_events,
+        qs_network_service_events,
+        qs2_network_service_events,
+        self_receiver,
+    );
 
     runtime.spawn(network_task.start());
     runtime.spawn(epoch_mgr.start(timeout_receiver, network_receiver));

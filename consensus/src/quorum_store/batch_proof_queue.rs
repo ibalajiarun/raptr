@@ -16,7 +16,9 @@ use aptos_logger::{info, sample, sample::SampleRate, warn};
 use aptos_metrics_core::TimerHelper;
 use aptos_short_hex_str::AsShortHexStr;
 use aptos_types::{transaction::SignedTransaction, PeerId};
+use raikou::raikou::duration_since_epoch;
 use rand::{prelude::SliceRandom, thread_rng};
+use rayon::prelude::*;
 use std::{
     cmp::Reverse,
     collections::{hash_map::Entry, BTreeMap, HashMap, HashSet},
@@ -40,6 +42,7 @@ struct QueueItem {
     proof: Option<ProofOfStore>,
     /// The time when the proof is inserted into this item.
     proof_insertion_time: Option<Instant>,
+    batch_insert_time: Option<Instant>,
 }
 
 impl QueueItem {
@@ -239,6 +242,7 @@ impl BatchProofQueue {
                     proof: Some(proof),
                     proof_insertion_time: Some(Instant::now()),
                     txn_summaries: None,
+                    batch_insert_time: None,
                 });
             },
         }
@@ -308,6 +312,7 @@ impl BatchProofQueue {
                         proof: None,
                         proof_insertion_time: None,
                         txn_summaries: Some(txn_summaries),
+                        batch_insert_time: Some(Instant::now()),
                     });
                 },
             }
@@ -448,7 +453,7 @@ impl BatchProofQueue {
 
             counters::PROOF_SIZE_WHEN_PULL.observe(proof_of_stores.len() as f64);
             // Number of proofs remaining in proof queue after the pull
-            self.log_remaining_data_after_pull(excluded_batches, &proof_of_stores);
+            // self.log_remaining_data_after_pull(excluded_batches, &proof_of_stores);
         }
 
         (proof_of_stores, all_txns, unique_txns, !is_full)
@@ -509,7 +514,21 @@ impl BatchProofQueue {
             block_timestamp,
             minimum_batch_age_usecs,
         );
-        let batches = result.into_iter().map(|item| item.info.clone()).collect();
+        let batches = result
+            .into_iter()
+            .map(|item| {
+                let bucket = item.info.gas_bucket_start;
+                let duration_since_creation = duration_since_epoch().saturating_sub(
+                    Duration::from_micros(item.info.expiration)
+                        .saturating_sub(Duration::from_secs(60)),
+                );
+                counters::batch_to_pull(bucket, duration_since_creation.as_secs_f64());
+                if let Some(instant) = item.batch_insert_time {
+                    counters::batch_insert_to_pull(bucket, instant.elapsed().as_secs_f64());
+                }
+                item.info.clone()
+            })
+            .collect();
         (batches, all_txns, unique_txns, is_full)
     }
 
@@ -625,7 +644,7 @@ impl BatchProofQueue {
         }
 
         while !iters.is_empty() {
-            iters.shuffle(&mut thread_rng());
+            // iters.shuffle(&mut thread_rng());
             iters.retain_mut(|iter| {
                 if full {
                     return false;
@@ -806,6 +825,7 @@ impl BatchProofQueue {
         count
     }
 
+    #[cfg(test)]
     pub(crate) fn remaining_txns_and_proofs(&self) -> (u64, u64) {
         let start = Instant::now();
         counters::NUM_TOTAL_TXNS_LEFT_ON_UPDATE.observe(self.remaining_txns_with_duplicates as f64);
@@ -904,6 +924,7 @@ impl BatchProofQueue {
                     txn_summaries: None,
                     proof: None,
                     proof_insertion_time: None,
+                    batch_insert_time: None,
                 });
             }
         }

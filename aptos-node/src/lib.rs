@@ -40,12 +40,14 @@ use aptos_state_sync_driver::driver_factory::StateSyncRuntimes;
 use aptos_types::{
     account_config::ChainIdResource,
     chain_id::ChainId,
+    network_address::{NetworkAddress, Protocol},
     on_chain_config::{
         ConfigurationResource, InMemoryOnChainConfig, OnChainConfig, OnChainJWKConsensusConfig,
         ValidatorSet,
     },
     state_store::state_key::StateKey,
     transaction::{Transaction::GenesisTransaction, WriteSetPayload},
+    validator_info::ValidatorInfo,
     write_set::WriteSet,
 };
 use clap::Parser;
@@ -731,11 +733,25 @@ pub fn setup_environment_and_start_node(
         Arc::new(DbConfigStorageProvider::new(db_rw.reader.clone())),
     );
 
+    let (mut event_subscription_service2, _, _, _, _, _) =
+        state_sync::create_event_subscription_service(
+            &node_config,
+            Arc::new(DbConfigStorageProvider::new(db_rw.reader.clone())),
+        );
+
+    let (mut event_subscription_service3, _, _, _, _, _) =
+        state_sync::create_event_subscription_service(
+            &node_config,
+            Arc::new(DbConfigStorageProvider::new(db_rw.reader.clone())),
+        );
+
     // Set up the networks and gather the application network handles
     let peers_and_metadata = network::create_peers_and_metadata(&node_config);
     let (
         network_runtimes,
         consensus_network_interfaces,
+        _,
+        _,
         consensus_observer_network_interfaces,
         dkg_network_interfaces,
         jwk_consensus_network_interfaces,
@@ -747,6 +763,8 @@ pub fn setup_environment_and_start_node(
         chain_id,
         peers_and_metadata.clone(),
         &mut event_subscription_service,
+        &mut event_subscription_service2,
+        &mut event_subscription_service3,
     );
 
     // Start the peer monitoring service
@@ -841,6 +859,8 @@ pub fn setup_environment_and_start_node(
         db_rw.clone(),
         consensus_reconfig_subscription,
         consensus_network_interfaces,
+        None,
+        None,
         consensus_notifier.clone(),
         consensus_to_mempool_sender.clone(),
         vtxn_pool,
@@ -938,6 +958,92 @@ pub fn consensus_only_setup_environment_and_start_node(
         read_config_bytes::<ConfigurationResource>(genesis_write_set),
     );
 
+    let mut configs2 = HashMap::new();
+    let valset = read_config::<ValidatorSet>(genesis_write_set);
+    let valset = ValidatorSet {
+        active_validators: valset
+            .active_validators
+            .into_iter()
+            .map(|mut info| {
+                let addr = info.config().validator_network_addresses().unwrap();
+                let addr: Vec<NetworkAddress> = addr
+                    .into_iter()
+                    .map(|addr| {
+                        NetworkAddress::from_protocols(
+                            addr.into_iter()
+                                .map(|part| {
+                                    if let Protocol::Tcp(port) = part {
+                                        Protocol::Tcp(12000)
+                                    } else {
+                                        part
+                                    }
+                                })
+                                .collect(),
+                        )
+                        .unwrap()
+                    })
+                    .collect();
+                let addr = bcs::to_bytes(&addr).unwrap();
+                info.config_mut().validator_network_addresses = addr;
+                info
+            })
+            .collect(),
+        ..valset
+    };
+    let valset = bcs::to_bytes(&valset).unwrap();
+    configs2.insert(StateKey::on_chain_config::<ValidatorSet>().unwrap(), valset);
+    configs2.insert(
+        StateKey::on_chain_config::<ChainId>().unwrap(),
+        read_config_bytes::<ChainId>(genesis_write_set),
+    );
+    configs2.insert(
+        StateKey::on_chain_config::<ConfigurationResource>().unwrap(),
+        read_config_bytes::<ConfigurationResource>(genesis_write_set),
+    );
+
+    let mut configs3 = HashMap::new();
+    let valset = read_config::<ValidatorSet>(genesis_write_set);
+    let valset = ValidatorSet {
+        active_validators: valset
+            .active_validators
+            .into_iter()
+            .map(|mut info| {
+                let addr = info.config().validator_network_addresses().unwrap();
+                let addr: Vec<NetworkAddress> = addr
+                    .into_iter()
+                    .map(|addr| {
+                        NetworkAddress::from_protocols(
+                            addr.into_iter()
+                                .map(|part| {
+                                    if let Protocol::Tcp(port) = part {
+                                        Protocol::Tcp(12001)
+                                    } else {
+                                        part
+                                    }
+                                })
+                                .collect(),
+                        )
+                        .unwrap()
+                    })
+                    .collect();
+                let addr = bcs::to_bytes(&addr).unwrap();
+                info.config_mut().validator_network_addresses = addr;
+                info
+            })
+            .collect(),
+        ..valset
+    };
+    let valset = bcs::to_bytes(&valset).unwrap();
+    configs3.insert(StateKey::on_chain_config::<ValidatorSet>().unwrap(), valset);
+    configs3.insert(
+        StateKey::on_chain_config::<ChainId>().unwrap(),
+        read_config_bytes::<ChainId>(genesis_write_set),
+    );
+    configs3.insert(
+        StateKey::on_chain_config::<ConfigurationResource>().unwrap(),
+        read_config_bytes::<ConfigurationResource>(genesis_write_set),
+    );
+
     // admin_service.set_aptos_db(db_rw.clone().into());
 
     // Set the Aptos VM configurations
@@ -972,12 +1078,18 @@ pub fn consensus_only_setup_environment_and_start_node(
 
     let mut event_subscription_service =
         EventSubscriptionService::new(Arc::new(InMemConfigStorageProvider::new(configs)));
+    let mut event_subscription_service2 =
+        EventSubscriptionService::new(Arc::new(InMemConfigStorageProvider::new(configs2)));
+    let mut event_subscription_service3 =
+        EventSubscriptionService::new(Arc::new(InMemConfigStorageProvider::new(configs3)));
 
     // Set up the networks and gather the application network handles
     let peers_and_metadata = network::create_peers_and_metadata(&node_config);
     let (
         network_runtimes,
         consensus_network_interfaces,
+        qs_network_interfaces,
+        qs2_network_interfaces,
         _consensus_observer_network_interfaces,
         _dkg_network_interfaces,
         _jwk_consensus_network_interfaces,
@@ -989,6 +1101,8 @@ pub fn consensus_only_setup_environment_and_start_node(
         chain_id,
         peers_and_metadata.clone(),
         &mut event_subscription_service,
+        &mut event_subscription_service2,
+        &mut event_subscription_service3,
     );
 
     // Start the peer monitoring service
@@ -1088,6 +1202,12 @@ pub fn consensus_only_setup_environment_and_start_node(
     event_subscription_service
         .notify_initial_configs(0)
         .unwrap();
+    event_subscription_service2
+        .notify_initial_configs(0)
+        .unwrap();
+    event_subscription_service3
+        .notify_initial_configs(0)
+        .unwrap();
 
     info!("sleeping for some time hoping trusted peers is updated");
     thread::sleep(Duration::from_secs(5));
@@ -1107,6 +1227,7 @@ pub fn consensus_only_setup_environment_and_start_node(
             break;
         }
         thread::sleep(Duration::from_secs(1));
+        error!("waiting for mesh connectivity");
     }
 
     let vtxn_pool = aptos_validator_transaction_pool::VTxnPoolState::default();
@@ -1117,6 +1238,8 @@ pub fn consensus_only_setup_environment_and_start_node(
         db_rw.clone(),
         consensus_reconfig_subscription,
         consensus_network_interfaces,
+        qs_network_interfaces,
+        qs2_network_interfaces,
         consensus_notifier.clone(),
         consensus_to_mempool_sender.clone(),
         vtxn_pool,

@@ -16,6 +16,7 @@ use aptos_types::{
 };
 use async_trait::async_trait;
 use balter::{prelude::ConfigurableScenario, scenario, transaction};
+use futures::stream::FuturesUnordered;
 use rand::{thread_rng, RngCore};
 use reqwest::{StatusCode, Url};
 use std::{
@@ -52,7 +53,7 @@ impl Test for ConsensusOnlyBenchmark {
     }
 }
 
-const MAX_BATCH_SIZE: usize = 10;
+const MAX_BATCH_SIZE: usize = 1;
 
 #[async_trait]
 impl NetworkTest for ConsensusOnlyBenchmark {
@@ -78,17 +79,32 @@ impl NetworkTest for ConsensusOnlyBenchmark {
             .map_err(|_| anyhow!("couldn't set context"))
             .unwrap();
 
-        let result = batch_load_test()
-            .tps(10)
-            .duration(Duration::from_secs(600))
-            .error_rate(0.0)
-            .hint(balter::Hint::Concurrency(1))
-            .await;
+        // let result = batch_load_test()
+        //     .tps(10000)
+        //     .duration(Duration::from_secs(600))
+        //     .error_rate(0.0)
+        //     .hint(balter::Hint::Concurrency(20000))
+        //     .await;
+
+        let concurrency = 81_000;
+        let test_time = Duration::from_secs(600);
+        let mut futures = Vec::new();
+        for i in 0..concurrency {
+            if i % 100 == 0 {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+            futures.push(tokio::spawn(async move {
+                tokio::time::timeout(test_time, batch_load_test()).await
+            }));
+        }
+        let _result = futures::future::join_all(futures).await;
+
+        info!("test complete");
 
         // let result = tokio::time::timeout(Duration::from_secs(60), load_test()).await;
 
-        info!("{:?}", result);
-        println!("{:?}", result);
+        // info!("{:?}", result);
+        // println!("{:?}", result);
 
         Ok(())
     }
@@ -158,7 +174,7 @@ async fn transaction(
     Ok(())
 }
 
-#[scenario]
+// #[scenario]
 async fn batch_load_test() {
     let (client, batch_size) = {
         let ctx = BALTER_CONTEXT.get().unwrap();
@@ -195,7 +211,7 @@ async fn batch_load_test() {
     }
 }
 
-#[transaction]
+// #[transaction]
 async fn batch_transaction(
     client: &aptos_rest_client::Client,
     txn_payload: Vec<u8>,

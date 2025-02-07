@@ -259,6 +259,7 @@ pub struct RaikouNode<S, DL> {
     r_timeout: Round,               // The highest round the node has voted to time out.
     last_qc_vote: SubBlockId,
     last_commit_vote: SubBlockId,
+    last_tc_round: Round,
     qc_high: QC,
     committed_qc: QC,
 
@@ -327,6 +328,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             r_cur: 0,
             last_qc_vote: (0, 0).into(),
             last_commit_vote: (0, 0).into(),
+            last_tc_round: 0,
             r_timeout: 0,
             qc_high: QC::genesis(),
             committed_qc: QC::genesis(),
@@ -782,9 +784,12 @@ where
 
             self.r_cur = round;
 
-            self.log_detail(format!("Entering round {} by {:?}", round, self.enter_reason));
+            let timestamp_usecs =  duration_since_epoch().as_micros() as u64;
 
-            if self.node_id == self.config.leader(round) {
+            let leader =  self.config.leader(round);
+            self.log_detail(format!("Entering round {} by {:?} and leader {}", round, self.enter_reason, leader));
+
+            if self.node_id == leader {
                 // Upon entering round r, the leader L_r multicasts a signed block
                 // B = [r, parent_qc, cc, tc, acs, batches], where cc or tc is not ⊥
                 // if the leader enters the round by forming or receiving a CC or TC
@@ -798,7 +803,7 @@ where
                 ).await;
 
                 let block_data = BlockData {
-                    timestamp_usecs: duration_since_epoch().as_micros() as u64,
+                    timestamp_usecs,
                     payload,
                     parent_qc,
                     reason: self.enter_reason.clone(),
@@ -1132,6 +1137,7 @@ where
             let votes = &self.tc_votes[round];
 
             if votes.len() >= self.quorum() {
+                self.last_tc_round = round;
                 self.log_detail(format!("Forming a TC for round {}", round));
 
                 let vote_data = votes

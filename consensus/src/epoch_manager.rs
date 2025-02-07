@@ -137,6 +137,8 @@ pub struct EpochManager<P: OnChainConfigProvider> {
     time_service: Arc<dyn TimeService>,
     self_sender: aptos_channels::UnboundedSender<Event<ConsensusMsg>>,
     network_sender: ConsensusNetworkClient<NetworkClient<ConsensusMsg>>,
+    qs_network_sender: ConsensusNetworkClient<NetworkClient<ConsensusMsg>>,
+    qs2_network_sender: ConsensusNetworkClient<NetworkClient<ConsensusMsg>>,
     timeout_sender: aptos_channels::Sender<Round>,
     quorum_store_enabled: bool,
     quorum_store_to_mempool_sender: Sender<QuorumStoreRequest>,
@@ -189,6 +191,8 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
         time_service: Arc<dyn TimeService>,
         self_sender: aptos_channels::UnboundedSender<Event<ConsensusMsg>>,
         network_sender: ConsensusNetworkClient<NetworkClient<ConsensusMsg>>,
+        qs_network_sender: ConsensusNetworkClient<NetworkClient<ConsensusMsg>>,
+        qs2_network_sender: ConsensusNetworkClient<NetworkClient<ConsensusMsg>>,
         timeout_sender: aptos_channels::Sender<Round>,
         quorum_store_to_mempool_sender: Sender<QuorumStoreRequest>,
         execution_client: Arc<dyn TExecutionClient>,
@@ -217,6 +221,8 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             time_service,
             self_sender,
             network_sender,
+            qs_network_sender,
+            qs2_network_sender,
             timeout_sender,
             // This default value is updated at epoch start
             quorum_store_enabled: false,
@@ -947,6 +953,8 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
         NetworkSender::new(
             self.author,
             self.network_sender.clone(),
+            self.qs_network_sender.clone(),
+            self.qs2_network_sender.clone(),
             self.self_sender.clone(),
             epoch_state.verifier.clone(),
         )
@@ -1353,7 +1361,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
         let (raikou_shutdown_tx, raikou_shutdown_rx) = oneshot::channel();
         self.raikou_shutdown_tx = Some(raikou_shutdown_tx);
 
-        let delta = 0.3;
+        let delta = 0.2;
 
         #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
         let total_duration_in_delta = 200;

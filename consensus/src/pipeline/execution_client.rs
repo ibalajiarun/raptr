@@ -208,6 +208,8 @@ impl ExecutionProxyClient {
         let network_sender = NetworkSender::new(
             self.author,
             self.network_sender.clone(),
+            self.network_sender.clone(),
+            self.network_sender.clone(),
             self.self_sender.clone(),
             epoch_state.verifier.clone(),
         );

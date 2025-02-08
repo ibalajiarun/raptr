@@ -119,6 +119,10 @@ impl Block {
         let sig_verifier = &verifier.sig_verifier;
         let quorum = verifier.config.ac_quorum;
 
+        if let &RoundEnterReason::ThisRoundQC = self.reason() {
+            return Err(anyhow::anyhow!("ThisRoundQC cannot be used as entry reason in a block"));
+        }
+
         self.payload()
             .verify(verifier)
             .context("Error verifying payload")?;
@@ -467,17 +471,20 @@ impl TC {
 
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
 pub enum RoundEnterReason {
-    /// When a node receives a QC for the full prefix of round r, it enters round r+1.
+    /// When a node receives a QC for round r, it can enter round r.
+    ThisRoundQC,
+    /// When a node receives a full-prefix QC for round r, it can enter round r+1.
     FullPrefixQC,
-    /// When a node receives a CC for round r, it enters round r+1.
+    /// When a node receives a CC for round r, it can enter round r+1.
     CC(CC),
-    /// When a node receives a TC for round r, it enters round r+1.
+    /// When a node receives a TC for round r, it can enter round r+1.
     TC(TC),
 }
 
 impl Debug for RoundEnterReason {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
+            RoundEnterReason::ThisRoundQC => write!(f, "This Round QC"),
             RoundEnterReason::FullPrefixQC => write!(f, "Full Prefix QC"),
             RoundEnterReason::CC(cc) => write!(f, "CC({})", cc.round),
             RoundEnterReason::TC(tc) => write!(f, "TC({})", tc.timeout_round),
@@ -494,6 +501,12 @@ impl RoundEnterReason {
         quorum: usize,
     ) -> anyhow::Result<()> {
         match self {
+            RoundEnterReason::ThisRoundQC => {
+                if !(qc.round == round) {
+                    return Err(anyhow::anyhow!("Invalid ThisRoundQC entry reason"));
+                }
+                Ok(())
+            },
             RoundEnterReason::FullPrefixQC => {
                 if !(qc.round == round - 1 && qc.is_full()) {
                     return Err(anyhow::anyhow!("Invalid FullPrefixQC entry reason"));

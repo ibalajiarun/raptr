@@ -21,7 +21,10 @@ use crate::{
         proposal_generator::{
             ChainHealthBackoffConfig, PipelineBackpressureConfig, ProposalGenerator,
         },
-        proposal_status_tracker::{ExponentialWindowFailureTracker, OptQSPullParamsProvider},
+        proposal_status_tracker::{
+            ExponentialWindowFailureTracker, LockedExponentialWindowFailureTracker,
+            OptQSPullParamsProvider,
+        },
         proposer_election::ProposerElection,
         rotating_proposer_election::{choose_leader, RotatingProposer},
         round_proposer_election::RoundProposer,
@@ -867,10 +870,13 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             maybe_pipeline_builder,
         ));
 
-        let failures_tracker = Arc::new(Mutex::new(ExponentialWindowFailureTracker::new(
-            100,
-            epoch_state.verifier.get_ordered_account_addresses(),
-        )));
+        let failures_tracker: Arc<LockedExponentialWindowFailureTracker> = Arc::new(
+            Mutex::new(ExponentialWindowFailureTracker::new(
+                100,
+                epoch_state.verifier.get_ordered_account_addresses(),
+            ))
+            .into(),
+        );
         let opt_qs_payload_param_provider = Arc::new(OptQSPullParamsProvider::new(
             self.config.quorum_store.enable_opt_quorum_store,
             self.config.quorum_store.opt_qs_minimum_batch_age_usecs,

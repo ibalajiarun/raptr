@@ -2,6 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
+    liveness::proposal_status_tracker::{
+        ExponentialWindowFailureTracker, LockedExponentialWindowFailureTracker,
+        OptQSPullParamsProvider, TOptQSPullParamsProvider,
+    },
     network::NetworkSender,
     network_interface::ConsensusMsg,
     payload_client::PayloadClient,
@@ -25,6 +29,7 @@ use aptos_consensus_types::{
     utils::PayloadTxnsSize,
 };
 use aptos_crypto::HashValue;
+use aptos_infallible::Mutex;
 use aptos_logger::{error, info};
 use aptos_types::{
     chain_id::ChainId,
@@ -158,6 +163,19 @@ impl RaikouManager {
                 .collect(),
         );
 
+        let failures_tracker: Arc<LockedExponentialWindowFailureTracker> = Arc::new(
+            Mutex::new(ExponentialWindowFailureTracker::new(
+                100,
+                epoch_state.verifier.get_ordered_account_addresses(),
+            ))
+            .into(),
+        );
+        let opt_qs_payload_param_provider = Arc::new(OptQSPullParamsProvider::new(
+            consensus_config.quorum_store.enable_opt_quorum_store,
+            consensus_config.quorum_store.opt_qs_minimum_batch_age_usecs,
+            failures_tracker.clone(),
+        ));
+
         let config = raikou::raikou::Config {
             n_nodes,
             f,
@@ -269,6 +287,7 @@ impl RaikouManager {
             diss_module_network,
             state_sync_notifier,
             index_to_address,
+            opt_qs_payload_param_provider,
         )
         .await;
 
@@ -287,6 +306,7 @@ impl RaikouManager {
             signer.clone(),
             sig_verifier.clone(),
             // ordered_nodes_tx,
+            failures_tracker,
         )));
 
         let network_service = RaikouNetworkService::new(
@@ -455,6 +475,7 @@ impl RaikouManager {
         mut module_network: ModuleNetworkService,
         state_sync_notifier: Arc<dyn ConsensusNotificationSender>,
         index_to_address: HashMap<usize, Author>,
+        optqs_payload_param_provider: Arc<dyn TOptQSPullParamsProvider>,
     ) -> impl DisseminationLayer {
         let round_initial_timeout =
             Duration::from_millis(consensus_config.round_initial_timeout_ms);
@@ -466,6 +487,7 @@ impl RaikouManager {
             payload_manager: payload_manager.clone(),
             module_id: module_network.module_id(),
             state_sync_notifier,
+            optqs_payload_param_provider,
         };
 
         tokio::spawn(async move {
@@ -829,11 +851,14 @@ where
 
                     delay_injection().await;
 
-                    verifier
+                    if let Err(e) = verifier
                         .verify(sender, &msg)
                         .await
                         .context("Error verifying the message")
-                        .unwrap();
+                    {
+                        error!("Error verifying message {:?}: {:?}", msg, e);
+                        return;
+                    }
 
                     if deserialized_messages_tx.send((sender, msg)).await.is_err() {
                         // no-op.
@@ -901,6 +926,7 @@ struct RaikouQSDisseminationLayer {
     payload_manager: Arc<dyn TPayloadManager>,
     module_id: ModuleId,
     state_sync_notifier: Arc<dyn ConsensusNotificationSender>,
+    optqs_payload_param_provider: Arc<dyn TOptQSPullParamsProvider>,
 }
 
 #[cfg(any(feature = "force-aptos-types", not(feature = "sim-types")))]
@@ -937,10 +963,7 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
                     pending_uncommitted_blocks: 0,
                     recent_max_fill_fraction: 0.0,
                     block_timestamp: aptos_infallible::duration_since_epoch(),
-                    maybe_optqs_payload_pull_params: Some(OptQSPayloadPullParams {
-                        exclude_authors: HashSet::new(),
-                        minimum_batch_age_usecs: Duration::from_millis(30).as_micros() as u64,
-                    }),
+                    maybe_optqs_payload_pull_params: self.optqs_payload_param_provider.get_params(),
                 },
                 TransactionFilter::no_op(),
                 async {}.boxed(),
@@ -1020,5 +1043,10 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
                 }
             }
         });
+    }
+
+    fn check_payload(&self, payload: &raikou::raikou::types::Payload) -> Result<(), BitVec> {
+        self.payload_manager
+            .check_payload_availability(&payload.inner)
     }
 }

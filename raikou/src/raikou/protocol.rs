@@ -24,11 +24,16 @@ use crate::{
     utils::kth_max_set::KthMaxMap,
 };
 use anyhow::Context;
-use aptos_consensus_types::{common::Author, payload::BatchPointer};
+use aptos_bitvec::BitVec;
+use aptos_consensus_types::{
+    common::Author, payload::BatchPointer, round_timeout::RoundTimeoutReason,
+};
 use aptos_crypto::{bls12381::Signature, hash::CryptoHash, Genesis};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
-use aptos_types::aggregate_signature::{AggregateSignature, PartialSignatures};
-use bitvec::vec::BitVec;
+use aptos_types::{
+    aggregate_signature::{AggregateSignature, PartialSignatures},
+    validator_verifier::ValidatorVerifier,
+};
 use defaultmap::DefaultBTreeMap;
 use futures_channel::mpsc::UnboundedSender;
 use itertools::Itertools;
@@ -37,11 +42,12 @@ use rand::prelude::SliceRandom;
 use serde::{ser::SerializeTuple, Deserialize, Deserializer, Serialize, Serializer};
 use std::{
     cmp::{max, max_by, max_by_key, min, Ordering},
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt::{Debug, Formatter},
     num::NonZeroU8,
     ops::Deref,
-    sync::Arc,
+    sync::{Arc, Mutex},
+    task::ready,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::time::Instant;
@@ -52,7 +58,7 @@ pub enum Message {
     Propose(Block),
     QcVote(Round, Prefix, BlockHash, Signature),
     CcVote(QC, Signature),
-    TcVote(Round, QC, Signature),
+    TcVote(Round, QC, Signature, RoundTimeoutReason),
     AdvanceRound(Round, QC, RoundEnterReason),
     FetchReq(BlockHash),
     FetchResp(Block),
@@ -66,7 +72,7 @@ impl Debug for Message {
             Message::CcVote(qc, _) => {
                 write!(f, "CcVote({})", qc.round)
             },
-            Message::TcVote(round, _, _) => {
+            Message::TcVote(round, _, _, _) => {
                 write!(f, "TcVote(round {})", round)
             },
             Message::AdvanceRound(round, _, reason) => {
@@ -152,7 +158,7 @@ impl<S: LeaderSchedule> MessageVerifier for Verifier<S> {
                     .context("Error verifying the round enter reason in AdvanceRound message")
             },
 
-            Message::TcVote(round, qc, signature) => {
+            Message::TcVote(round, qc, signature, _) => {
                 let sig_data = &TcVoteSignatureData {
                     timeout_round: *round,
                     qc_high_id: qc.sub_block_id(),
@@ -240,6 +246,10 @@ pub struct Metrics {
     pub batch_consensus_latency: Option<metrics::UnorderedSender<(Instant, f64)>>,
 }
 
+pub trait TRaikouFailureTracker: Send + Sync {
+    fn push_reason(&self, status: RoundEnterReason);
+}
+
 pub struct RaikouNode<S, DL> {
     node_id: NodeId,
     config: Config<S>,
@@ -293,11 +303,12 @@ pub struct RaikouNode<S, DL> {
         DefaultBTreeMap<Round, DefaultBTreeMap<BlockHash, BTreeMap<NodeId, (Prefix, Signature)>>>,
     received_cc_vote: DefaultBTreeMap<Round, BTreeSet<NodeId>>,
     cc_votes: DefaultBTreeMap<Round, KthMaxMap<(QC, NodeId), Signature>>,
-    tc_votes: DefaultBTreeMap<Round, BTreeMap<NodeId, (SubBlockId, Signature)>>,
+    tc_votes: DefaultBTreeMap<Round, BTreeMap<NodeId, (SubBlockId, Signature, RoundTimeoutReason)>>,
 
     sig_verifier: SignatureVerifier,
     signer: Signer,
     // ordered_nodes_tx: UnboundedSender<OrderedBlocks>,
+    failure_tracker: Arc<dyn TRaikouFailureTracker>,
 }
 
 impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
@@ -310,6 +321,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         signer: Signer,
         sig_verifier: SignatureVerifier,
         // ordered_nodes_tx: UnboundedSender<OrderedBlocks>,
+        failure_tracker: Arc<dyn TRaikouFailureTracker>,
     ) -> Self {
         let quorum = config.quorum();
         assert!(config.block_fetch_multiplicity <= quorum);
@@ -349,6 +361,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             sig_verifier,
             signer,
             // ordered_nodes_tx,
+            failure_tracker,
         }
     }
 
@@ -521,6 +534,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         if round > self.r_ready {
             self.r_ready = round;
             self.enter_reason = reason.clone();
+            self.failure_tracker.push_reason(reason.clone());
 
             // Upon getting a justification to enter a higher round,
             // send it to the leader of that round.
@@ -737,6 +751,80 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         if self.detailed_logging {
             self.log_info(msg);
         }
+    }
+
+    fn compute_timeout_reason(&self, round: Round) -> RoundTimeoutReason {
+        if self.last_qc_vote.round == round {
+            return RoundTimeoutReason::NoQC;
+        }
+
+        match self.leader_proposal.get(&round) {
+            None => RoundTimeoutReason::ProposalNotReceived,
+            Some(hash) => {
+                let payload = self.blocks[hash].payload();
+                if let Err(missing_authors) = self.dissemination.check_payload(payload) {
+                    RoundTimeoutReason::PayloadUnavailable { missing_authors }
+                } else {
+                    RoundTimeoutReason::Unknown
+                }
+            },
+        }
+    }
+
+    fn aggregate_timeout_reason(
+        &self,
+        tc_votes: &BTreeMap<NodeId, (SubBlockId, Signature, RoundTimeoutReason)>,
+    ) -> RoundTimeoutReason {
+        let mut reason_voting_power: HashMap<RoundTimeoutReason, usize> = HashMap::new();
+        let mut missing_batch_authors: HashMap<usize, usize> = HashMap::new();
+        // let ordered_authors = verifier.get_ordered_account_addresses();
+        for (author, (_, _, reason)) in tc_votes {
+            // To aggregate the reason, we only care about the variant type itself and
+            // exclude any data within the variants.
+            let reason_key = match reason {
+                reason @ RoundTimeoutReason::Unknown
+                | reason @ RoundTimeoutReason::ProposalNotReceived
+                | reason @ RoundTimeoutReason::NoQC => reason.clone(),
+                RoundTimeoutReason::PayloadUnavailable { missing_authors } => {
+                    for missing_idx in missing_authors.iter_ones() {
+                        *missing_batch_authors.entry(missing_idx).or_default() += 1;
+                    }
+                    RoundTimeoutReason::PayloadUnavailable {
+                        // Since we care only about the variant type, we replace the bitvec
+                        // with a placeholder.
+                        missing_authors: BitVec::with_num_bits(self.config.n_nodes as u16),
+                    }
+                },
+            };
+            *reason_voting_power.entry(reason_key).or_default() += 1;
+        }
+        // The aggregated timeout reason is the reason with the most voting power received from
+        // at least f+1 peers by voting power. If such voting power does not exist, then the
+        // reason is unknown.
+
+        reason_voting_power
+            .into_iter()
+            .max_by_key(|(_, voting_power)| *voting_power)
+            .filter(|(_, voting_power)| *voting_power >= self.quorum())
+            .map(|(reason, _)| {
+                // If the aggregated reason is due to unavailable payload, we will compute the
+                // aggregated missing authors bitvec counting batch authors that have been reported
+                // missing by minority peers.
+                if matches!(reason, RoundTimeoutReason::PayloadUnavailable { .. }) {
+                    let mut aggregated_bitvec = BitVec::with_num_bits(self.config.n_nodes as u16);
+                    for (author_idx, voting_power) in missing_batch_authors {
+                        if voting_power >= self.quorum() {
+                            aggregated_bitvec.set(author_idx as u16);
+                        }
+                    }
+                    RoundTimeoutReason::PayloadUnavailable {
+                        missing_authors: aggregated_bitvec,
+                    }
+                } else {
+                    reason
+                }
+            })
+            .unwrap_or(RoundTimeoutReason::Unknown)
     }
 }
 
@@ -1121,16 +1209,17 @@ where
                     round,
                     self.qc_high.sub_block_id(),
                 ));
+                let reason = self.compute_timeout_reason(round);
 
-                ctx.multicast(Message::TcVote(round, self.qc_high.clone(), signature)).await;
+                ctx.multicast(Message::TcVote(round, self.qc_high.clone(), signature, reason)).await;
             }
         };
 
         // Upon receiving a valid timeout message, execute on_new_qc.
         // Upon gathering a quorum of matching timeout messages,
         // form the TC and execute advance_round.
-        upon receive [Message::TcVote(round, qc, signature)] from node [p] {
-            self.tc_votes[round].insert(p, (qc.sub_block_id(), signature));
+        upon receive [Message::TcVote(round, qc, signature, reason)] from node [p] {
+            self.tc_votes[round].insert(p, (qc.sub_block_id(), signature, reason));
             let digest = qc.block_digest;
             self.on_new_qc(qc, ctx).await;
 
@@ -1142,16 +1231,18 @@ where
 
                 let vote_data = votes
                     .iter()
-                    .map(|(node_id, (sub_block_id, _))| (*node_id, *sub_block_id))
+                    .map(|(node_id, (sub_block_id, _, _))| (*node_id, *sub_block_id))
                     .collect();
 
-                let signatures = votes.values().map(|(_, signature)| signature.clone());
+                let signatures = votes.values().map(|(_, signature, _)| signature.clone());
                 let aggregated_signature = self.sig_verifier.aggregate_signatures(signatures).unwrap();
+                let reason = self.aggregate_timeout_reason(votes);
 
                 let tc = TC::new(
                     round,
                     vote_data,
                     aggregated_signature,
+                    reason
                 );
 
                 if let Some(block) = self.blocks.get(&digest) {
@@ -1241,7 +1332,9 @@ where
                 )
                 .unwrap();
 
-                ctx.multicast(Message::TcVote(self.r_timeout, self.qc_high.clone(), signature)).await;
+                let reason = self.compute_timeout_reason(self.r_timeout);
+
+                ctx.multicast(Message::TcVote(self.r_timeout, self.qc_high.clone(), signature, reason)).await;
             }
 
             ctx.set_timer(self.config.round_sync_interval, TimerEvent::RoundSync);

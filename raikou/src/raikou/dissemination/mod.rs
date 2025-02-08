@@ -9,6 +9,7 @@ use crate::{
     metrics,
     raikou::types::*,
 };
+use aptos_bitvec::BitVec;
 use std::{any::Any, collections::HashSet, fmt::Debug, future::Future};
 use tokio::time::Instant;
 
@@ -83,6 +84,10 @@ pub trait DisseminationLayer: Send + Sync + 'static {
     ) -> impl Future<Output = Prefix> + Send;
 
     fn notify_commit(&self, payloads: Vec<Payload>) -> impl Future<Output = ()> + Send;
+
+    fn check_payload(&self, payload: &Payload) -> Result<(), BitVec> {
+        Ok(())
+    }
 }
 
 pub struct Metrics {

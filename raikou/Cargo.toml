@@ -32,6 +32,8 @@ tokio = { workspace = true }
 serde = { workspace = true }
 aptos-metrics-core = { workspace = true }
 once_cell = { workspace = true }
+aptos-bitvec = { workspace = true }
+aptos-infallible = { workspace = true }
 
 [features]
 sim-types = []

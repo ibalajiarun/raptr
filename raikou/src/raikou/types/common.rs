@@ -9,6 +9,7 @@ use crate::{
     },
 };
 use anyhow::Context;
+use aptos_consensus_types::round_timeout::RoundTimeoutReason;
 use aptos_crypto::{bls12381::Signature, hash::CryptoHash, HashValue};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -390,6 +391,13 @@ pub struct TC {
 
     #[serde(skip)]
     max_vote: SubBlockId,
+    round_timeout_reason: RoundTimeoutReason,
+}
+
+impl TC {
+    pub fn reason(&self) -> RoundTimeoutReason {
+        self.round_timeout_reason.clone()
+    }
 }
 
 #[derive(Deserialize)]
@@ -397,6 +405,7 @@ struct TcSerialization {
     timeout_round: Round,
     vote_data: Vec<(NodeId, SubBlockId)>,
     aggregated_signature: Signature,
+    timeout_reason: RoundTimeoutReason,
 }
 
 impl From<TcSerialization> for TC {
@@ -405,6 +414,7 @@ impl From<TcSerialization> for TC {
             serialized.timeout_round,
             serialized.vote_data,
             serialized.aggregated_signature,
+            serialized.timeout_reason,
         )
     }
 }
@@ -414,6 +424,7 @@ impl TC {
         timeout_round: Round,
         vote_data: Vec<(NodeId, SubBlockId)>,
         aggregated_signature: Signature,
+        round_timeout_reason: RoundTimeoutReason,
     ) -> Self {
         TC {
             timeout_round,
@@ -424,6 +435,7 @@ impl TC {
                 .unwrap(),
             vote_data,
             aggregated_signature,
+            round_timeout_reason,
         }
     }
 

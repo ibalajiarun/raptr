@@ -26,7 +26,8 @@ use crate::{
 use anyhow::Context;
 use aptos_bitvec::BitVec;
 use aptos_consensus_types::{
-    common::Author, payload::BatchPointer, round_timeout::RoundTimeoutReason,
+    common::Author, payload::BatchPointer, proof_of_store::ProofCache,
+    round_timeout::RoundTimeoutReason,
 };
 use aptos_crypto::{bls12381::Signature, hash::CryptoHash, Genesis};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
@@ -37,6 +38,7 @@ use aptos_types::{
 use defaultmap::DefaultBTreeMap;
 use futures_channel::mpsc::UnboundedSender;
 use itertools::Itertools;
+use mini_moka::sync::Cache;
 use nanovec::NanoArrayBit;
 use rand::prelude::SliceRandom;
 use serde::{ser::SerializeTuple, Deserialize, Deserializer, Serialize, Serializer};
@@ -90,6 +92,7 @@ pub type Certifier = framework::network::NoopCertifier<Message>;
 pub struct Verifier<S> {
     pub config: Config<S>,
     pub sig_verifier: SignatureVerifier,
+    pub proof_cache: ProofCache,
 }
 
 impl<S: LeaderSchedule> Verifier<S> {
@@ -97,6 +100,11 @@ impl<S: LeaderSchedule> Verifier<S> {
         Verifier {
             config: protocol.config.clone(),
             sig_verifier: protocol.sig_verifier.clone(),
+            proof_cache: Cache::builder()
+                .max_capacity(10_000)
+                .initial_capacity(1_000)
+                .time_to_live(Duration::from_secs(20))
+                .build(),
         }
     }
 }

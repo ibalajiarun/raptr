@@ -105,9 +105,9 @@ impl Default for QuorumStoreConfig {
         QuorumStoreConfig {
             channel_size: 1000,
             proof_timeout_ms: 10000,
-            batch_generation_poll_interval_ms: 150,
+            batch_generation_poll_interval_ms: 300,
             batch_generation_min_non_empty_interval_ms: 80,
-            batch_generation_max_interval_ms: 200,
+            batch_generation_max_interval_ms: 500,
             sender_max_batch_txns: DEFEAULT_MAX_BATCH_TXNS,
             // TODO: on next release, remove BATCH_PADDING_BYTES
             sender_max_batch_bytes: 1024 * 1024 - BATCH_PADDING_BYTES,
@@ -137,7 +137,7 @@ impl Default for QuorumStoreConfig {
             batch_buckets: DEFAULT_BUCKETS.to_vec(),
             allow_batches_without_pos_in_proposal: false,
             enable_opt_quorum_store: true,
-            opt_qs_minimum_batch_age_usecs: Duration::from_millis(20).as_micros() as u64,
+            opt_qs_minimum_batch_age_usecs: Duration::from_millis(30).as_micros() as u64,
         }
     }
 }

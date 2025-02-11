@@ -9,19 +9,21 @@ use aptos_crypto::{
     Genesis, Signature, SigningKey, VerifyingKey,
 };
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
-use aptos_types::validator_signer::ValidatorSigner;
+use aptos_types::{validator_signer::ValidatorSigner, validator_verifier::ValidatorVerifier};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct SignatureVerifier {
     public_keys: Arc<Vec<PublicKey>>,
+    pub verifier: Arc<ValidatorVerifier>,
 }
 
 impl SignatureVerifier {
-    pub fn new(public_keys: Vec<PublicKey>) -> Self {
+    pub fn new(public_keys: Vec<PublicKey>, verifier: Arc<ValidatorVerifier>) -> Self {
         SignatureVerifier {
             public_keys: Arc::new(public_keys),
+            verifier,
         }
     }
 

@@ -9,10 +9,12 @@ use crate::{
         types::common::{Prefix, Round},
     },
 };
+use aptos_consensus_types::proof_of_store::ProofCache;
 pub use aptos_consensus_types::proof_of_store::{BatchId, BatchInfo};
 pub use aptos_crypto::hash::HashValue;
 use aptos_crypto::hash::{CryptoHash, CryptoHasher};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
+use aptos_types::validator_verifier::ValidatorVerifier;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use std::{fmt::Debug, ops::Range};
@@ -110,7 +112,10 @@ impl Payload {
     }
 
     pub fn verify<S>(&self, verifier: &protocol::Verifier<S>) -> anyhow::Result<()> {
-        // TODO
-        Ok(())
+        self.inner.verify(
+            verifier.sig_verifier.verifier.as_ref(),
+            &verifier.proof_cache,
+            true,
+        )
     }
 }

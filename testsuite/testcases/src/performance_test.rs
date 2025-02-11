@@ -86,7 +86,7 @@ impl NetworkTest for ConsensusOnlyBenchmark {
         //     .hint(balter::Hint::Concurrency(20000))
         //     .await;
 
-        let concurrency = 81_000;
+        let concurrency = 10_000;
         let test_time = Duration::from_secs(600);
         let mut futures = Vec::new();
         for i in 0..concurrency {

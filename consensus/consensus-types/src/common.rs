@@ -541,6 +541,11 @@ impl Payload {
                 Self::verify_with_cache(&proof_with_data.batch_summary, validator, proof_cache)?;
                 Ok(())
             },
+            (true, Payload::Raikou(raikou)) => {
+                let proof_with_data = raikou.proof_with_data();
+                Self::verify_with_cache(&proof_with_data.batch_summary, validator, proof_cache)?;
+                Ok(())
+            },
             (_, _) => Err(anyhow::anyhow!(
                 "Wrong payload type. Expected Payload::InQuorumStore {} got {} ",
                 quorum_store_enabled,

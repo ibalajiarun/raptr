@@ -9,6 +9,7 @@ use crate::{
     },
 };
 use anyhow::Context;
+use aptos_consensus_types::proof_of_store::ProofCache;
 use aptos_consensus_types::round_timeout::RoundTimeoutReason;
 use aptos_crypto::{bls12381::Signature, hash::CryptoHash, HashValue};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};

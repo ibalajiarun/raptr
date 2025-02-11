@@ -161,6 +161,7 @@ impl RaikouManager {
                 .sorted_by_key(|(&index, _)| index)
                 .map(|(_, address)| epoch_state.verifier.get_public_key(address).unwrap())
                 .collect(),
+            epoch_state.verifier.clone(),
         );
 
         let failures_tracker: Arc<LockedExponentialWindowFailureTracker> = Arc::new(
@@ -315,7 +316,7 @@ impl RaikouManager {
             network_sender.clone(),
             Arc::new(raikou::raikou::protocol::Certifier::new()),
             Arc::new(raikou::raikou::protocol::Verifier::new(
-                &*raikou_node.lock().await,
+                raikou_node.lock().await.deref(),
             )),
         )
         .await;
@@ -856,7 +857,7 @@ where
                         .await
                         .context("Error verifying the message")
                     {
-                        error!("Error verifying message {:?}: {:?}", msg, e);
+                        error!("Error verifying message: {:?}", e);
                         return;
                     }
 

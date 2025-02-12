@@ -808,7 +808,7 @@ pub struct RaikouNetworkService<M, C, V> {
 
 impl<M, C, V> RaikouNetworkService<M, C, V>
 where
-    M: Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static,
+    M: Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static + std::fmt::Debug,
     C: MessageCertifier<Message = M> + Send + Sync + 'static,
     V: MessageVerifier<Message = M> + Send + 'static,
 {

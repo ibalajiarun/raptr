@@ -472,6 +472,11 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         // Update `qc_high`
         if new_qc > self.qc_high {
             self.qc_high = new_qc.clone();
+
+            if new_qc.round == self.r_ready {
+                // Update the enter_reason so that it stays compatible with qc_high.
+                self.enter_reason = RoundEnterReason::ThisRoundQC;
+            }
         }
 
         // If new_qc.round > r_commit_vote and new_qc.round > r_timeout,
@@ -500,9 +505,13 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             if let Some(block) = self.blocks.get(&new_qc.block_digest) {
                 observe_block(block.data.timestamp_usecs, "QCReady");
             }
-            // If form or receive a qc for the largest possible prefix of a round,
-            // advance to the next round after that.
+
+            // If form or receive a full-prefix qc, advance to the next round after that.
             self.advance_r_ready(new_qc.round + 1, RoundEnterReason::FullPrefixQC, ctx)
+                .await;
+        } else {
+            // Advance to the round of the new QC if lagging behind.
+            self.advance_r_ready(new_qc.round, RoundEnterReason::ThisRoundQC, ctx)
                 .await;
         }
 
@@ -544,14 +553,16 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             self.enter_reason = reason.clone();
             self.failure_tracker.push_reason(reason.clone());
 
-            // Upon getting a justification to enter a higher round,
-            // send it to the leader of that round.
+            // Upon getting a justification to enter a higher round r, send it to the leader
+            // of round r, unless already received a proposal or a QC in round that round.
             // NB: consider broadcasting to all the nodes instead.
-            ctx.unicast(
-                Message::AdvanceRound(round, self.qc_high.clone(), reason),
-                self.config.leader(round),
-            )
-            .await;
+            if !self.leader_proposal.contains_key(&round) && self.qc_high.round < round {
+                ctx.unicast(
+                    Message::AdvanceRound(round, self.qc_high.clone(), reason),
+                    self.config.leader(round),
+                )
+                .await;
+            }
         }
     }
 

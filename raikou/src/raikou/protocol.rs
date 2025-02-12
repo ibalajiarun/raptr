@@ -10,7 +10,7 @@ use crate::{
     },
     leader_schedule::LeaderSchedule,
     metrics::{self, Sender},
-    protocol,
+    monitor, protocol,
     raikou::{
         counters::{
             BLOCK_TRACING, RAIKOU_BATCH_CONSENSUS_LATENCY, RAIKOU_BLOCK_COMMIT_RATE,
@@ -45,7 +45,7 @@ use serde::{ser::SerializeTuple, Deserialize, Deserializer, Serialize, Serialize
 use std::{
     cmp::{max, max_by, max_by_key, min, Ordering},
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    fmt::{Debug, Formatter},
+    fmt::{Debug, Display, Formatter},
     num::NonZeroU8,
     ops::Deref,
     sync::{Arc, Mutex},
@@ -114,35 +114,35 @@ impl<S: LeaderSchedule> MessageVerifier for Verifier<S> {
 
     async fn verify(&self, sender: NodeId, message: &Self::Message) -> anyhow::Result<()> {
         match message {
-            Message::Propose(block) => {
+            Message::Propose(block) => monitor!("verify_propose", {
                 if block.author() != sender {
                     return Err(anyhow::anyhow!("Invalid author in Propose message"));
                 }
                 block
                     .verify(self)
                     .context("Error verifying the block in Propose message")
-            },
-
+            }),
             Message::QcVote(round, prefix, block_digest, signature) => {
-                if *prefix > N_SUB_BLOCKS {
-                    return Err(anyhow::anyhow!(
-                        "Invalid prefix in QcVote message: {}",
-                        prefix
-                    ));
-                }
+                monitor!("verify_qcvote", {
+                    if *prefix > N_SUB_BLOCKS {
+                        return Err(anyhow::anyhow!(
+                            "Invalid prefix in QcVote message: {}",
+                            prefix
+                        ));
+                    }
 
-                self.sig_verifier.verify(
-                    sender,
-                    &QcVoteSignatureData {
-                        round: *round,
-                        prefix: *prefix,
-                        block_digest: block_digest.clone(),
-                    },
-                    signature,
-                )
+                    self.sig_verifier.verify(
+                        sender,
+                        &QcVoteSignatureData {
+                            round: *round,
+                            prefix: *prefix,
+                            block_digest: block_digest.clone(),
+                        },
+                        signature,
+                    )
+                })
             },
-
-            Message::CcVote(qc, signature) => {
+            Message::CcVote(qc, signature) => monitor!("verify_ccvote", {
                 let sig_data = CcVoteSignatureData {
                     round: qc.round,
                     block_digest: qc.block_digest.clone(),
@@ -155,18 +155,16 @@ impl<S: LeaderSchedule> MessageVerifier for Verifier<S> {
 
                 qc.verify(&self.sig_verifier, self.config.quorum())
                     .context("Error verifying the QC in CcVote message")
-            },
-
-            Message::AdvanceRound(round, qc, reason) => {
+            }),
+            Message::AdvanceRound(round, qc, reason) => monitor!("verify_advance", {
                 qc.verify(&self.sig_verifier, self.config.quorum())
                     .context("Error verifying the QC in AdvanceRound message")?;
 
                 reason
                     .verify(*round, qc, &self.sig_verifier, self.config.quorum())
                     .context("Error verifying the round enter reason in AdvanceRound message")
-            },
-
-            Message::TcVote(round, qc, signature, _) => {
+            }),
+            Message::TcVote(round, qc, signature, _) => monitor!("verify_tcvote", {
                 let sig_data = &TcVoteSignatureData {
                     timeout_round: *round,
                     qc_high_id: qc.sub_block_id(),
@@ -178,13 +176,15 @@ impl<S: LeaderSchedule> MessageVerifier for Verifier<S> {
 
                 qc.verify(&self.sig_verifier, self.config.quorum())
                     .context("Error verifying the QC in TcVote message")
-            },
+            }),
+            Message::FetchReq(_block_digest) => monitor!("verify_fetchreq", Ok(())),
 
-            Message::FetchReq(_block_digest) => Ok(()),
-
-            Message::FetchResp(block) => block
-                .verify(self)
-                .context("Error verifying the block in FetchResp message"),
+            Message::FetchResp(block) => monitor!(
+                "verify_fetchresp",
+                block
+                    .verify(self)
+                    .context("Error verifying the block in FetchResp message")
+            ),
         }
     }
 }

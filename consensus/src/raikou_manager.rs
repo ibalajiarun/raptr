@@ -6,6 +6,7 @@ use crate::{
         ExponentialWindowFailureTracker, LockedExponentialWindowFailureTracker,
         OptQSPullParamsProvider, TOptQSPullParamsProvider,
     },
+    monitor,
     network::NetworkSender,
     network_interface::ConsensusMsg,
     payload_client::PayloadClient,
@@ -848,15 +849,11 @@ where
                 // Deserialize the message concurrently.
                 let deserialized_messages_tx = deserialized_messages_tx.clone();
                 tokio::spawn(async move {
-                    let msg = bcs::from_bytes(&msg.data).unwrap();
+                    let msg = monitor!("raikou_rx_deser", bcs::from_bytes(&msg.data).unwrap());
 
                     delay_injection().await;
 
-                    if let Err(e) = verifier
-                        .verify(sender, &msg)
-                        .await
-                        .context("Error verifying the message")
-                    {
+                    if let Err(e) = monitor!("raikou_verify", verifier.verify(sender, &msg).await) {
                         error!("Error verifying message: {:?}", e);
                         return;
                     }

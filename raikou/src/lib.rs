@@ -15,3 +15,16 @@ pub type Slot = i64;
 
 pub const PBFT_TIMEOUT: u32 = 5; // in Deltas
 pub const JOLTEON_TIMEOUT: u32 = 3; // in Deltas
+
+/// Helper function to record metrics for external calls.
+/// Include call counts, time, and whether it's inside or not (1 or 0).
+/// It assumes a OpMetrics defined as OP_COUNTERS in crate::counters;
+#[macro_export]
+macro_rules! monitor {
+    ($name:literal, $fn:expr) => {{
+        use $crate::raikou::counters::OP_COUNTERS;
+        let _timer = OP_COUNTERS.timer($name);
+
+        $fn
+    }};
+}

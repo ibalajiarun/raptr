@@ -4,6 +4,9 @@ use aptos_metrics_core::{
 };
 use once_cell::sync::Lazy;
 
+pub static OP_COUNTERS: Lazy<aptos_metrics_core::op_counters::OpMetrics> =
+    Lazy::new(|| aptos_metrics_core::op_counters::OpMetrics::new_and_registered("raikou"));
+
 pub static RAIKOU_BATCH_CONSENSUS_LATENCY: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "raikou_batch_consensus_latency",

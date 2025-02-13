@@ -3,20 +3,22 @@
 
 use crate::{
     framework::{crypto::SignatureVerifier, NodeId},
+    monitor,
     raikou::{
         protocol,
         types::{BatchInfo, Payload, AC},
     },
 };
 use anyhow::Context;
-use aptos_consensus_types::round_timeout::RoundTimeoutReason;
+use aptos_consensus_types::{proof_of_store::ProofCache, round_timeout::RoundTimeoutReason};
 use aptos_crypto::{bls12381::Signature, hash::CryptoHash, HashValue};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
 use itertools::Itertools;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{
     cmp::Ordering,
-    fmt::{Debug, Formatter},
+    fmt::{Debug, Display, Formatter},
+    time::Instant,
 };
 
 pub type Txn = aptos_types::transaction::SignedTransaction;
@@ -110,7 +112,7 @@ impl Block {
         self.sub_blocks().nth(index).unwrap()
     }
 
-    pub fn verify<S>(&self, verifier: &protocol::Verifier<S>) -> anyhow::Result<()> {
+    pub fn verify<S: Sync>(&self, verifier: &protocol::Verifier<S>) -> anyhow::Result<()> {
         if self.round() == 0 {
             return Err(anyhow::anyhow!("Invalid Block round: 0"));
         }
@@ -479,6 +481,16 @@ pub enum RoundEntryReason {
     CC(CC, QC),
     /// When a node receives a TC for round r, it can enter round r+1.
     TC(TC, QC),
+}
+
+impl Display for RoundEntryReason {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RoundEntryReason::FullPrefixQC(_) => write!(f, "FullPrefixQC"),
+            RoundEntryReason::CC(_, _) => write!(f, "CC"),
+            RoundEntryReason::TC(_, _) => write!(f, "TC"),
+        }
+    }
 }
 
 impl Debug for RoundEntryReason {

@@ -1,6 +1,6 @@
 use aptos_metrics_core::{
-    register_counter, register_histogram, register_histogram_vec, register_int_counter, Histogram,
-    HistogramVec, IntCounter,
+    register_counter, register_histogram, register_histogram_vec, register_int_counter,
+    register_int_counter_vec, Histogram, HistogramVec, IntCounter, IntCounterVec,
 };
 use once_cell::sync::Lazy;
 
@@ -41,5 +41,12 @@ pub static BLOCK_TRACING: Lazy<HistogramVec> = Lazy::new(|| {
         &["stage"],
         BLOCK_TRACING_BUCKETS.to_vec()
     )
+    .unwrap()
+});
+
+pub static ROUND_ENTER_REASON: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!("raikou_round_enter_reason", "Raikou Round Enter Reason", &[
+        "reason"
+    ])
     .unwrap()
 });

@@ -14,7 +14,7 @@ use crate::{
     raikou::{
         counters::{
             BLOCK_TRACING, RAIKOU_BATCH_CONSENSUS_LATENCY, RAIKOU_BLOCK_COMMIT_RATE,
-            RAIKOU_BLOCK_CONSENSUS_LATENCY,
+            RAIKOU_BLOCK_CONSENSUS_LATENCY, ROUND_ENTER_REASON,
         },
         dissemination::{
             self, DisseminationLayer, FullBlockAvailable, Kill, NewQCWithPayload, ProposalReceived,
@@ -893,6 +893,7 @@ where
 
             let leader =  self.config.leader(round);
             self.log_detail(format!("Entering round {} by {:?} and leader {}", round, self.entry_reason, leader));
+            ROUND_ENTER_REASON.with_label_values(&[&format!("{}", self.entry_reason)]).inc();
 
             if self.node_id == leader {
                 // Upon entering round r, the leader L_r multicasts a signed block

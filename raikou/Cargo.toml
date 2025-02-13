@@ -35,6 +35,7 @@ once_cell = { workspace = true }
 aptos-bitvec = { workspace = true }
 aptos-infallible = { workspace = true }
 mini-moka = { workspace = true }
+rayon = { workspace = true }
 
 [dev-dependencies]
 criterion = "0.5.1"

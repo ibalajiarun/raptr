@@ -14466,6 +14466,7 @@ dependencies = [
  "once_cell",
  "rand 0.7.3",
  "rand_distr",
+ "rayon",
  "serde",
  "tokio",
 ]

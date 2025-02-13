@@ -766,7 +766,8 @@ async fn test_raikou(
             });
 
             let batch_interval_secs = delta * 0.1;
-            let expected_load = f64::ceil(n_nodes as f64 * (3. * delta) / batch_interval_secs) as usize;
+            let expected_load =
+                f64::ceil(n_nodes as f64 * (3. * delta) / batch_interval_secs) as usize;
 
             let dissemination = NativeDisseminationLayer::new(
                 node_id,

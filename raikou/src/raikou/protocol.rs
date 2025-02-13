@@ -131,26 +131,28 @@ impl<S: LeaderSchedule> MessageVerifier for Verifier<S> {
                         ));
                     }
 
-                    self.sig_verifier.verify(
+                    self.sig_verifier.verify_tagged(
                         sender,
-                        &QcVoteSignatureData {
+                        &QcVoteSignatureCommonData {
                             round: *round,
-                            prefix: *prefix,
                             block_digest: block_digest.clone(),
                         },
+                        *prefix,
                         signature,
                     )
                 })
             },
             Message::CcVote(qc, signature) => monitor!("verify_ccvote", {
-                let sig_data = CcVoteSignatureData {
-                    round: qc.round,
-                    block_digest: qc.block_digest.clone(),
-                    prefix: qc.prefix,
-                };
-
                 self.sig_verifier
-                    .verify(sender, &sig_data, signature)
+                    .verify_tagged(
+                        sender,
+                        &CcVoteSignatureCommonData {
+                            round: qc.round,
+                            block_digest: qc.block_digest.clone(),
+                        },
+                        qc.prefix,
+                        signature,
+                    )
                     .context("Error verifying the CC vote signature")?;
 
                 qc.verify(&self.sig_verifier, self.config.quorum())
@@ -485,11 +487,13 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             if new_qc.round > self.last_commit_vote.round && new_qc.round > self.r_timeout {
                 let signature = self
                     .signer
-                    .sign(&CcVoteSignatureData {
-                        round: new_qc.round,
-                        block_digest: new_qc.block_digest.clone(),
-                        prefix: new_qc.prefix,
-                    })
+                    .sign_tagged(
+                        &CcVoteSignatureCommonData {
+                            round: new_qc.round,
+                            block_digest: new_qc.block_digest.clone(),
+                        },
+                        new_qc.prefix,
+                    )
                     .unwrap();
 
                 self.log_detail(format!("CC-voting for QC {:?}", new_qc.sub_block_id()));
@@ -1014,12 +1018,12 @@ where
 
                 self.last_qc_vote = (self.r_cur, prefix).into();
 
-                let signature = self.signer.sign(
-                    &QcVoteSignatureData {
+                let signature = self.signer.sign_tagged(
+                    &QcVoteSignatureCommonData {
                         round,
-                        prefix,
                         block_digest: block_digest.clone(),
-                    }
+                    },
+                    prefix,
                 )
                 .unwrap();
 
@@ -1047,12 +1051,12 @@ where
                     ));
                     self.last_qc_vote = (round, prefix).into();
 
-                    let signature = self.signer.sign(
-                        &QcVoteSignatureData {
+                    let signature = self.signer.sign_tagged(
+                        &QcVoteSignatureCommonData {
                             round,
-                            prefix,
                             block_digest: block_digest.clone(),
-                        }
+                        },
+                        prefix,
                     )
                     .unwrap();
 
@@ -1108,7 +1112,7 @@ where
                             .iter()
                             .map(|(_, (_, signature))| signature.clone());
 
-                        let aggregated_signature =
+                        let tagged_multi_signature =
                             self.sig_verifier.aggregate_signatures(partial_signatures).unwrap();
 
                         let vote_prefixes = votes
@@ -1128,7 +1132,7 @@ where
                             prefix: certified_prefix,
                             block_digest,
                             vote_prefixes,
-                            aggregated_signature: Some(aggregated_signature),
+                            tagged_multi_signature: Some(tagged_multi_signature),
                         };
 
                         self.on_new_qc(qc, ctx).await;
@@ -1184,14 +1188,14 @@ where
                             .iter()
                             .map(|((_, _), signature)| signature.clone());
 
-                        let aggregated_signature =
+                        let tagged_multi_signature =
                             self.sig_verifier.aggregate_signatures(partial_signatures).unwrap();
 
                         let cc = CC::new(
                             round,
                             committed_block_digest,
                             vote_prefixes,
-                            aggregated_signature,
+                            tagged_multi_signature,
                         );
                         if let Some(block) = self.blocks.get(&committed_block_digest) {
                             observe_block(block.data.timestamp_usecs, "CCReady");

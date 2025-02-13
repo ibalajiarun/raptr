@@ -1,3 +1,6 @@
+// Copyright (c) Aptos Foundation
+// SPDX-License-Identifier: Apache-2.0
+
 use aptos_config::config::NodeConfig;
 use aptos_consensus_notifications::{
     ConsensusNotification, ConsensusNotificationListener, ConsensusNotifier,
@@ -94,9 +97,8 @@ pub static RAIKOU_MEMPOOL_INSERT_TO_COMMIT_LATENCY: Lazy<Histogram> = Lazy::new(
     .unwrap()
 });
 
-pub static RAIKOU_MEMPOOL_SIZE: Lazy<Gauge> = Lazy::new(|| {
-    register_gauge!("raikou_mempool_size", "Raikou mempool size").unwrap()
-});
+pub static RAIKOU_MEMPOOL_SIZE: Lazy<Gauge> =
+    Lazy::new(|| register_gauge!("raikou_mempool_size", "Raikou mempool size").unwrap());
 
 pub static RAIKOU_MEMPOOL_SIZE_HISTOGRAM: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!("raikou_mempool_size_histogram", "raikou mempool size").unwrap()
@@ -131,7 +133,11 @@ impl SimpleMempool {
                 info!("pulled_txns empty");
             );
         } else {
-            info!("pulled txns: {}; store len: {}", pulled_txns.len(), store.len());
+            info!(
+                "pulled txns: {}; store len: {}",
+                pulled_txns.len(),
+                store.len()
+            );
         }
         RAIKOU_MEMPOOL_SIZE.set(store.len() as f64);
         RAIKOU_MEMPOOL_SIZE_HISTOGRAM.observe(store.len() as f64);

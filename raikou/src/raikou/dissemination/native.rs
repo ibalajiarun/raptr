@@ -4,7 +4,7 @@
 use crate::{
     framework::{
         crypto,
-        crypto::{SignatureVerifier, Signer},
+        crypto::{dummy_signature, SignatureVerifier, Signer},
         module_network::ModuleId,
         network::{MessageCertifier, MessageVerifier, NetworkSender, NetworkService},
         timer::TimerService,
@@ -38,7 +38,6 @@ use std::{
     time::Duration,
 };
 use tokio::{sync::RwLock, time::Instant};
-use crate::framework::crypto::dummy_signature;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(from = "BatchSerialization")]
@@ -267,11 +266,11 @@ impl BlockSizeLimit {
 
         let ac_size = bcs::to_bytes(&dummy_ac).unwrap().len();
 
-         Self {
+        Self {
             ac_size,
             batch_size,
             byte_limit: ac_limit * ac_size,
-         }
+        }
     }
 
     pub fn ac_limit(&self) -> usize {
@@ -383,10 +382,7 @@ where
             acs.truncate(limit);
         }
 
-        let batches = if
-            inner.config.enable_optimistic_dissemination
-            && acs.len() < limit
-        {
+        let batches = if inner.config.enable_optimistic_dissemination && acs.len() < limit {
             let mut batches: Vec<BatchInfo> = inner
                 .uncommitted_uncertified_batches
                 .iter()

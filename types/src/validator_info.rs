@@ -95,7 +95,9 @@ impl ValidatorInfo {
         &self.config
     }
 
-    pub fn config_mut(&mut self) -> &mut ValidatorConfig { &mut self.config }
+    pub fn config_mut(&mut self) -> &mut ValidatorConfig {
+        &mut self.config
+    }
 
     /// Returns the validator's config, consuming self
     pub fn into_config(self) -> ValidatorConfig {

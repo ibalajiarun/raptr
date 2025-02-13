@@ -154,7 +154,11 @@ impl RaikouManager {
             error!("ip missing for self: {:?}", validator_set);
         }
 
-        let signer = raikou::framework::crypto::Signer::new(validator_signer.clone());
+        let signer = raikou::framework::crypto::Signer::new(
+            validator_signer.clone(),
+            node_id,
+            N_SUB_BLOCKS + 1,
+        );
 
         let sig_verifier = raikou::framework::crypto::SignatureVerifier::new(
             index_to_address
@@ -163,6 +167,7 @@ impl RaikouManager {
                 .map(|(_, address)| epoch_state.verifier.get_public_key(address).unwrap())
                 .collect(),
             epoch_state.verifier.clone(),
+            N_SUB_BLOCKS + 1,
         );
 
         let failures_tracker: Arc<LockedExponentialWindowFailureTracker> = Arc::new(

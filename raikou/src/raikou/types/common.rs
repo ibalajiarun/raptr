@@ -9,10 +9,10 @@ use crate::{
     },
 };
 use anyhow::Context;
-use aptos_consensus_types::proof_of_store::ProofCache;
-use aptos_consensus_types::round_timeout::RoundTimeoutReason;
+use aptos_consensus_types::{proof_of_store::ProofCache, round_timeout::RoundTimeoutReason};
 use aptos_crypto::{bls12381::Signature, hash::CryptoHash, HashValue};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
+use itertools::Itertools;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{
     cmp::Ordering,
@@ -121,7 +121,9 @@ impl Block {
         let quorum = verifier.config.ac_quorum;
 
         if let &RoundEnterReason::ThisRoundQC = self.reason() {
-            return Err(anyhow::anyhow!("ThisRoundQC cannot be used as entry reason in a block"));
+            return Err(anyhow::anyhow!(
+                "ThisRoundQC cannot be used as entry reason in a block"
+            ));
         }
 
         self.payload()
@@ -147,9 +149,8 @@ impl Block {
 }
 
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
-pub struct QcVoteSignatureData {
+pub struct QcVoteSignatureCommonData {
     pub round: Round,
-    pub prefix: Prefix,
     pub block_digest: BlockHash,
 }
 
@@ -202,7 +203,7 @@ pub struct QC {
     pub prefix: Prefix,
     pub block_digest: HashValue,
     pub vote_prefixes: PrefixSet,
-    pub aggregated_signature: Option<Signature>, // `None` only for the genesis QC.
+    pub tagged_multi_signature: Option<Signature>, // `None` only for the genesis QC.
 }
 
 impl Debug for QC {
@@ -221,7 +222,7 @@ impl QC {
             prefix: N_SUB_BLOCKS,
             block_digest: HashValue::zero(),
             vote_prefixes: PrefixSet::empty(),
-            aggregated_signature: None,
+            tagged_multi_signature: None,
         }
     }
 
@@ -245,7 +246,7 @@ impl QC {
         if self.is_genesis() {
             return if self.vote_prefixes.is_empty()
                 && self.block_digest == HashValue::zero()
-                && self.aggregated_signature.is_none()
+                && self.tagged_multi_signature.is_none()
             {
                 Ok(())
             } else {
@@ -253,28 +254,27 @@ impl QC {
             };
         }
 
-        if self.aggregated_signature.is_none() {
+        if self.tagged_multi_signature.is_none() {
             return Err(anyhow::anyhow!("Missing aggregated signature"));
         }
 
-        let sig_data: Vec<_> = self
-            .vote_prefixes
-            .prefixes()
-            .map(|prefix| QcVoteSignatureData {
-                round: self.round,
-                prefix,
-                block_digest: self.block_digest.clone(),
-            })
-            .collect();
+        let message = QcVoteSignatureCommonData {
+            round: self.round,
+            block_digest: self.block_digest,
+        };
 
-        if sig_data.len() < quorum {
+        let node_ids = self.vote_prefixes.node_ids().collect_vec();
+        let tags = self.vote_prefixes.prefixes().collect_vec();
+
+        if node_ids.len() < quorum {
             return Err(anyhow::anyhow!("Not enough signers"));
         }
 
-        sig_verifier.verify_aggregate_signatures(
-            self.vote_prefixes.node_ids(),
-            sig_data.iter().collect(),
-            self.aggregated_signature.as_ref().unwrap(),
+        sig_verifier.verify_tagged_multi_signature(
+            node_ids,
+            &message,
+            tags,
+            self.tagged_multi_signature.as_ref().unwrap(),
         )
     }
 }
@@ -305,7 +305,7 @@ pub struct CC {
     round: Round,
     block_digest: HashValue,
     vote_prefixes: PrefixSet,
-    aggregated_signature: Signature,
+    tagged_multi_signature: Signature,
 
     #[serde(skip)]
     min_prefix: Prefix,
@@ -333,10 +333,9 @@ impl From<CcSerialization> for CC {
 }
 
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
-pub struct CcVoteSignatureData {
+pub struct CcVoteSignatureCommonData {
     pub round: Round,
     pub block_digest: BlockHash,
-    pub prefix: Prefix,
 }
 
 impl CC {
@@ -344,12 +343,12 @@ impl CC {
         round: Round,
         block_digest: BlockHash,
         vote_prefixes: PrefixSet,
-        aggregated_signature: Signature,
+        tagged_multi_signature: Signature,
     ) -> Self {
         CC {
             round,
             block_digest,
-            aggregated_signature,
+            tagged_multi_signature,
             min_prefix: vote_prefixes.prefixes().min().unwrap(),
             max_prefix: vote_prefixes.prefixes().max().unwrap(),
             vote_prefixes,
@@ -365,25 +364,19 @@ impl CC {
     }
 
     pub fn verify(&self, verifier: &SignatureVerifier, quorum: usize) -> anyhow::Result<()> {
-        let sig_data: Vec<_> = self
-            .vote_prefixes
-            .prefixes()
-            .map(|prefix| CcVoteSignatureData {
-                round: self.round,
-                prefix,
-                block_digest: self.block_digest,
-            })
-            .collect();
+        let message = CcVoteSignatureCommonData {
+            round: self.round,
+            block_digest: self.block_digest,
+        };
 
-        if sig_data.len() < quorum {
+        let nodes = self.vote_prefixes.node_ids().collect_vec();
+        let tags = self.vote_prefixes.prefixes().collect_vec();
+
+        if nodes.len() < quorum {
             return Err(anyhow::anyhow!("Not enough signers"));
         }
 
-        verifier.verify_aggregate_signatures(
-            self.vote_prefixes.node_ids(),
-            sig_data.iter().collect(),
-            &self.aggregated_signature,
-        )
+        verifier.verify_tagged_multi_signature(nodes, &message, tags, &self.tagged_multi_signature)
     }
 }
 

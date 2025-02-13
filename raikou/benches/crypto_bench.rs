@@ -1,8 +1,6 @@
 // Copyright (c) Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
-// File: benches/crypto_bench.rs
-
 use aptos_crypto::{bls12381, PrivateKey, SigningKey, Uniform};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
 use aptos_types::{validator_signer::ValidatorSigner, validator_verifier::ValidatorVerifier};

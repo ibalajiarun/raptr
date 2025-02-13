@@ -131,7 +131,7 @@ pub trait Protocol: Send + Sync {
 }
 
 /// Should be used as follows:
-/// ```
+/// ```ignore
 /// use raikou::framework::Protocol;
 /// use raikou::protocol;
 ///

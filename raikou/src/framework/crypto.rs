@@ -195,3 +195,415 @@ pub fn dummy_signature() -> bls12381::Signature {
         })
         .clone()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aptos_crypto::hash::CryptoHash;
+    use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
+    use rand::{rngs::StdRng, SeedableRng};
+    use serde::{Deserialize, Serialize};
+    use std::sync::Arc;
+
+    /// A simple test message.
+    /// The derives enable both BCS hashing and Serde serialization.
+    #[derive(CryptoHasher, BCSCryptoHash, Serialize, Deserialize, Debug, PartialEq)]
+    struct TestMessage {
+        value: u64,
+    }
+
+    /// Helper: Create a deterministic private key for testing purposes.
+    /// This is used for aggregate and multi-signature tests.
+    fn deterministic_main_private_key(node_id: usize) -> bls12381::PrivateKey {
+        let mut seed = [0u8; 32];
+        seed[..8].copy_from_slice(&node_id.to_le_bytes());
+        let mut rng = StdRng::from_seed(seed);
+        bls12381::PrivateKey::generate(&mut rng)
+    }
+
+    // ============================
+    // Positive Tests
+    // ============================
+
+    /// Verify that a tagged signature (created via `Signer::sign_tagged`)
+    /// is correctly verified.
+    #[test]
+    fn test_tagged_signature_verification() -> anyhow::Result<()> {
+        let n_tags = 3;
+        let node_id = 0;
+        let vs = ValidatorSigner::random(None);
+
+        // Use the validator signer's public key.
+        let public_keys = vec![vs.public_key()];
+        let signer = Signer::new(Arc::new(vs), node_id, n_tags);
+        let msg = TestMessage { value: 42 };
+
+        let dummy_verifier = Arc::new(ValidatorVerifier::new(vec![]));
+        let signature_verifier = SignatureVerifier::new(public_keys, dummy_verifier, n_tags);
+
+        // Sign and verify for each tag.
+        for tag in 0..n_tags {
+            let sig = signer.sign_tagged(&msg, tag)?;
+            signature_verifier.verify_tagged(node_id, &msg, tag, &sig)?;
+        }
+        Ok(())
+    }
+
+    /// Verify that multiple tagged signatures (from different nodes and tags)
+    /// can be aggregated and verified as a tagged multi-signature.
+    #[test]
+    fn test_tagged_multi_signature_verification() -> anyhow::Result<()> {
+        let n_tags = 3;
+        let num_nodes: usize = 3;
+        let mut signers = Vec::new();
+        let mut public_keys = Vec::new();
+
+        // Create a signer for each node.
+        for node_id in 0..num_nodes {
+            let mut seed = [0u8; 32];
+            seed[..8].copy_from_slice(&node_id.to_le_bytes());
+            let vs = ValidatorSigner::random(seed);
+            public_keys.push(vs.public_key());
+            signers.push(Signer::new(Arc::new(vs), node_id, n_tags));
+        }
+
+        let msg = TestMessage { value: 100 };
+
+        // Let each node use a tag equal to (node_id mod n_tags).
+        let tags: Vec<usize> = (0..num_nodes).map(|node_id| node_id % n_tags).collect();
+
+        // Each signer signs with its corresponding tag.
+        let mut sigs = Vec::new();
+        for (node_id, signer) in signers.iter().enumerate() {
+            let tag = tags[node_id];
+            let sig = signer.sign_tagged(&msg, tag)?;
+            sigs.push(sig);
+        }
+
+        // Aggregate the signatures.
+        let dummy_verifier = Arc::new(ValidatorVerifier::new(vec![]));
+        let signature_verifier = SignatureVerifier::new(public_keys, dummy_verifier, n_tags);
+        let aggregated_sig = signature_verifier.aggregate_signatures(sigs)?;
+
+        // Verify the aggregated tagged multi-signature.
+        signature_verifier.verify_tagged_multi_signature(
+            0..num_nodes,
+            &msg,
+            tags,
+            &aggregated_sig,
+        )?;
+        Ok(())
+    }
+
+    /// Verify that a “normal” (non-tagged) signature is correctly verified.
+    #[test]
+    fn test_non_tagged_signature_verification() -> anyhow::Result<()> {
+        let vs = ValidatorSigner::random(None);
+        let node_id = 0;
+        let msg = TestMessage { value: 7 };
+        let sig = vs.sign(&msg)?;
+        let public_keys = vec![vs.public_key()];
+        let dummy_verifier = Arc::new(ValidatorVerifier::new(vec![]));
+        let signature_verifier = SignatureVerifier::new(public_keys, dummy_verifier, 1);
+        signature_verifier.verify(node_id, &msg, &sig)?;
+        Ok(())
+    }
+
+    /// Verify aggregate signature verification for a set of (different) messages,
+    /// where only a subset (7 out of 10) of the nodes participate.
+    #[test]
+    fn test_aggregate_signature_verification() -> anyhow::Result<()> {
+        let total_nodes = 10;
+        // Define participating nodes (7 out of 10).
+        let participating_nodes = vec![0, 2, 4, 6, 7, 8, 9];
+
+        let mut msgs = Vec::new();
+        let mut individual_sigs = Vec::new();
+        let mut public_keys = Vec::new();
+
+        // Create distinct messages for each node.
+        for node_id in 0..total_nodes {
+            msgs.push(TestMessage {
+                value: node_id as u64,
+            });
+        }
+
+        // Sign each message using a deterministic private key.
+        for node_id in 0..total_nodes {
+            let private_key = deterministic_main_private_key(node_id);
+            let sig = private_key.sign(&msgs[node_id])?;
+            individual_sigs.push(sig);
+            public_keys.push(private_key.public_key());
+        }
+
+        let dummy_verifier = Arc::new(ValidatorVerifier::new(vec![]));
+        let signature_verifier = SignatureVerifier::new(public_keys, dummy_verifier, 1);
+
+        // Only consider messages and signatures from participating nodes.
+        let participating_msgs: Vec<&TestMessage> =
+            participating_nodes.iter().map(|&i| &msgs[i]).collect();
+        let participating_sigs: Vec<bls12381::Signature> = participating_nodes
+            .iter()
+            .map(|&i| individual_sigs[i].clone())
+            .collect();
+
+        // Aggregate the partial signatures.
+        let aggregated_sig = signature_verifier.aggregate_signatures(participating_sigs)?;
+
+        // Verify the aggregated signature.
+        signature_verifier.verify_aggregate_signatures(
+            participating_nodes,
+            participating_msgs,
+            &aggregated_sig,
+        )?;
+        Ok(())
+    }
+
+    /// Verify multi-signature verification where all nodes sign the same message,
+    /// but only a subset (7 out of 10) of the nodes participate.
+    #[test]
+    fn test_multi_signature_verification() -> anyhow::Result<()> {
+        let total_nodes = 10;
+        // Define participating nodes (7 out of 10).
+        let participating_nodes = vec![1, 3, 4, 6, 7, 8, 9];
+        let msg = TestMessage { value: 999 };
+
+        let mut individual_sigs = Vec::new();
+        let mut public_keys = Vec::new();
+
+        // All nodes sign the same message.
+        for node_id in 0..total_nodes {
+            let private_key = deterministic_main_private_key(node_id);
+            let sig = private_key.sign(&msg)?;
+            individual_sigs.push(sig);
+            public_keys.push(private_key.public_key());
+        }
+
+        let dummy_verifier = Arc::new(ValidatorVerifier::new(vec![]));
+        let signature_verifier = SignatureVerifier::new(public_keys, dummy_verifier, 1);
+
+        // Filter the signatures for participating nodes.
+        let participating_sigs: Vec<bls12381::Signature> = participating_nodes
+            .iter()
+            .map(|&i| individual_sigs[i].clone())
+            .collect();
+
+        // Aggregate the signatures.
+        let aggregated_sig = signature_verifier.aggregate_signatures(participating_sigs)?;
+
+        // Verify the multi-signature.
+        signature_verifier.verify_multi_signature(participating_nodes, &msg, &aggregated_sig)?;
+        Ok(())
+    }
+
+    /// Verify tagged multi-signature verification where only a subset (5 out of 10)
+    /// of the nodes participate.
+    #[test]
+    fn test_tagged_multi_signature_verification_subset() -> anyhow::Result<()> {
+        let total_nodes: usize = 10;
+        let n_tags = 3;
+
+        // Create signers and collect public keys.
+        let mut signers = Vec::new();
+        let mut public_keys = Vec::new();
+        for node_id in 0..total_nodes {
+            let mut seed = [0u8; 32];
+            seed[..8].copy_from_slice(&node_id.to_le_bytes());
+            let vs = ValidatorSigner::random(seed);
+            public_keys.push(vs.public_key());
+            signers.push(Signer::new(Arc::new(vs), node_id, n_tags));
+        }
+
+        let msg = TestMessage { value: 500 };
+
+        // Select a subset of participating nodes.
+        let participating_nodes = vec![1, 3, 5, 7, 9];
+
+        // Each participating node uses a tag (node_id mod n_tags).
+        let tags: Vec<usize> = participating_nodes
+            .iter()
+            .map(|&node_id| node_id % n_tags)
+            .collect();
+
+        let mut sigs = Vec::new();
+        for &node_id in &participating_nodes {
+            let signer = &signers[node_id];
+            let tag = node_id % n_tags;
+            let sig = signer.sign_tagged(&msg, tag)?;
+            sigs.push(sig);
+        }
+
+        let dummy_verifier = Arc::new(ValidatorVerifier::new(vec![]));
+        let signature_verifier = SignatureVerifier::new(public_keys, dummy_verifier, n_tags);
+        let aggregated_sig = signature_verifier.aggregate_signatures(sigs)?;
+
+        // Verify the tagged multi-signature.
+        signature_verifier.verify_tagged_multi_signature(
+            participating_nodes,
+            &msg,
+            tags,
+            &aggregated_sig,
+        )?;
+        Ok(())
+    }
+
+    // ============================
+    // Negative Tests
+    // ============================
+
+    /// Aggregate signature negative test:
+    /// Verification should fail if one of the messages is altered.
+    #[test]
+    fn test_aggregate_signature_negative() -> anyhow::Result<()> {
+        let total_nodes = 10;
+        let participating_nodes = vec![0, 2, 4, 6, 7, 8, 9];
+
+        let mut msgs = Vec::new();
+        let mut individual_sigs = Vec::new();
+        let mut public_keys = Vec::new();
+
+        // Create messages for all nodes.
+        for node_id in 0..total_nodes {
+            msgs.push(TestMessage {
+                value: node_id as u64,
+            });
+        }
+
+        // Sign each message.
+        for node_id in 0..total_nodes {
+            let private_key = deterministic_main_private_key(node_id);
+            let sig = private_key.sign(&msgs[node_id])?;
+            individual_sigs.push(sig);
+            public_keys.push(private_key.public_key());
+        }
+
+        let dummy_verifier = Arc::new(ValidatorVerifier::new(vec![]));
+        let signature_verifier = SignatureVerifier::new(public_keys, dummy_verifier, 1);
+
+        let participating_msgs: Vec<&TestMessage> =
+            participating_nodes.iter().map(|&i| &msgs[i]).collect();
+        let participating_sigs: Vec<bls12381::Signature> = participating_nodes
+            .iter()
+            .map(|&i| individual_sigs[i].clone())
+            .collect();
+
+        let aggregated_sig = signature_verifier.aggregate_signatures(participating_sigs)?;
+
+        // Deliberately alter one message.
+        let mut wrong_msgs = participating_msgs.clone();
+        if let Some(first_msg) = wrong_msgs.get_mut(0) {
+            *first_msg = &TestMessage { value: 9999 };
+        }
+
+        let result = signature_verifier.verify_aggregate_signatures(
+            participating_nodes.clone(),
+            wrong_msgs,
+            &aggregated_sig,
+        );
+        assert!(
+            result.is_err(),
+            "Aggregate signature verification should fail when messages are altered"
+        );
+        Ok(())
+    }
+
+    /// Multi-signature negative test:
+    /// Verification should fail when using the wrong message.
+    #[test]
+    fn test_multi_signature_negative() -> anyhow::Result<()> {
+        let total_nodes = 10;
+        let participating_nodes = vec![1, 3, 4, 6, 7, 8, 9];
+        let msg = TestMessage { value: 999 };
+
+        let mut individual_sigs = Vec::new();
+        let mut public_keys = Vec::new();
+
+        // All nodes sign the same message.
+        for node_id in 0..total_nodes {
+            let private_key = deterministic_main_private_key(node_id);
+            let sig = private_key.sign(&msg)?;
+            individual_sigs.push(sig);
+            public_keys.push(private_key.public_key());
+        }
+
+        let dummy_verifier = Arc::new(ValidatorVerifier::new(vec![]));
+        let signature_verifier = SignatureVerifier::new(public_keys, dummy_verifier, 1);
+
+        let participating_sigs: Vec<bls12381::Signature> = participating_nodes
+            .iter()
+            .map(|&i| individual_sigs[i].clone())
+            .collect();
+
+        let aggregated_sig = signature_verifier.aggregate_signatures(participating_sigs)?;
+
+        // Use a wrong message for verification.
+        let wrong_msg = TestMessage { value: 1234 };
+        let result = signature_verifier.verify_multi_signature(
+            participating_nodes,
+            &wrong_msg,
+            &aggregated_sig,
+        );
+        assert!(
+            result.is_err(),
+            "Multi-signature verification should fail when using the wrong message"
+        );
+        Ok(())
+    }
+
+    /// Tagged multi-signature negative test:
+    /// Verification should fail if an incorrect tag vector is provided.
+    #[test]
+    fn test_tagged_multi_signature_negative() -> anyhow::Result<()> {
+        let total_nodes: usize = 10;
+        let n_tags = 3;
+
+        let mut signers = Vec::new();
+        let mut public_keys = Vec::new();
+        for node_id in 0..total_nodes {
+            let mut seed = [0u8; 32];
+            seed[..8].copy_from_slice(&node_id.to_le_bytes());
+            let vs = ValidatorSigner::random(seed);
+            public_keys.push(vs.public_key());
+            signers.push(Signer::new(Arc::new(vs), node_id, n_tags));
+        }
+
+        let msg = TestMessage { value: 500 };
+        let participating_nodes = vec![1, 3, 5, 7, 9];
+
+        // Build the correct tags vector...
+        let mut correct_tags: Vec<usize> = participating_nodes
+            .iter()
+            .map(|&node_id| node_id % n_tags)
+            .collect();
+        // ...and then modify one tag to be incorrect.
+        if let Some(first) = correct_tags.get_mut(0) {
+            *first = (*first + 1) % n_tags;
+        }
+
+        let mut sigs = Vec::new();
+        // Each signer signs with the proper (correct) tag.
+        for &node_id in &participating_nodes {
+            let signer = &signers[node_id];
+            let correct_tag = node_id % n_tags;
+            let sig = signer.sign_tagged(&msg, correct_tag)?;
+            sigs.push(sig);
+        }
+
+        let dummy_verifier = Arc::new(ValidatorVerifier::new(vec![]));
+        let signature_verifier = SignatureVerifier::new(public_keys, dummy_verifier, n_tags);
+        let aggregated_sig = signature_verifier.aggregate_signatures(sigs)?;
+
+        // Verification using the modified (incorrect) tag vector should fail.
+        let result = signature_verifier.verify_tagged_multi_signature(
+            participating_nodes,
+            &msg,
+            correct_tags,
+            &aggregated_sig,
+        );
+        assert!(
+            result.is_err(),
+            "Tagged multi-signature verification should fail when tag indices are incorrect"
+        );
+        Ok(())
+    }
+}

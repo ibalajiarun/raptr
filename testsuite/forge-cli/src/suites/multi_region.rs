@@ -8,6 +8,10 @@ use crate::suites::{
         PROGRESS_THRESHOLD_20_6, RELIABLE_PROGRESS_THRESHOLD, SYSTEM_12_CORES_10GB_THRESHOLD,
     },
 };
+use aptos_config::{
+    config::{DiscoveryMethod, Identity, NetworkConfig},
+    network_id::NetworkId,
+};
 use aptos_forge::{
     success_criteria::SuccessCriteria, EmitJobMode, EmitJobRequest, ForgeConfig, NetworkTest,
 };
@@ -21,7 +25,6 @@ use aptos_testcases::{
     CompositeNetworkTest,
 };
 use std::{num::NonZeroUsize, sync::Arc};
-use aptos_config::config::NetworkConfig;
 
 /// Attempts to match the test name to a multi-region test
 pub(crate) fn get_multi_region_test(test_name: &str) -> Option<ForgeConfig> {
@@ -43,8 +46,27 @@ pub(crate) fn multiregion_benchmark_test() -> ForgeConfig {
     ForgeConfig::default()
         .with_initial_validator_count(NonZeroUsize::new(10).unwrap())
         .add_network_test(ConsensusOnlyBenchmark)
-        .with_validator_override_node_config_fn(Arc::new(|config, _| {
-            config.validator_network2 = Some(NetworkConfig::default());
+        .with_validator_override_node_config_fn(Arc::new(|config, base| {
+            base.validator_network2 = Some(NetworkConfig::default());
+            base.validator_network3 = Some(NetworkConfig::default());
+
+            let mut net2config = NetworkConfig::default();
+            net2config.listen_address = "/ip4/0.0.0.0/tcp/12000".parse().unwrap();
+            net2config.mutual_authentication = true;
+            net2config.identity =
+                Identity::from_file("/opt/aptos/genesis/validator-identity.yaml".into());
+            net2config.discovery_method = DiscoveryMethod::Onchain;
+            net2config.network_id = NetworkId::Validator;
+            config.validator_network2 = Some(net2config);
+
+            let mut net3config = NetworkConfig::default();
+            net3config.listen_address = "/ip4/0.0.0.0/tcp/12001".parse().unwrap();
+            net3config.mutual_authentication = true;
+            net3config.identity =
+                Identity::from_file("/opt/aptos/genesis/validator-identity.yaml".into());
+            net3config.discovery_method = DiscoveryMethod::Onchain;
+            net3config.network_id = NetworkId::Validator;
+            config.validator_network3 = Some(net3config);
         }))
         .with_genesis_helm_config_fn(Arc::new(|helm_values| {
             // Have single epoch change in land blocking

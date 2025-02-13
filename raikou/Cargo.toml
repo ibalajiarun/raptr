@@ -36,7 +36,15 @@ aptos-bitvec = { workspace = true }
 aptos-infallible = { workspace = true }
 mini-moka = { workspace = true }
 
+[dev-dependencies]
+criterion = "0.5.1"
+
+[[bench]]
+name = "crypto_bench"
+harness = false
+
 [features]
+bench = []
 sim-types = []
 force-aptos-types = []
 inject-delays = []

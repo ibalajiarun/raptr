@@ -607,3 +607,163 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(all(test, feature = "bench"))]
+mod benches {
+    use super::*;
+    use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
+    use criterion::{criterion_group, criterion_main, Criterion};
+    use rand::{rngs::StdRng, SeedableRng};
+    use serde::{Deserialize, Serialize};
+    use std::sync::Arc;
+
+    // --------------------------------------------------------------------------
+    // Data Structures for Benchmarking
+    // --------------------------------------------------------------------------
+
+    /// Message for the aggregate signature benchmark.
+    /// Here the tag (a small number from 0 to 8) is embedded as part of the message.
+    #[derive(CryptoHasher, BCSCryptoHash, Serialize, Deserialize, Debug, PartialEq)]
+    struct AggMessage {
+        base: u64,
+        tag: u8,
+    }
+
+    /// Message for the tagged multi-signature benchmark.
+    /// This message is identical across nodes; the tag is applied via the signing key.
+    #[derive(CryptoHasher, BCSCryptoHash, Serialize, Deserialize, Debug, PartialEq)]
+    struct BaseMessage {
+        base: u64,
+    }
+
+    // --------------------------------------------------------------------------
+    // Benchmark: 75-out-of-100 Aggregate Signatures
+    // (Tag is embedded in the message)
+    // --------------------------------------------------------------------------
+    fn bench_aggregate_signatures(c: &mut Criterion) {
+        const TOTAL_NODES: usize = 100;
+        const PARTICIPANTS: usize = 75;
+
+        // Generate 100 deterministic private keys and corresponding public keys.
+        let mut private_keys = Vec::with_capacity(TOTAL_NODES);
+        let mut public_keys = Vec::with_capacity(TOTAL_NODES);
+        for i in 0..TOTAL_NODES {
+            let pk = deterministic_main_private_key(i);
+            public_keys.push(pk.public_key());
+            private_keys.push(pk);
+        }
+
+        // For each participating node, create a message that embeds a small tag.
+        // (We use i mod 9 to ensure the tag is a number from 0 to 8.)
+        let mut messages = Vec::with_capacity(PARTICIPANTS);
+        for i in 0..PARTICIPANTS {
+            messages.push(AggMessage {
+                base: 42,
+                tag: (i % 9) as u8,
+            });
+        }
+
+        // Each participating node signs its corresponding message.
+        let mut signatures = Vec::with_capacity(PARTICIPANTS);
+        for i in 0..PARTICIPANTS {
+            let sig = private_keys[i]
+                .sign(&messages[i])
+                .expect("failed to sign aggregate message");
+            signatures.push(sig);
+        }
+
+        // List of participating node indices.
+        let participating_nodes: Vec<usize> = (0..PARTICIPANTS).collect();
+
+        // Create a dummy validator verifier (required for constructing SignatureVerifier).
+        let dummy_verifier = Arc::new(ValidatorVerifier::new(vec![]));
+        // Use the full set of 100 public keys.
+        let signature_verifier = SignatureVerifier::new(public_keys.clone(), dummy_verifier, 1);
+
+        // Prepare a vector of references to messages.
+        let message_refs: Vec<&AggMessage> = messages.iter().collect();
+
+        c.bench_function("Aggregate Signatures (75/100)", |b| {
+            b.iter(|| {
+                // Aggregate the 75 signatures.
+                let aggregated_sig = signature_verifier
+                    .aggregate_signatures(signatures.clone())
+                    .unwrap();
+                // Verify the aggregated signature.
+                signature_verifier
+                    .verify_aggregate_signatures(
+                        participating_nodes.clone(),
+                        message_refs.clone(),
+                        &aggregated_sig,
+                    )
+                    .unwrap();
+            })
+        });
+    }
+
+    // --------------------------------------------------------------------------
+    // Benchmark: 75-out-of-100 Tagged Multi-Signatures
+    // (The tag is provided via the signer’s tagged key, not embedded in the message)
+    // --------------------------------------------------------------------------
+    fn bench_tagged_multi_signatures(c: &mut Criterion) {
+        const TOTAL_NODES: usize = 100;
+        const PARTICIPANTS: usize = 75;
+        const N_TAGS: usize = 9; // small tags: 0 to 8
+
+        // Create 100 signers using ValidatorSigner::random.
+        // Each signer has an associated set of tag keys.
+        let mut signers = Vec::with_capacity(TOTAL_NODES);
+        let mut public_keys = Vec::with_capacity(TOTAL_NODES);
+        for i in 0..TOTAL_NODES {
+            let mut seed = [0u8; 32];
+            seed[..8].copy_from_slice(&i.to_le_bytes());
+            let vs = ValidatorSigner::random(seed);
+            public_keys.push(vs.public_key());
+            signers.push(Signer::new(Arc::new(vs), i, N_TAGS));
+        }
+
+        // The base message is the same for all participating nodes.
+        let msg = BaseMessage { base: 42 };
+
+        // Select the first 75 nodes as participants and assign each a tag (i mod N_TAGS).
+        let participating_nodes: Vec<usize> = (0..PARTICIPANTS).collect();
+        let tags: Vec<usize> = participating_nodes.iter().map(|&i| i % N_TAGS).collect();
+
+        // Each participating node produces a tag signature.
+        let mut signatures = Vec::with_capacity(PARTICIPANTS);
+        for &i in &participating_nodes {
+            let tag = i % N_TAGS;
+            let sig = signers[i]
+                .sign_tagged(&msg, tag)
+                .expect("failed to sign tagged message");
+            signatures.push(sig);
+        }
+
+        let dummy_verifier = Arc::new(ValidatorVerifier::new(vec![]));
+        let signature_verifier =
+            SignatureVerifier::new(public_keys.clone(), dummy_verifier, N_TAGS);
+
+        c.bench_function("Tagged Multi Signatures (75/100)", |b| {
+            b.iter(|| {
+                let aggregated_sig = signature_verifier
+                    .aggregate_signatures(signatures.clone())
+                    .unwrap();
+                signature_verifier
+                    .verify_tagged_multi_signature(
+                        participating_nodes.clone(),
+                        &msg,
+                        tags.clone(),
+                        &aggregated_sig,
+                    )
+                    .unwrap();
+            })
+        });
+    }
+
+    criterion_group!(
+        benches,
+        bench_aggregate_signatures,
+        bench_tagged_multi_signatures
+    );
+    criterion_main!(benches);
+}

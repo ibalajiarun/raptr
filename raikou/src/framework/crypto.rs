@@ -11,16 +11,27 @@ use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
 use aptos_types::{validator_signer::ValidatorSigner, validator_verifier::ValidatorVerifier};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use rand::SeedableRng;
 
 // FIXME: for testing and prototyping only, obviously not safe in prod.
 fn deterministic_tag_private_keys(node_id: usize, n_tags: usize) -> Vec<bls12381::PrivateKey> {
-    use rand::SeedableRng;
-
-    let mut seed = [0; 32];
-    seed[0..8].copy_from_slice(&node_id.to_le_bytes());
-    let mut rng = rand::rngs::StdRng::from_seed(seed);
+    let mut rng = rand::rngs::StdRng::seed_from_u64(node_id as u64);
     (0..n_tags)
         .map(|_| bls12381::PrivateKey::generate(&mut rng))
+        .collect()
+}
+
+#[cfg(feature = "wendy")]
+fn deterministic_wendy_private_keys(node_id: usize, n_tags: usize) -> Vec<(bls12381::PrivateKey, bls12381::PrivateKey)> {
+    let n_bits = if n_tags == 0 {
+        0
+    } else {
+        (n_tags - 1).next_power_of_two().ilog2()
+    };
+
+    let mut rng = rand::rngs::StdRng::seed_from_u64(node_id as u64);
+    (0..n_bits)
+        .map(|_| (bls12381::PrivateKey::generate(&mut rng), bls12381::PrivateKey::generate(&mut rng)))
         .collect()
 }
 
@@ -34,6 +45,9 @@ struct VerifierInner {
     tag_public_keys: Vec<Vec<PublicKey>>,
     // For compatibility with aptos codebase.
     verifier: Arc<ValidatorVerifier>,
+
+    #[cfg(feature = "wendy")]
+    wendy_public_keys: Vec<Vec<(PublicKey, PublicKey)>>,
 }
 
 impl SignatureVerifier {
@@ -52,11 +66,25 @@ impl SignatureVerifier {
             })
             .collect();
 
+        #[cfg(feature = "wendy")]
+        let wendy_public_keys = (0..public_keys.len())
+            .into_iter()
+            .map(|node_id| {
+                deterministic_wendy_private_keys(node_id, n_tags)
+                    .into_iter()
+                    .map(|(key0, key1)| (key0.public_key(), key1.public_key()))
+                    .collect()
+            })
+            .collect();
+
         SignatureVerifier {
             inner: Arc::new(VerifierInner {
                 public_keys,
                 tag_public_keys,
                 verifier,
+
+                #[cfg(feature = "wendy")]
+                wendy_public_keys,
             }),
         }
     }
@@ -128,6 +156,47 @@ impl SignatureVerifier {
         signature.verify(message, &aggregated_key)
     }
 
+    #[cfg(feature = "wendy")]
+    fn get_wendy_public_keys(&self, author: NodeId, tag: usize) -> impl Iterator<Item = &PublicKey> {
+        self.inner.wendy_public_keys[author].iter().enumerate().map(move |(bit, (key0, key1))| {
+            if tag & (1 << bit) == 0 {
+                key0
+            } else {
+                key1
+            }
+        })
+    }
+
+    #[cfg(feature = "wendy")]
+    pub fn verify_wendy<T: CryptoHash + Serialize>(
+        &self,
+        author: NodeId,
+        message: &T,
+        tag: usize,
+        signature: &bls12381::Signature,
+    ) -> anyhow::Result<()> {
+        let public_key = PublicKey::aggregate(self.get_wendy_public_keys(author, tag).collect())?;
+        signature.verify(message, &public_key)
+    }
+
+    #[cfg(feature = "wendy")]
+    pub fn verify_wendy_multi_signature<T: CryptoHash + Serialize>(
+        &self,
+        nodes: impl IntoIterator<Item = NodeId>,
+        message: &T,
+        tags: impl IntoIterator<Item = usize>,
+        signature: &bls12381::Signature,
+    ) -> anyhow::Result<()> {
+        let pub_keys = nodes
+            .into_iter()
+            .zip(tags.into_iter())
+            .flat_map(|(node, tag)| self.get_wendy_public_keys(node, tag))
+            .collect();
+
+        let aggregated_key = PublicKey::aggregate(pub_keys)?;
+        signature.verify(message, &aggregated_key)
+    }
+
     pub fn aggregate_signatures(
         &self,
         partial_signatures: impl IntoIterator<Item = bls12381::Signature>,
@@ -152,6 +221,9 @@ struct SignerInner {
     // ValidatorSigner does not expose the private key.
     aptos_signer: Arc<ValidatorSigner>,
     tag_private_keys: Vec<bls12381::PrivateKey>,
+
+    #[cfg(feature = "wendy")]
+    wendy_private_keys: Vec<(bls12381::PrivateKey, bls12381::PrivateKey)>,
 }
 
 impl Signer {
@@ -160,6 +232,9 @@ impl Signer {
             inner: Arc::new(SignerInner {
                 aptos_signer,
                 tag_private_keys: deterministic_tag_private_keys(node_id, n_tags),
+
+                #[cfg(feature = "wendy")]
+                wendy_private_keys: deterministic_wendy_private_keys(node_id, n_tags),
             }),
         }
     }
@@ -177,6 +252,25 @@ impl Signer {
         tag: usize,
     ) -> anyhow::Result<bls12381::Signature> {
         Ok(self.inner.tag_private_keys[tag].sign(message)?)
+    }
+
+    #[cfg(feature = "wendy")]
+    pub fn sign_wendy<T: Serialize + CryptoHash>(
+        &self,
+        message: &T,
+        tag: usize,
+    ) -> anyhow::Result<bls12381::Signature> {
+        let mut sigs = Vec::new();
+
+        for (bit, (key0, key1)) in self.inner.wendy_private_keys.iter().enumerate() {
+            if tag & (1 << bit) == 0 {
+                sigs.push(key0.sign(message)?);
+            } else {
+                sigs.push(key1.sign(message)?);
+            }
+        }
+
+        Ok(bls12381::Signature::aggregate(sigs)?)
     }
 }
 
@@ -603,6 +697,147 @@ mod tests {
         assert!(
             result.is_err(),
             "Tagged multi-signature verification should fail when tag indices are incorrect"
+        );
+        Ok(())
+    }
+
+    /// Test that a single “wendy” signature (created via `Signer::sign_wendy`)
+    /// is correctly verified using `SignatureVerifier::verify_wendy`.
+    #[cfg(feature = "wendy")]
+    #[test]
+    fn test_wendy_signature_verification() -> anyhow::Result<()> {
+    // Using n_tags = 3 will cause `deterministic_wendy_private_keys` to generate
+    // 1 key pair (since (3-1).next_power_of_two().ilog2() == 1), meaning that valid
+    // wendy tag values are 0 or 1.
+    let n_tags = 3;
+    let node_id = 0;
+    let vs = ValidatorSigner::random(None);
+    let public_keys = vec![vs.public_key()];
+    let signer = Signer::new(Arc::new(vs), node_id, n_tags);
+    let msg = TestMessage { value: 42 };
+
+    let dummy_verifier = Arc::new(ValidatorVerifier::new(vec![]));
+    let signature_verifier = SignatureVerifier::new(public_keys, dummy_verifier, n_tags);
+
+    // Try both valid wendy tags: 0 and 1.
+    for tag in 0..2 {
+        let sig = signer.sign_wendy(&msg, tag)?;
+        signature_verifier.verify_wendy(node_id, &msg, tag, &sig)?;
+    }
+    Ok(())
+}
+
+    /// Test that wendy multi-signatures (from multiple nodes signing the same message)
+    /// can be aggregated and verified using `verify_wendy_multi_signature`.
+    #[cfg(feature = "wendy")]
+    #[test]
+    fn test_wendy_multi_signature_verification() -> anyhow::Result<()> {
+        let total_nodes: usize = 5;
+        let n_tags = 3; // yields 1 wendy key pair per node (valid tags: 0 or 1)
+        let mut signers = Vec::new();
+        let mut public_keys = Vec::new();
+
+        // Create signers and collect public keys.
+        for node_id in 0..total_nodes {
+            let mut seed = [0u8; 32];
+            seed[..8].copy_from_slice(&node_id.to_le_bytes());
+            let vs = ValidatorSigner::random(Some(seed));
+            public_keys.push(vs.public_key());
+            signers.push(Signer::new(Arc::new(vs), node_id, n_tags));
+        }
+
+        let msg = TestMessage { value: 100 };
+
+        // For each signer, choose a valid wendy tag.
+        // Here we simply use node_id % 2 (ensuring a value of 0 or 1).
+        let tags: Vec<usize> = (0..total_nodes).map(|node_id| node_id % 2).collect();
+
+        // Each signer signs using `sign_wendy`.
+        let mut sigs = Vec::new();
+        for (node_id, signer) in signers.iter().enumerate() {
+            let tag = tags[node_id];
+            let sig = signer.sign_wendy(&msg, tag)?;
+            sigs.push(sig);
+        }
+
+        let dummy_verifier = Arc::new(ValidatorVerifier::new(vec![]));
+        let signature_verifier = SignatureVerifier::new(public_keys, dummy_verifier, n_tags);
+
+        // Aggregate the individual wendy signatures.
+        let aggregated_sig = signature_verifier.aggregate_signatures(sigs)?;
+        // Verify the aggregated multi-signature.
+        signature_verifier.verify_wendy_multi_signature(0..total_nodes, &msg, tags, &aggregated_sig)?;
+        Ok(())
+    }
+
+    /// Negative test: Verify that a wendy signature fails when a wrong message is provided.
+    #[cfg(feature = "wendy")]
+    #[test]
+    fn test_wendy_signature_wrong_message() -> anyhow::Result<()> {
+        let n_tags = 3;
+        let node_id = 0;
+        let vs = ValidatorSigner::random(None);
+        let public_keys = vec![vs.public_key()];
+        let signer = Signer::new(Arc::new(vs), node_id, n_tags);
+        let msg = TestMessage { value: 42 };
+        let wrong_msg = TestMessage { value: 43 };
+
+        let dummy_verifier = Arc::new(ValidatorVerifier::new(vec![]));
+        let signature_verifier = SignatureVerifier::new(public_keys, dummy_verifier, n_tags);
+
+        let sig = signer.sign_wendy(&msg, 0)?;
+        let result = signature_verifier.verify_wendy(node_id, &wrong_msg, 0, &sig);
+        assert!(
+            result.is_err(),
+            "Wendy signature verification should fail with a wrong message"
+        );
+        Ok(())
+    }
+
+    /// Negative test: Verify that a wendy multi-signature fails when an incorrect tag vector is provided.
+    #[cfg(feature = "wendy")]
+    #[test]
+    fn test_wendy_multi_signature_negative() -> anyhow::Result<()> {
+        let total_nodes: usize = 5;
+        let n_tags = 3;
+        let mut signers = Vec::new();
+        let mut public_keys = Vec::new();
+
+        for node_id in 0..total_nodes {
+            let mut seed = [0u8; 32];
+            seed[..8].copy_from_slice(&node_id.to_le_bytes());
+            let vs = ValidatorSigner::random(Some(seed));
+            public_keys.push(vs.public_key());
+            signers.push(Signer::new(Arc::new(vs), node_id, n_tags));
+        }
+
+        let msg = TestMessage { value: 500 };
+
+        // Build the correct tags vector (each signer uses node_id % 2).
+        let mut correct_tags: Vec<usize> = (0..total_nodes).map(|node_id| node_id % 2).collect();
+        // Modify one tag to be incorrect.
+        if let Some(first) = correct_tags.get_mut(0) {
+            *first = (*first + 1) % 2;
+        }
+
+        let mut sigs = Vec::new();
+        // Each signer signs with its proper (correct) wendy tag.
+        for node_id in 0..total_nodes {
+            let signer = &signers[node_id];
+            let proper_tag = node_id % 2;
+            let sig = signer.sign_wendy(&msg, proper_tag)?;
+            sigs.push(sig);
+        }
+
+        let dummy_verifier = Arc::new(ValidatorVerifier::new(vec![]));
+        let signature_verifier = SignatureVerifier::new(public_keys, dummy_verifier, n_tags);
+        let aggregated_sig = signature_verifier.aggregate_signatures(sigs)?;
+
+        let result =
+            signature_verifier.verify_wendy_multi_signature(0..total_nodes, &msg, correct_tags, &aggregated_sig);
+        assert!(
+            result.is_err(),
+            "Wendy multi-signature verification should fail when tag indices are incorrect"
         );
         Ok(())
     }

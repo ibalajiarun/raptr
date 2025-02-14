@@ -43,8 +43,13 @@ criterion = "0.5.1"
 name = "crypto_bench"
 harness = false
 
+[[bench]]
+name = "wendy_bench"
+harness = false
+required-features = ["wendy"]
+
 [features]
-bench = []
+wendy = []
 sim-types = []
 force-aptos-types = []
 inject-delays = []

@@ -371,8 +371,11 @@ impl BlockStore {
         );
 
         if let Some(payload) = block.payload() {
-            self.payload_manager
-                .prefetch_payload_data(payload, block.timestamp_usecs());
+            self.payload_manager.prefetch_payload_data(
+                payload,
+                block.author().expect("Payload block must have author"),
+                block.timestamp_usecs(),
+            );
         }
 
         let pipelined_block = PipelinedBlock::new_ordered(block.clone());
@@ -524,7 +527,8 @@ impl BlockStore {
 
     pub async fn wait_for_payload(&self, block: &Block, deadline: Duration) -> anyhow::Result<()> {
         let duration = deadline.saturating_sub(self.time_service.get_current_timestamp());
-        tokio::time::timeout(duration, self.payload_manager.get_transactions(block)).await??;
+        tokio::time::timeout(duration, self.payload_manager.get_transactions(block, None))
+            .await??;
         Ok(())
     }
 

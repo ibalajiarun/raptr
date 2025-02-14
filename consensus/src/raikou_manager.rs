@@ -503,8 +503,11 @@ impl RaikouManager {
                         .unwrap();
                     let dissemination::ProposalReceived { round, payload, .. } = *event;
 
+                    let block_author = index_to_address.get(&payload.author()).cloned();
+
                     payload_manager.prefetch_payload_data(
                         &payload.inner,
+                        block_author.unwrap(),
                         aptos_infallible::duration_since_epoch().as_micros() as u64,
                     );
 
@@ -991,8 +994,6 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
         cached_value: Prefix,
     ) -> (Prefix, BitVec) {
         self.payload_manager
-            .prefetch_payload_data(&payload.inner, 0);
-        self.payload_manager
             .available_prefix(payload.inner.as_raikou_payload(), cached_value)
     }
 
@@ -1009,7 +1010,6 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
                     .observe(payload.as_raikou_payload().num_batches() as f64);
                 quorum_store::counters::NUM_TXNS_PER_BLOCK
                     .observe(payload.as_raikou_payload().num_txns() as f64);
-                payload_manager.prefetch_payload_data(payload, 0);
             }
             payload_manager.notify_commit(
                 aptos_infallible::duration_since_epoch()
@@ -1039,7 +1039,8 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
                     Vec::new(),
                 );
 
-                match payload_manager.get_transactions(&block).await {
+                // TODO(ibalaiarun) fix authors
+                match payload_manager.get_transactions(&block, None).await {
                     Ok((txns, _)) => {
                         let txns = txns.into_iter().map(Transaction::UserTransaction).collect();
                         state_sync_notifier

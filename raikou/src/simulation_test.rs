@@ -16,10 +16,18 @@ use crate::{
     metrics,
     metrics::display_metric,
     raikou,
-    raikou::{dissemination, RaikouNode},
+    raikou::{
+        dissemination,
+        dissemination::native::{Batch, NativeDisseminationLayer},
+        types::N_SUB_BLOCKS,
+        RaikouNode,
+    },
 };
 use aptos_crypto::bls12381::{PrivateKey, PublicKey};
-use aptos_types::{account_address::AccountAddress, validator_signer::ValidatorSigner};
+use aptos_types::{
+    account_address::AccountAddress, validator_signer::ValidatorSigner,
+    validator_verifier::ValidatorVerifier,
+};
 use rand::{thread_rng, Rng};
 use std::{
     collections::BTreeMap,
@@ -696,11 +704,21 @@ async fn test_raikou(
     for node_id in 0..n_nodes {
         let config = config.clone();
 
-        let sig_verifier = SignatureVerifier::new(public_keys.clone());
-        let signer = Signer::new(Arc::new(ValidatorSigner::new(
-            AccountAddress::new([node_id as u8; 32]), // this is not actually used.
-            private_keys[node_id].clone(),
-        )));
+        let sig_verifier = SignatureVerifier::new(
+            public_keys.clone(),
+            // Not going to be actually used with --features sim-types.
+            Arc::new(ValidatorVerifier::new(vec![])),
+            N_SUB_BLOCKS + 1,
+        );
+
+        let signer = Signer::new(
+            Arc::new(ValidatorSigner::new(
+                AccountAddress::new([node_id as u8; 32]), // this is not actually used.
+                private_keys[node_id].clone(),
+            )),
+            node_id,
+            N_SUB_BLOCKS + 1,
+        );
 
         let mut diss_network_service = diss_network.service(
             node_id,
@@ -820,6 +838,7 @@ async fn test_raikou(
                 },
                 signer,
                 sig_verifier,
+                None, // failure_tracker
             )));
 
             semaphore.add_permits(1);

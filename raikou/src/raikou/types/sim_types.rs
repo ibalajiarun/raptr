@@ -23,7 +23,7 @@ use std::{
 
 pub type BatchId = i64;
 
-#[derive(Clone, Hash, Serialize, Deserialize)]
+#[derive(Clone, Hash, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BatchInfo {
     pub author: NodeId,
     pub batch_id: BatchId,

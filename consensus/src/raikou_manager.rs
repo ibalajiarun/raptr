@@ -220,15 +220,6 @@ impl RaikouManager {
         let mut fetch_wait_time_after_commit = metrics::UnorderedBuilder::new();
         let executed_txns_counter = Arc::new(AtomicUsize::new(0));
 
-        let diss_metrics = dissemination::Metrics {
-            batch_commit_time: Some(batch_commit_time.new_sender()),
-            batch_execute_time: Some(batch_execute_time.new_sender()),
-            queueing_time: Some(queueing_time.new_sender()),
-            penalty_wait_time: Some(penalty_wait_time.new_sender()),
-            fetch_wait_time_after_commit: Some(fetch_wait_time_after_commit.new_sender()),
-        };
-        drop(diss_metrics);
-
         let ip_addresses = validator_set
             .active_validators
             .iter()
@@ -280,7 +271,13 @@ impl RaikouManager {
             signer.clone(),
             sig_verifier.clone(),
             enable_optimistic_dissemination,
-            diss_metrics,
+            dissemination::Metrics {
+                batch_commit_time: Some(batch_commit_time.new_sender()),
+                batch_execute_time: Some(batch_execute_time.new_sender()),
+                queueing_time: Some(queueing_time.new_sender()),
+                penalty_wait_time: Some(penalty_wait_time.new_sender()),
+                fetch_wait_time_after_commit: Some(fetch_wait_time_after_commit.new_sender()),
+            },
             executed_txns_counter.clone(),
         )
         .await;
@@ -313,7 +310,7 @@ impl RaikouManager {
             signer.clone(),
             sig_verifier.clone(),
             // ordered_nodes_tx,
-            failures_tracker,
+            Some(failures_tracker),
         )));
 
         let network_service = RaikouNetworkService::new(

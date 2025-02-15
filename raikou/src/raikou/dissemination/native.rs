@@ -362,13 +362,13 @@ where
         self.config.module_id
     }
 
-    async fn prepare_block(&self, round: Round, exclude: HashSet<BatchHash>) -> Payload {
+    async fn prepare_block(&self, round: Round, exclude: HashSet<BatchInfo>) -> Payload {
         let mut inner = self.inner.lock().await;
 
         let mut acs: Vec<AC> = inner
             .uncommitted_acs
             .iter()
-            .filter(|&(batch_digest, _ac)| !exclude.contains(batch_digest))
+            .filter(|&(_batch_digest, ac)| !exclude.contains(ac.info()))
             .map(|(_batch_digest, ac)| ac.clone())
             .collect();
 
@@ -386,8 +386,8 @@ where
             let mut batches: Vec<BatchInfo> = inner
                 .uncommitted_uncertified_batches
                 .iter()
-                .filter(|&batch_hash| !exclude.contains(batch_hash))
                 .map(|batch_hash| inner.batches[batch_hash].get_info())
+                .filter(|batch_info| !exclude.contains(batch_info))
                 .collect();
 
             let limit = inner.config.block_size_limit.batch_limit(acs.len());
@@ -676,7 +676,7 @@ where
                 Message::AcVote(
                     batch_id,
                     digest.clone(),
-                    crypto::dummy_signature(), // Populated in the `sign` method.
+                    dummy_signature(), // Populated in the `sign` method.
                 ),
                 author,
             )

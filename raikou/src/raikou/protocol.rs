@@ -318,7 +318,7 @@ pub struct RaikouNode<S, DL> {
     sig_verifier: SignatureVerifier,
     signer: Signer,
     // ordered_nodes_tx: UnboundedSender<OrderedBlocks>,
-    failure_tracker: Arc<dyn TRaikouFailureTracker>,
+    failure_tracker: Option<Arc<dyn TRaikouFailureTracker>>,
 }
 
 impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
@@ -331,7 +331,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         signer: Signer,
         sig_verifier: SignatureVerifier,
         // ordered_nodes_tx: UnboundedSender<OrderedBlocks>,
-        failure_tracker: Arc<dyn TRaikouFailureTracker>,
+        failure_tracker: Option<Arc<dyn TRaikouFailureTracker>>,
     ) -> Self {
         let quorum = config.quorum();
         assert!(config.block_fetch_multiplicity <= quorum);
@@ -555,7 +555,9 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         if round > self.r_ready {
             self.r_ready = round;
             self.enter_reason = reason.clone();
-            self.failure_tracker.push_reason(reason.clone());
+            if let Some(failure_tracker) = &self.failure_tracker {
+                failure_tracker.push_reason(reason.clone());
+            }
 
             // Upon getting a justification to enter a higher round r, send it to the leader
             // of round r, unless already received a proposal or a QC in round that round.

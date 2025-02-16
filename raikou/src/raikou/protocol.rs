@@ -61,7 +61,7 @@ pub enum Message {
     QcVote(Round, Prefix, BlockHash, Signature),
     CcVote(QC, Signature),
     TcVote(Round, QC, Signature, RoundTimeoutReason),
-    AdvanceRound(Round, QC, RoundEnterReason),
+    AdvanceRound(Round, QC, RoundEntryReason),
     FetchReq(BlockHash),
     FetchResp(Block),
 }
@@ -257,7 +257,7 @@ pub struct Metrics {
 }
 
 pub trait TRaikouFailureTracker: Send + Sync {
-    fn push_reason(&self, status: RoundEnterReason);
+    fn push_reason(&self, status: RoundEntryReason);
 }
 
 pub struct RaikouNode<S, DL> {
@@ -273,7 +273,7 @@ pub struct RaikouNode<S, DL> {
 
     // Protocol state for the pseudocode
     r_ready: Round,                 // The highest round the node is ready to enter.
-    enter_reason: RoundEnterReason, // The justification for entering the round r_read.
+    entry_reason: RoundEntryReason, // The justification for entering the round r_read.
     r_allowed: Round,               // The highest round the node is allowed to enter.
     r_cur: Round,                   // The current round the node is in.
     r_timeout: Round,               // The highest round the node has voted to time out.
@@ -346,7 +346,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             block_create_time: Default::default(),
             r_ready: 0,
             r_allowed: 0,
-            enter_reason: RoundEnterReason::FullPrefixQC,
+            entry_reason: RoundEntryReason::FullPrefixQC,
             r_cur: 0,
             last_qc_vote: (0, 0).into(),
             last_commit_vote: (0, 0).into(),
@@ -476,8 +476,8 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             self.qc_high = new_qc.clone();
 
             if new_qc.round == self.r_ready {
-                // Update the enter_reason so that it stays compatible with qc_high.
-                self.enter_reason = RoundEnterReason::ThisRoundQC;
+                // Update the entry_reason so that it stays compatible with qc_high.
+                self.entry_reason = RoundEntryReason::ThisRoundQC;
             }
         }
 
@@ -511,11 +511,11 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             }
 
             // If form or receive a full-prefix qc, advance to the next round after that.
-            self.advance_r_ready(new_qc.round + 1, RoundEnterReason::FullPrefixQC, ctx)
+            self.advance_r_ready(new_qc.round + 1, RoundEntryReason::FullPrefixQC, ctx)
                 .await;
         } else {
             // Advance to the round of the new QC if lagging behind.
-            self.advance_r_ready(new_qc.round, RoundEnterReason::ThisRoundQC, ctx)
+            self.advance_r_ready(new_qc.round, RoundEntryReason::ThisRoundQC, ctx)
                 .await;
         }
 
@@ -549,12 +549,12 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
     async fn advance_r_ready(
         &mut self,
         round: Round,
-        reason: RoundEnterReason,
+        reason: RoundEntryReason,
         ctx: &mut impl ContextFor<Self>,
     ) {
         if round > self.r_ready {
             self.r_ready = round;
-            self.enter_reason = reason.clone();
+            self.entry_reason = reason.clone();
             if let Some(failure_tracker) = &self.failure_tracker {
                 failure_tracker.push_reason(reason.clone());
             }
@@ -886,7 +886,7 @@ where
             self.satisfied_blocks.insert(genesis_qc.block_digest);
             self.satisfied_qcs.insert(genesis_qc.sub_block_id());
             self.known_qcs.insert(genesis_qc.sub_block_id());
-            self.advance_r_ready(1, RoundEnterReason::FullPrefixQC, ctx).await;
+            self.advance_r_ready(1, RoundEntryReason::FullPrefixQC, ctx).await;
         };
 
         upon [
@@ -900,7 +900,7 @@ where
             let timestamp_usecs =  duration_since_epoch().as_micros() as u64;
 
             let leader =  self.config.leader(round);
-            self.log_detail(format!("Entering round {} by {:?} and leader {}", round, self.enter_reason, leader));
+            self.log_detail(format!("Entering round {} by {:?} and leader {}", round, self.entry_reason, leader));
 
             if self.node_id == leader {
                 // Upon entering round r, the leader L_r multicasts a signed block
@@ -919,7 +919,7 @@ where
                     timestamp_usecs,
                     payload,
                     parent_qc,
-                    reason: self.enter_reason.clone(),
+                    reason: self.entry_reason.clone(),
                 };
 
                 let digest = block_data.hash();
@@ -1202,7 +1202,7 @@ where
                         if let Some(block) = self.blocks.get(&committed_block_digest) {
                             observe_block(block.data.timestamp_usecs, "CCReady");
                         }
-                        self.advance_r_ready(round + 1, RoundEnterReason::CC(cc), ctx).await;
+                        self.advance_r_ready(round + 1, RoundEntryReason::CC(cc), ctx).await;
                     }
                 }
             }
@@ -1274,7 +1274,7 @@ where
                     observe_block(block.data.timestamp_usecs, "TCAggregate");
                 }
 
-                self.advance_r_ready(round + 1, RoundEnterReason::TC(tc), ctx).await;
+                self.advance_r_ready(round + 1, RoundEntryReason::TC(tc), ctx).await;
             }
         };
 
@@ -1345,7 +1345,7 @@ where
             ctx.multicast(Message::AdvanceRound(
                 self.r_ready,
                 self.qc_high.clone(),
-                self.enter_reason.clone(),
+                self.entry_reason.clone(),
             )).await;
 
             if self.r_timeout == self.r_cur {

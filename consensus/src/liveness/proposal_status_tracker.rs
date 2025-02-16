@@ -10,7 +10,7 @@ use aptos_consensus_types::{
 use aptos_infallible::Mutex;
 use aptos_logger::warn;
 use aptos_short_hex_str::AsShortHexStr;
-use raikou::raikou::{types::RoundEnterReason, TRaikouFailureTracker};
+use raikou::raikou::{types::RoundEntryReason, TRaikouFailureTracker};
 use std::{collections::HashSet, ops::Deref, sync::Arc};
 
 pub trait TPastProposalStatusTracker: Send + Sync {
@@ -53,12 +53,12 @@ impl Deref for LockedExponentialWindowFailureTracker {
 }
 
 impl TRaikouFailureTracker for LockedExponentialWindowFailureTracker {
-    fn push_reason(&self, reason: RoundEnterReason) {
+    fn push_reason(&self, reason: RoundEntryReason) {
         let reason = match reason {
-            RoundEnterReason::ThisRoundQC => NewRoundReason::QCReady,
-            RoundEnterReason::FullPrefixQC => NewRoundReason::QCReady,
-            RoundEnterReason::CC(_) => NewRoundReason::QCReady,
-            RoundEnterReason::TC(tc) => NewRoundReason::Timeout(tc.reason()),
+            RoundEntryReason::ThisRoundQC => NewRoundReason::QCReady,
+            RoundEntryReason::FullPrefixQC => NewRoundReason::QCReady,
+            RoundEntryReason::CC(_) => NewRoundReason::QCReady,
+            RoundEntryReason::TC(tc) => NewRoundReason::Timeout(tc.reason()),
         };
         self.0.lock().push(reason)
     }

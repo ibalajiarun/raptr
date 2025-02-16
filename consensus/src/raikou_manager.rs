@@ -109,18 +109,15 @@ impl RaikouManager {
         self,
         self_author: Author,
         epoch_state: Arc<EpochState>,
-        network_sender: Arc<crate::network::NetworkSender>,
+        network_sender: Arc<NetworkSender>,
         delta: f64,
         total_duration_in_delta: u32,
         enable_optimistic_dissemination: bool,
         messages_rx: aptos_channels::aptos_channel::Receiver<
-            aptos_types::PeerId,
+            PeerId,
             (Author, RaikouNetworkMessage),
         >,
-        diss_rx: aptos_channels::aptos_channel::Receiver<
-            aptos_types::PeerId,
-            (Author, RaikouNetworkMessage),
-        >,
+        diss_rx: aptos_channels::aptos_channel::Receiver<PeerId, (Author, RaikouNetworkMessage)>,
         mut shutdown_rx: oneshot::Receiver<oneshot::Sender<()>>,
         payload_client: Arc<dyn PayloadClient>,
         payload_manager: Arc<dyn TPayloadManager>,
@@ -445,13 +442,13 @@ impl RaikouManager {
             .await
             .unwrap();
 
-            aptos_logger::info!(
+            info!(
                 "Metrics: \n{}",
                 std::str::from_utf8(&metrics_output_buf).unwrap(),
             );
 
             let executed_txns = executed_txns_counter.load(Ordering::SeqCst);
-            aptos_logger::info!(
+            info!(
                 "Executed transactions: {} ({:.0} TPS)",
                 executed_txns,
                 executed_txns as f64 / (delta * total_duration_in_delta as f64)
@@ -742,7 +739,7 @@ pub struct RaikouNetworkSenderInner<M, C> {
 impl<M, C> RaikouNetworkSenderInner<M, C>
 where
     M: raikou::framework::network::NetworkMessage + Serialize + for<'de> Deserialize<'de>,
-    C: raikou::framework::network::MessageCertifier<Message = M>,
+    C: MessageCertifier<Message = M>,
 {
     async fn send(&self, mut msg: M, targets: Vec<NodeId>) {
         let epoch = self.epoch;
@@ -763,7 +760,7 @@ where
                 data: bcs::to_bytes(&msg).unwrap(),
             };
 
-            let mut msg: ConsensusMsg = ConsensusMsg::RaikouMessage(raikou_msg);
+            let msg: ConsensusMsg = ConsensusMsg::RaikouMessage(raikou_msg);
 
             aptos_network_sender.send(msg, remote_peer_ids).await;
         });
@@ -790,7 +787,7 @@ impl<M, C> Clone for RaikouNetworkSender<M, C> {
 impl<M, C> raikou::framework::network::NetworkSender for RaikouNetworkSender<M, C>
 where
     M: raikou::framework::network::NetworkMessage + Serialize + for<'de> Deserialize<'de>,
-    C: raikou::framework::network::MessageCertifier<Message = M>,
+    C: MessageCertifier<Message = M>,
 {
     type Message = M;
 
@@ -821,7 +818,7 @@ where
             PeerId,
             (Author, RaikouNetworkMessage),
         >,
-        network_sender: Arc<crate::network::NetworkSender>,
+        network_sender: Arc<NetworkSender>,
         certifier: Arc<C>,
         verifier: Arc<V>,
     ) -> Self {
@@ -842,7 +839,7 @@ where
                 let sender = *address_to_index.get(&sender).unwrap();
 
                 if drop_injection() {
-                    aptos_logger::info!("APTNET: CONS: Dropping a message from {}", sender);
+                    info!("APTNET: CONS: Dropping a message from {}", sender);
                     continue;
                 }
 
@@ -887,8 +884,8 @@ where
 impl<M, C, V> raikou::framework::network::NetworkSender for RaikouNetworkService<M, C, V>
 where
     M: raikou::framework::network::NetworkMessage + Serialize + for<'de> Deserialize<'de>,
-    C: raikou::framework::network::MessageCertifier<Message = M>,
-    V: raikou::framework::network::MessageVerifier<Message = M>,
+    C: MessageCertifier<Message = M>,
+    V: MessageVerifier<Message = M>,
 {
     type Message = M;
 
@@ -904,8 +901,8 @@ where
 impl<M, C, V> NetworkService for RaikouNetworkService<M, C, V>
 where
     M: raikou::framework::network::NetworkMessage + Serialize + for<'de> Deserialize<'de>,
-    C: raikou::framework::network::MessageCertifier<Message = M>,
-    V: raikou::framework::network::MessageVerifier<Message = M>,
+    C: MessageCertifier<Message = M>,
+    V: MessageVerifier<Message = M>,
 {
     type Sender = RaikouNetworkSender<M, C>;
 

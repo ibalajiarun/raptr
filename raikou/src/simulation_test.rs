@@ -39,9 +39,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::{spawn, sync::RwLock, time, time::Instant};
-
-const JOLTEON_TIMEOUT: u32 = 3; // in Deltas
+use tokio::{time, time::Instant};
 
 fn network_injection<M: Send>(
     delay_function: impl DelayFunction,
@@ -754,7 +752,7 @@ async fn test_raikou(
         // };
 
         let semaphore = semaphore.clone();
-        join_handles.push(spawn(async move {
+        join_handles.push(tokio::spawn(async move {
             // Sleep for a random duration before spawning the node.
             let spawn_delay = {
                 let mut rng = thread_rng();
@@ -843,7 +841,7 @@ async fn test_raikou(
 
             semaphore.add_permits(1);
 
-            spawn(Protocol::run(
+            tokio::spawn(Protocol::run(
                 dissemination.protocol(),
                 node_id,
                 diss_network_service,

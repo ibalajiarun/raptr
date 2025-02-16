@@ -29,7 +29,7 @@ use aptos_consensus_types::{
     common::Author, payload::BatchPointer, proof_of_store::ProofCache,
     round_timeout::RoundTimeoutReason,
 };
-use aptos_crypto::{bls12381::Signature, hash::CryptoHash, Genesis};
+use aptos_crypto::{bls12381::Signature, hash::CryptoHash};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
 use aptos_types::{
     aggregate_signature::{AggregateSignature, PartialSignatures},

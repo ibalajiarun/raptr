@@ -445,7 +445,7 @@ impl TC {
         let sig_data: Vec<_> = self
             .vote_data
             .iter()
-            .map(|(node_id, qc_high_id)| TcVoteSignatureData {
+            .map(|(_node_id, qc_high_id)| TcVoteSignatureData {
                 timeout_round: self.timeout_round,
                 qc_high_id: *qc_high_id,
             })

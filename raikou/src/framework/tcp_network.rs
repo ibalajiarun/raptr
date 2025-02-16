@@ -84,6 +84,7 @@ async fn send_msg_to_stream(
         .write_all(&(data.len() as MessageSizeTag).to_be_bytes())
         .await?;
     stream.write_all(&data).await?;
+    stream.flush().await?;
     Ok(())
 }
 

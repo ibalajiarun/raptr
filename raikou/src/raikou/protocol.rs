@@ -61,7 +61,7 @@ pub enum Message {
     QcVote(Round, Prefix, BlockHash, Signature),
     CcVote(QC, Signature),
     TcVote(Round, QC, Signature, RoundTimeoutReason),
-    AdvanceRound(Round, QC, RoundEntryReason),
+    AdvanceRound(Round, RoundEntryReason),
     FetchReq(BlockHash),
     FetchResp(Block),
 }
@@ -77,7 +77,7 @@ impl Debug for Message {
             Message::TcVote(round, _, _, _) => {
                 write!(f, "TcVote(round {})", round)
             },
-            Message::AdvanceRound(round, _, reason) => {
+            Message::AdvanceRound(round, reason) => {
                 write!(f, "AdvanceRound({:?}, {:?})", round, reason)
             },
             Message::FetchReq(block_hash) => write!(f, "FetchReq({})", block_hash),
@@ -158,12 +158,9 @@ impl<S: LeaderSchedule> MessageVerifier for Verifier<S> {
                 qc.verify(&self.sig_verifier, self.config.quorum())
                     .context("Error verifying the QC in CcVote message")
             }),
-            Message::AdvanceRound(round, qc, reason) => monitor!("verify_advance", {
-                qc.verify(&self.sig_verifier, self.config.quorum())
-                    .context("Error verifying the QC in AdvanceRound message")?;
-
+            Message::AdvanceRound(round, reason) => monitor!("verify_advance", {
                 reason
-                    .verify(*round, qc, &self.sig_verifier, self.config.quorum())
+                    .verify(*round, &self.sig_verifier, self.config.quorum())
                     .context("Error verifying the round enter reason in AdvanceRound message")
             }),
             Message::TcVote(round, qc, signature, _) => monitor!("verify_tcvote", {
@@ -313,7 +310,7 @@ pub struct RaikouNode<S, DL> {
         DefaultBTreeMap<Round, DefaultBTreeMap<BlockHash, BTreeMap<NodeId, (Prefix, Signature)>>>,
     received_cc_vote: DefaultBTreeMap<Round, BTreeSet<NodeId>>,
     cc_votes: DefaultBTreeMap<Round, KthMaxMap<(QC, NodeId), Signature>>,
-    tc_votes: DefaultBTreeMap<Round, BTreeMap<NodeId, (SubBlockId, Signature, RoundTimeoutReason)>>,
+    tc_votes: DefaultBTreeMap<Round, BTreeMap<NodeId, (QC, Signature, RoundTimeoutReason)>>,
 
     sig_verifier: SignatureVerifier,
     signer: Signer,
@@ -346,7 +343,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             block_create_time: Default::default(),
             r_ready: 0,
             r_allowed: 0,
-            entry_reason: RoundEntryReason::FullPrefixQC,
+            entry_reason: RoundEntryReason::FullPrefixQC(QC::genesis()),
             r_cur: 0,
             last_qc_vote: (0, 0).into(),
             last_commit_vote: (0, 0).into(),
@@ -506,8 +503,12 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             }
 
             // If form or receive a full-prefix qc, advance to the next round after that.
-            self.advance_r_ready(new_qc.round + 1, RoundEntryReason::FullPrefixQC, ctx)
-                .await;
+            self.advance_r_ready(
+                new_qc.round + 1,
+                RoundEntryReason::FullPrefixQC(new_qc.clone()),
+                ctx,
+            )
+            .await;
         }
 
         self.known_qcs.insert(new_qc.sub_block_id());
@@ -555,7 +556,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             // NB: consider broadcasting to all the nodes instead.
             if !self.leader_proposal.contains_key(&round) && self.qc_high.round < round {
                 ctx.unicast(
-                    Message::AdvanceRound(round, self.qc_high.clone(), reason),
+                    Message::AdvanceRound(round, reason),
                     self.config.leader(round),
                 )
                 .await;
@@ -789,12 +790,12 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
 
     fn aggregate_timeout_reason(
         &self,
-        tc_votes: &BTreeMap<NodeId, (SubBlockId, Signature, RoundTimeoutReason)>,
+        tc_votes: &BTreeMap<NodeId, (QC, Signature, RoundTimeoutReason)>,
     ) -> RoundTimeoutReason {
         let mut reason_voting_power: HashMap<RoundTimeoutReason, usize> = HashMap::new();
         let mut missing_batch_authors: HashMap<usize, usize> = HashMap::new();
         // let ordered_authors = verifier.get_ordered_account_addresses();
-        for (author, (_, _, reason)) in tc_votes {
+        for (_author, (_, _, reason)) in tc_votes {
             // To aggregate the reason, we only care about the variant type itself and
             // exclude any data within the variants.
             let reason_key = match reason {
@@ -877,7 +878,7 @@ where
             self.satisfied_blocks.insert(genesis_qc.block_digest);
             self.satisfied_qcs.insert(genesis_qc.sub_block_id());
             self.known_qcs.insert(genesis_qc.sub_block_id());
-            self.advance_r_ready(1, RoundEntryReason::FullPrefixQC, ctx).await;
+            self.advance_r_ready(1, RoundEntryReason::FullPrefixQC(QC::genesis()), ctx).await;
         };
 
         upon [
@@ -909,7 +910,6 @@ where
                 let block_data = BlockData {
                     timestamp_usecs,
                     payload,
-                    parent_qc,
                     reason: self.entry_reason.clone(),
                 };
 
@@ -1193,7 +1193,13 @@ where
                         if let Some(block) = self.blocks.get(&committed_block_digest) {
                             observe_block(block.data.timestamp_usecs, "CCReady");
                         }
-                        self.advance_r_ready(round + 1, RoundEntryReason::CC(cc), ctx).await;
+
+                        let (max_qc, _node_id) = votes.keys().last().unwrap().clone();
+                        self.advance_r_ready(
+                            round + 1,
+                            RoundEntryReason::CC(cc, max_qc),
+                            ctx
+                        ).await;
                     }
                 }
             }
@@ -1234,44 +1240,52 @@ where
         // Upon receiving a valid timeout message, execute on_new_qc.
         // Upon gathering a quorum of matching timeout messages,
         // form the TC and execute advance_round.
-        upon receive [Message::TcVote(round, qc, signature, reason)] from node [p] {
-            self.tc_votes[round].insert(p, (qc.sub_block_id(), signature, reason));
-            let digest = qc.block_digest;
-            self.on_new_qc(qc, ctx).await;
+        upon receive [Message::TcVote(round, qc, signature, timeout_reason)] from node [p] {
+            self.on_new_qc(qc.clone(), ctx).await;
+            self.tc_votes[round].insert(p, (qc, signature, timeout_reason));
 
             let votes = &self.tc_votes[round];
 
-            if votes.len() >= self.quorum() {
+            if votes.len() == self.quorum() {
                 self.last_tc_round = round;
                 self.log_detail(format!("Forming a TC for round {}", round));
 
                 let vote_data = votes
                     .iter()
-                    .map(|(node_id, (sub_block_id, _, _))| (*node_id, *sub_block_id))
+                    .map(|(node_id, (qc, _, _))| (*node_id, qc.sub_block_id()))
                     .collect();
 
                 let signatures = votes.values().map(|(_, signature, _)| signature.clone());
                 let aggregated_signature = self.sig_verifier.aggregate_signatures(signatures).unwrap();
-                let reason = self.aggregate_timeout_reason(votes);
+                let timeout_reason = self.aggregate_timeout_reason(votes);
 
                 let tc = TC::new(
                     round,
                     vote_data,
                     aggregated_signature,
-                    reason
+                    timeout_reason
                 );
 
-                if let Some(block) = self.blocks.get(&digest) {
+                let max_qc = votes.values().map(|(qc, _, _)| qc).max().unwrap().clone();
+
+                // TODO: check that `max_qc` is indeed what's intended here.
+                // TODO: maybe need to check if `max_qc.round == round`?
+                if let Some(block) = self.blocks.get(&max_qc.block_digest) {
                     observe_block(block.data.timestamp_usecs, "TCAggregate");
                 }
 
-                self.advance_r_ready(round + 1, RoundEntryReason::TC(tc), ctx).await;
+                self.advance_r_ready(
+                    round + 1,
+                    RoundEntryReason::TC(tc, max_qc),
+                    ctx
+                )
+                .await;
             }
         };
 
         // Upon receiving an AdvanceRound message, execute on_new_qc and advance_round.
-        upon receive [Message::AdvanceRound(round, qc, reason)] from [_any_node] {
-            self.on_new_qc(qc, ctx).await;
+        upon receive [Message::AdvanceRound(round, reason)] from [_any_node] {
+            self.on_new_qc(reason.qc().clone(), ctx).await;
             self.advance_r_ready(round, reason, ctx).await;
         };
 
@@ -1335,7 +1349,6 @@ where
         upon timer event [TimerEvent::RoundSync] {
             ctx.multicast(Message::AdvanceRound(
                 self.r_ready,
-                self.qc_high.clone(),
                 self.entry_reason.clone(),
             )).await;
 

@@ -9,7 +9,7 @@ use crate::{
     },
 };
 use anyhow::Context;
-use aptos_consensus_types::{proof_of_store::ProofCache, round_timeout::RoundTimeoutReason};
+use aptos_consensus_types::round_timeout::RoundTimeoutReason;
 use aptos_crypto::{bls12381::Signature, hash::CryptoHash, HashValue};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
 use itertools::Itertools;
@@ -17,7 +17,6 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::{
     cmp::Ordering,
     fmt::{Debug, Formatter},
-    time::Instant,
 };
 
 pub type Txn = aptos_types::transaction::SignedTransaction;
@@ -62,7 +61,6 @@ impl From<BlockSerialization> for Block {
 pub struct BlockData {
     pub timestamp_usecs: u64,
     pub payload: Payload,
-    pub parent_qc: QC,
     pub reason: RoundEntryReason,
 }
 
@@ -88,12 +86,12 @@ impl Block {
         self.payload().author()
     }
 
-    pub fn payload(&self) -> &Payload {
-        &self.data.payload
+    pub fn parent_qc(&self) -> &QC {
+        self.reason().qc()
     }
 
-    pub fn parent_qc(&self) -> &QC {
-        &self.data.parent_qc
+    pub fn payload(&self) -> &Payload {
+        &self.data.payload
     }
 
     pub fn reason(&self) -> &RoundEntryReason {
@@ -123,11 +121,8 @@ impl Block {
         self.payload()
             .verify(verifier)
             .context("Error verifying payload")?;
-        self.parent_qc()
-            .verify(sig_verifier, quorum)
-            .context("Error verifying parent_qc")?;
         self.reason()
-            .verify(self.round(), &self.parent_qc(), sig_verifier, quorum)
+            .verify(self.round(), sig_verifier, quorum)
             .context("Error verifying entry reason")?;
 
         let sig_data = BlockSignatureData {
@@ -307,6 +302,16 @@ pub struct CC {
     max_prefix: Prefix,
 }
 
+impl Debug for CC {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CC")
+            .field("round", &self.round)
+            .field("min_prefix", &self.min_prefix)
+            .field("max_prefix", &self.max_prefix)
+            .finish()
+    }
+}
+
 #[derive(Deserialize)]
 struct CcSerialization {
     round: Round,
@@ -386,6 +391,15 @@ pub struct TC {
     round_timeout_reason: RoundTimeoutReason,
 }
 
+impl Debug for TC {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TC")
+            .field("timeout_round", &self.timeout_round)
+            .field("max_vote", &self.max_vote)
+            .finish()
+    }
+}
+
 impl TC {
     pub fn reason(&self) -> RoundTimeoutReason {
         self.round_timeout_reason.clone()
@@ -460,51 +474,63 @@ impl TC {
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
 pub enum RoundEntryReason {
     /// When a node receives a full-prefix QC for round r, it can enter round r+1.
-    FullPrefixQC,
+    FullPrefixQC(QC),
     /// When a node receives a CC for round r, it can enter round r+1.
-    CC(CC),
+    CC(CC, QC),
     /// When a node receives a TC for round r, it can enter round r+1.
-    TC(TC),
+    TC(TC, QC),
 }
 
 impl Debug for RoundEntryReason {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            RoundEntryReason::FullPrefixQC => write!(f, "Full Prefix QC"),
-            RoundEntryReason::CC(cc) => write!(f, "CC({})", cc.round),
-            RoundEntryReason::TC(tc) => write!(f, "TC({})", tc.timeout_round),
+            RoundEntryReason::FullPrefixQC(qc) => write!(f, "Full Prefix {:?}", qc),
+            RoundEntryReason::CC(cc, qc) => write!(f, "CC({:?}, {:?})", cc, qc),
+            RoundEntryReason::TC(tc, qc) => write!(f, "TC({:?}, {:?})", tc, qc),
         }
     }
 }
 
 impl RoundEntryReason {
+    pub fn qc(&self) -> &QC {
+        match self {
+            RoundEntryReason::FullPrefixQC(qc) => qc,
+            RoundEntryReason::CC(_, qc) => qc,
+            RoundEntryReason::TC(_, qc) => qc,
+        }
+    }
+
     pub fn verify(
         &self,
         round: Round,
-        qc: &QC,
         verifier: &SignatureVerifier,
         quorum: usize,
     ) -> anyhow::Result<()> {
         match self {
-            RoundEntryReason::FullPrefixQC => {
+            RoundEntryReason::FullPrefixQC(qc) => {
                 if !(qc.round == round - 1 && qc.is_full()) {
                     return Err(anyhow::anyhow!("Invalid FullPrefixQC entry reason"));
                 }
-                Ok(())
+                qc.verify(verifier, quorum)
+                    .context("Error verifying the QC")
             },
-            RoundEntryReason::CC(cc) => {
+            RoundEntryReason::CC(cc, qc) => {
                 if !(cc.round == round - 1 && qc.sub_block_id() >= cc.highest_qc_id()) {
                     return Err(anyhow::anyhow!("Invalid CC entry reason"));
                 }
                 cc.verify(verifier, quorum)
-                    .context("Error verifying the CC")
+                    .context("Error verifying the CC")?;
+                qc.verify(verifier, quorum)
+                    .context("Error verifying the QC")
             },
-            RoundEntryReason::TC(tc) => {
+            RoundEntryReason::TC(tc, qc) => {
                 if !(tc.timeout_round == round - 1 && qc.sub_block_id() >= tc.highest_qc_id()) {
                     return Err(anyhow::anyhow!("Invalid TC entry reason"));
                 }
                 tc.verify(verifier, quorum)
-                    .context("Error verifying the TC")
+                    .context("Error verifying the TC")?;
+                qc.verify(verifier, quorum)
+                    .context("Error verifying the QC")
             },
         }
     }

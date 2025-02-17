@@ -55,9 +55,9 @@ impl Deref for LockedExponentialWindowFailureTracker {
 impl TRaikouFailureTracker for LockedExponentialWindowFailureTracker {
     fn push_reason(&self, reason: RoundEntryReason) {
         let reason = match reason {
-            RoundEntryReason::FullPrefixQC => NewRoundReason::QCReady,
-            RoundEntryReason::CC(_) => NewRoundReason::QCReady,
-            RoundEntryReason::TC(tc) => NewRoundReason::Timeout(tc.reason()),
+            RoundEntryReason::FullPrefixQC(_) => NewRoundReason::QCReady,
+            RoundEntryReason::CC(_, _) => NewRoundReason::QCReady,
+            RoundEntryReason::TC(tc, _) => NewRoundReason::Timeout(tc.reason()),
         };
         self.0.lock().push(reason)
     }

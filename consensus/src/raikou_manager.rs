@@ -82,7 +82,6 @@ use std::{
 };
 use tokio::{net::lookup_host, time::Instant};
 
-const JOLTEON_TIMEOUT: u32 = 3; // in Deltas
 const CONS_BASE_PORT: u16 = 12000;
 const DISS_BASE_PORT: u16 = 12500;
 
@@ -184,7 +183,7 @@ impl RaikouManager {
             n_nodes,
             f,
             storage_requirement: f + 1, // f + (f / 2 + 1),
-            leader_timeout: Duration::from_secs_f64(delta * 3.5),
+            leader_timeout: Duration::from_secs_f64(delta * 4.5),
             leader_schedule: round_robin(n_nodes),
             delta: Duration::from_secs_f64(delta),
             end_of_run: Instant::now() + Duration::from_secs_f64(delta) * total_duration_in_delta,

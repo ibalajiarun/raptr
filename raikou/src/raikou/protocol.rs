@@ -474,11 +474,6 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         // Update `qc_high`
         if new_qc > self.qc_high {
             self.qc_high = new_qc.clone();
-
-            if new_qc.round == self.r_ready {
-                // Update the entry_reason so that it stays compatible with qc_high.
-                self.entry_reason = RoundEntryReason::ThisRoundQC;
-            }
         }
 
         // If new_qc.round > r_commit_vote and new_qc.round > r_timeout,
@@ -512,10 +507,6 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
 
             // If form or receive a full-prefix qc, advance to the next round after that.
             self.advance_r_ready(new_qc.round + 1, RoundEntryReason::FullPrefixQC, ctx)
-                .await;
-        } else {
-            // Advance to the round of the new QC if lagging behind.
-            self.advance_r_ready(new_qc.round, RoundEntryReason::ThisRoundQC, ctx)
                 .await;
         }
 

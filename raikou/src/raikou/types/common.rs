@@ -120,12 +120,6 @@ impl Block {
         let sig_verifier = &verifier.sig_verifier;
         let quorum = verifier.config.ac_quorum;
 
-        if let &RoundEntryReason::ThisRoundQC = self.reason() {
-            return Err(anyhow::anyhow!(
-                "ThisRoundQC cannot be used as entry reason in a block"
-            ));
-        }
-
         self.payload()
             .verify(verifier)
             .context("Error verifying payload")?;
@@ -465,8 +459,6 @@ impl TC {
 
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
 pub enum RoundEntryReason {
-    /// When a node receives a QC for round r, it can enter round r.
-    ThisRoundQC,
     /// When a node receives a full-prefix QC for round r, it can enter round r+1.
     FullPrefixQC,
     /// When a node receives a CC for round r, it can enter round r+1.
@@ -478,7 +470,6 @@ pub enum RoundEntryReason {
 impl Debug for RoundEntryReason {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            RoundEntryReason::ThisRoundQC => write!(f, "This Round QC"),
             RoundEntryReason::FullPrefixQC => write!(f, "Full Prefix QC"),
             RoundEntryReason::CC(cc) => write!(f, "CC({})", cc.round),
             RoundEntryReason::TC(tc) => write!(f, "TC({})", tc.timeout_round),
@@ -495,12 +486,6 @@ impl RoundEntryReason {
         quorum: usize,
     ) -> anyhow::Result<()> {
         match self {
-            RoundEntryReason::ThisRoundQC => {
-                if !(qc.round == round) {
-                    return Err(anyhow::anyhow!("Invalid ThisRoundQC entry reason"));
-                }
-                Ok(())
-            },
             RoundEntryReason::FullPrefixQC => {
                 if !(qc.round == round - 1 && qc.is_full()) {
                     return Err(anyhow::anyhow!("Invalid FullPrefixQC entry reason"));

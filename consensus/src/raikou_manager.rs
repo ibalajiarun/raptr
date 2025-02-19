@@ -73,7 +73,7 @@ use std::{
     future::Future,
     marker::PhantomData,
     net::{IpAddr, SocketAddr},
-    ops::Deref,
+    ops::{BitOr, Deref},
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -488,6 +488,7 @@ impl RaikouManager {
             module_id: module_network.module_id(),
             state_sync_notifier,
             optqs_payload_param_provider,
+            index_to_address: index_to_address.clone(),
         };
 
         tokio::spawn(async move {
@@ -511,7 +512,7 @@ impl RaikouManager {
                     let payload_manager = payload_manager.clone();
                     let block_author = Some(index_to_address[&payload.author()]);
                     tokio::spawn(async move {
-                        let prefix =
+                        let (prefix, _) =
                             payload_manager.available_prefix(&payload.inner.as_raikou_payload(), 0);
                         if prefix == N_SUB_BLOCKS {
                             info!("Full prefix available {}/{}", prefix, N_SUB_BLOCKS);
@@ -923,6 +924,7 @@ struct RaikouQSDisseminationLayer {
     module_id: ModuleId,
     state_sync_notifier: Arc<dyn ConsensusNotificationSender>,
     optqs_payload_param_provider: Arc<dyn TOptQSPullParamsProvider>,
+    index_to_address: HashMap<usize, Author>,
 }
 
 #[cfg(any(feature = "force-aptos-types", not(feature = "sim-types")))]
@@ -938,7 +940,17 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
         &self,
         round: raikou_types::Round,
         exclude: HashSet<raikou_types::BatchInfo>,
+        exclude_authors: Option<BitVec>,
     ) -> raikou_types::Payload {
+        let mut optqs_params = self.optqs_payload_param_provider.get_params();
+        if let Some(param) = optqs_params.as_mut() {
+            if let Some(additional_exclude) = exclude_authors {
+                for idx in additional_exclude.iter_ones() {
+                    let author = *self.index_to_address.get(&idx).unwrap();
+                    param.exclude_authors.insert(author);
+                }
+            }
+        }
         let (_, payload) = self
             .payload_client
             .pull_payload(
@@ -977,7 +989,7 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
         &self,
         payload: &raikou_types::Payload,
         cached_value: Prefix,
-    ) -> Prefix {
+    ) -> (Prefix, BitVec) {
         self.payload_manager
             .prefetch_payload_data(&payload.inner, 0);
         self.payload_manager

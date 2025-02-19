@@ -86,12 +86,12 @@ impl NetworkTest for ConsensusOnlyBenchmark {
         //     .hint(balter::Hint::Concurrency(20000))
         //     .await;
 
-        let concurrency = 70_000;
-        let test_time = Duration::from_secs(300);
+        let concurrency = 81_000;
+        let test_time = Duration::from_secs(600);
         let mut futures = Vec::new();
         for i in 0..concurrency {
             if i % 100 == 0 {
-                tokio::time::sleep(Duration::from_millis(200)).await;
+                tokio::time::sleep(Duration::from_millis(350)).await;
             }
             futures.push(tokio::spawn(async move {
                 tokio::time::timeout(test_time, batch_load_test()).await

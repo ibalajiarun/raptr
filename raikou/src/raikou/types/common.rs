@@ -10,6 +10,7 @@ use crate::{
     },
 };
 use anyhow::Context;
+use aptos_bitvec::BitVec;
 use aptos_consensus_types::{proof_of_store::ProofCache, round_timeout::RoundTimeoutReason};
 use aptos_crypto::{bls12381::Signature, hash::CryptoHash, HashValue};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
@@ -195,6 +196,7 @@ pub struct QC {
     pub block_digest: HashValue,
     pub vote_prefixes: PrefixSet,
     pub tagged_multi_signature: Option<Signature>, // `None` only for the genesis QC.
+    pub missing_authors: Option<BitVec>,
 }
 
 impl Debug for QC {
@@ -214,6 +216,7 @@ impl QC {
             block_digest: HashValue::zero(),
             vote_prefixes: PrefixSet::empty(),
             tagged_multi_signature: None,
+            missing_authors: None,
         }
     }
 

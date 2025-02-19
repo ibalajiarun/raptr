@@ -56,7 +56,7 @@ pub trait TPayloadManager: Send + Sync {
 
     /// Returns the number of optimistic sub-blocks that are fully available locally.
     /// The caller guarantees that the result is at least `cached_value`.
-    fn available_prefix(&self, payload: &RaikouPayload, cached_value: usize) -> usize {
+    fn available_prefix(&self, payload: &RaikouPayload, cached_value: usize) -> (usize, BitVec) {
         unimplemented!()
     }
 
@@ -433,20 +433,27 @@ impl TPayloadManager for QuorumStorePayloadManager {
         }
     }
 
-    fn available_prefix(&self, payload: &RaikouPayload, cached_value: usize) -> usize {
+    fn available_prefix(&self, payload: &RaikouPayload, cached_value: usize) -> (usize, BitVec) {
         let mut prefix = cached_value;
+        let mut missing_authors = BitVec::with_num_bits(self.ordered_authors.len() as u16);
         while prefix < payload.sub_blocks().len() {
             let sub_block = &payload.sub_blocks()[prefix];
-            if !sub_block
-                .batch_summary
-                .iter()
-                .all(|batch| self.batch_reader.exists(&batch.digest).is_some())
-            {
-                break;
+            let mut all_exists = true;
+            for batch in sub_block.batch_summary.iter() {
+                if self.batch_reader.exists(&batch.digest).is_none() {
+                    let index = *self
+                        .address_to_validator_index
+                        .get(&batch.author())
+                        .expect("Payload author should have been verified");
+                    missing_authors.set(index as u16);
+                    all_exists = false;
+                }
             }
-            prefix += 1;
+            if all_exists {
+                prefix += 1;
+            }
         }
-        prefix
+        (prefix, missing_authors)
     }
 
     async fn wait_for_payload(

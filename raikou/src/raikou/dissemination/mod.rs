@@ -10,6 +10,7 @@ use crate::{
     raikou::types::*,
 };
 use aptos_bitvec::BitVec;
+use aptos_consensus_types::common::Author;
 use std::{any::Any, collections::HashSet, fmt::Debug, future::Future};
 use tokio::time::Instant;
 
@@ -75,13 +76,14 @@ pub trait DisseminationLayer: Send + Sync + 'static {
         &self,
         round: Round,
         exclude: HashSet<BatchInfo>,
+        exclude_authors: Option<BitVec>,
     ) -> impl Future<Output = Payload> + Send;
 
     fn available_prefix(
         &self,
         payload: &Payload,
         cached_value: Prefix,
-    ) -> impl Future<Output = Prefix> + Send;
+    ) -> impl Future<Output = (Prefix, BitVec)> + Send;
 
     fn notify_commit(&self, payloads: Vec<Payload>) -> impl Future<Output = ()> + Send;
 

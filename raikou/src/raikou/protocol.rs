@@ -47,7 +47,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt::{Debug, Display, Formatter},
     num::NonZeroU8,
-    ops::Deref,
+    ops::{BitOr, Deref},
     sync::{Arc, Mutex},
     task::ready,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -58,7 +58,7 @@ use tokio::time::Instant;
 pub enum Message {
     // Consensus
     Propose(Block),
-    QcVote(Round, Prefix, BlockHash, Signature),
+    QcVote(Round, Prefix, BlockHash, Signature, BitVec),
     CcVote(QC, Signature),
     TcVote(Round, QC, Signature, RoundTimeoutReason),
     AdvanceRound(Round, RoundEntryReason),
@@ -70,7 +70,7 @@ impl Debug for Message {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Message::Propose(block) => write!(f, "Propose({})", block.round()),
-            Message::QcVote(round, _, _, _) => write!(f, "QcVote({})", round),
+            Message::QcVote(round, _, _, _, _) => write!(f, "QcVote({})", round),
             Message::CcVote(qc, _) => {
                 write!(f, "CcVote({})", qc.round)
             },
@@ -122,7 +122,7 @@ impl<S: LeaderSchedule> MessageVerifier for Verifier<S> {
                     .verify(self)
                     .context("Error verifying the block in Propose message")
             }),
-            Message::QcVote(round, prefix, block_digest, signature) => {
+            Message::QcVote(round, prefix, block_digest, signature, _) => {
                 monitor!("verify_qcvote", {
                     if *prefix > N_SUB_BLOCKS {
                         return Err(anyhow::anyhow!(
@@ -306,8 +306,10 @@ pub struct RaikouNode<S, DL> {
     leader_proposal: BTreeMap<Round, BlockHash>,
     blocks: BTreeMap<BlockHash, Block>,
     available_prefix_cache: SubBlockId,
-    qc_votes:
-        DefaultBTreeMap<Round, DefaultBTreeMap<BlockHash, BTreeMap<NodeId, (Prefix, Signature)>>>,
+    qc_votes: DefaultBTreeMap<
+        Round,
+        DefaultBTreeMap<BlockHash, BTreeMap<NodeId, (Prefix, Signature, BitVec)>>,
+    >,
     received_cc_vote: DefaultBTreeMap<Round, BTreeSet<NodeId>>,
     cc_votes: DefaultBTreeMap<Round, KthMaxMap<(QC, NodeId), Signature>>,
     tc_votes: DefaultBTreeMap<Round, BTreeMap<NodeId, (QC, Signature, RoundTimeoutReason)>>,
@@ -564,7 +566,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         }
     }
 
-    async fn available_prefix(&mut self) -> Prefix {
+    async fn available_prefix(&mut self) -> (Prefix, BitVec) {
         assert!(self.leader_proposal.contains_key(&self.r_cur));
 
         let block_digest = &self.leader_proposal[&self.r_cur];
@@ -574,12 +576,14 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             self.available_prefix_cache = (self.r_cur, 0).into();
         }
 
-        self.available_prefix_cache.prefix = self
+        let (prefix, missing_authors) = self
             .dissemination
             .available_prefix(&block.payload(), self.available_prefix_cache.prefix)
             .await;
 
-        self.available_prefix_cache.prefix
+        self.available_prefix_cache.prefix = prefix;
+
+        (prefix, missing_authors)
     }
 
     async fn commit_qc(&mut self, qc: QC, commit_reason: CommitReason) {
@@ -843,6 +847,19 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             })
             .unwrap_or(RoundTimeoutReason::Unknown)
     }
+
+    fn aggregate_qc_missing_authors<'a>(
+        &self,
+        missing_authors_iter: impl Iterator<Item = &'a BitVec>,
+    ) -> BitVec {
+        let mut agg_missing_authors = BitVec::with_num_bits(self.config.n_nodes as u16);
+
+        for missing_authors in missing_authors_iter {
+            agg_missing_authors = agg_missing_authors.bitor(missing_authors);
+        }
+
+        agg_missing_authors
+    }
 }
 
 pub fn duration_since_epoch() -> Duration {
@@ -903,9 +920,12 @@ where
 
                 let parent_qc = self.qc_high.clone();
 
+                let missing_authors = parent_qc.missing_authors.clone();
+
                 let payload = self.dissemination.prepare_block(
                     round,
                     self.uncommitted_batches(&parent_qc),
+                   missing_authors,
                 ).await;
 
                 let block_data = BlockData {
@@ -999,7 +1019,7 @@ where
 
         upon timer [TimerEvent::QcVote(round)] {
             if round == self.r_cur && self.last_qc_vote.round < round && round > self.r_timeout {
-                let prefix = self.available_prefix().await;
+                let (prefix, missing_authors) = self.available_prefix().await;
                 let block_digest = self.leader_proposal[&round].clone();
 
                 self.log_detail(format!(
@@ -1025,7 +1045,7 @@ where
                     observe_block(block.data.timestamp_usecs, "TimerQCVote");
                 }
 
-                ctx.multicast(Message::QcVote(round, prefix, block_digest, signature)).await;
+                ctx.multicast(Message::QcVote(round, prefix, block_digest, signature, missing_authors)).await;
             }
         };
 
@@ -1058,7 +1078,9 @@ where
                         observe_block(block.data.timestamp_usecs, "FullBlockQCVote");
                     }
 
-                    ctx.multicast(Message::QcVote(round, prefix, block_digest, signature)).await;
+                    let missing_authors = BitVec::with_num_bits(self.config.n_nodes as u16);
+
+                    ctx.multicast(Message::QcVote(round, prefix, block_digest, signature, missing_authors)).await;
                 }
             };
         };
@@ -1068,9 +1090,9 @@ where
         // 1. When it will be the first QC observed by the node in this round;
         // 2. When it will be the first full-prefix QC observed by the node in this round.
 
-        upon receive [Message::QcVote(round, prefix, block_digest, signature)] from node [p] {
+        upon receive [Message::QcVote(round, prefix, block_digest, signature, missing_authors)] from node [p] {
             if round >= self.r_cur {
-                self.qc_votes[round][block_digest.clone()].insert(p, (prefix, signature));
+                self.qc_votes[round][block_digest.clone()].insert(p, (prefix, signature, missing_authors));
                 let votes = &self.qc_votes[&round][&block_digest];
 
                 // A node forms a QC when it has received a quorum of votes
@@ -1078,7 +1100,7 @@ where
                 // 1. the node has not yet received or formed any QC for this round; or
                 // 2. it can form a full-prefix QC.
                 if votes.len() >= self.quorum() {
-                    let n_full_prefix_votes = votes.values().filter(|&&(vote, _)| vote == N_SUB_BLOCKS).count();
+                    let n_full_prefix_votes = votes.values().filter(|&&(vote, _, _)| vote == N_SUB_BLOCKS).count();
                     let cond_1 = self.qc_high.round < round;
                     let cond_2 = self.qc_high.sub_block_id() < (round, N_SUB_BLOCKS).into()
                         && n_full_prefix_votes >= self.config.storage_requirement;
@@ -1087,7 +1109,7 @@ where
                         // Take the quorum of the largest-prefix votes.
                         let prefixes = votes
                             .iter()
-                            .map(|(&node, &(prefix, _))| (node, prefix))
+                            .map(|(&node, &(prefix, _, _))| (node, prefix))
                             .sorted_by_key(|(_, prefix)| std::cmp::Reverse(*prefix))
                             .take(self.quorum())
                             .collect_vec();
@@ -1104,14 +1126,14 @@ where
 
                         let partial_signatures = votes
                             .iter()
-                            .map(|(_, (_, signature))| signature.clone());
+                            .map(|(_, (_, signature, _))| signature.clone());
 
                         let tagged_multi_signature =
                             self.sig_verifier.aggregate_signatures(partial_signatures).unwrap();
 
                         let vote_prefixes = votes
                             .iter()
-                            .map(|(node_id, (prefix, _signature))| (*node_id, *prefix))
+                            .map(|(node_id, (prefix, _signature, _))| (*node_id, *prefix))
                             .collect();
 
                         self.log_detail(format!(
@@ -1121,12 +1143,15 @@ where
                             N_SUB_BLOCKS,
                         ));
 
+                        let missing_authors = self.aggregate_qc_missing_authors(votes.iter().map(|(_, (_, _, missing))| missing));
+
                         let qc = QC {
                             round,
                             prefix: certified_prefix,
                             block_digest,
                             vote_prefixes,
                             tagged_multi_signature: Some(tagged_multi_signature),
+                            missing_authors: Some(missing_authors),
                         };
 
                         self.on_new_qc(qc, ctx).await;

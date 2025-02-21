@@ -16,8 +16,8 @@ use aptos_metrics_core::{
     exponential_buckets, op_counters::DurationHistogram, register_avg_counter, register_counter,
     register_gauge, register_gauge_vec, register_histogram, register_histogram_vec,
     register_int_counter, register_int_counter_vec, register_int_gauge, register_int_gauge_vec,
-    Counter, Gauge, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge,
-    IntGaugeVec,
+    Counter, Gauge, GaugeVec, Histogram, HistogramTimer, HistogramVec, IntCounter, IntCounterVec,
+    IntGauge, IntGaugeVec,
 };
 use aptos_types::transaction::TransactionStatus;
 use move_core_types::vm_status::DiscardedVMStatus;
@@ -1367,4 +1367,20 @@ pub static OPTQS_LAST_CONSECUTIVE_SUCCESS_COUNT: Lazy<Histogram> = Lazy::new(|| 
         "aptos_optqs_last_consecutive_successes",
         "The number of last consecutive successes capped at window length",
     )
+});
+
+pub static RAIKOU_COMMIT_NOTIFY_TO_MEMPOOL_NOTIFY: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "raikou_commit_notify_to_mempool_notify_latency",
+        "Commit to mempool notify latency",
+    )
+    .unwrap()
+});
+
+pub static RAIKOU_COMMIT_NOTIFY_WAIT_PAYLOAD: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "raikou_commit_notify_wait_payload",
+        "Commit to mempool notify latency",
+    )
+    .unwrap()
 });

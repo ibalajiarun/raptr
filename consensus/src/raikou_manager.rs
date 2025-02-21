@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
+    counters::{RAIKOU_COMMIT_NOTIFY_TO_MEMPOOL_NOTIFY, RAIKOU_COMMIT_NOTIFY_WAIT_PAYLOAD},
     liveness::proposal_status_tracker::{
         ExponentialWindowFailureTracker, LockedExponentialWindowFailureTracker,
         OptQSPullParamsProvider, TOptQSPullParamsProvider,
@@ -1001,6 +1002,9 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
         let state_sync_notifier = self.state_sync_notifier.clone();
 
         tokio::spawn(async move {
+            let _timer = RAIKOU_COMMIT_NOTIFY_TO_MEMPOOL_NOTIFY.start_timer();
+            let _timer1 = RAIKOU_COMMIT_NOTIFY_WAIT_PAYLOAD.start_timer();
+
             let payloads: Vec<Payload> =
                 payloads.into_iter().map(|payload| payload.inner).collect();
 
@@ -1011,27 +1015,29 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
                     .observe(payload.as_raikou_payload().num_txns() as f64);
                 payload_manager.prefetch_payload_data(payload, 0);
             }
-            payload_manager.notify_commit(
-                aptos_infallible::duration_since_epoch()
-                    .saturating_sub(Duration::from_secs(30))
-                    .as_micros() as u64,
-                payloads.clone(),
-            );
 
-            for payload in payloads {
-                while let Err(e) = payload_manager
-                    .wait_for_payload(&payload, None, 0, Duration::from_secs(1), true)
-                    .await
-                {
-                    error!("error {:?}", e);
-                }
+            let mut waiters = Vec::with_capacity(payloads.len());
+            for payload in &payloads {
+                let payload_manager = payload_manager.clone();
+                waiters.push(async move {
+                    while let Err(e) = payload_manager
+                        .wait_for_payload(&payload, None, 0, Duration::from_secs(1), true)
+                        .await
+                    {
+                        error!("error {:?}", e);
+                    }
+                })
+            }
+            futures::future::join_all(waiters).await;
+            drop(_timer1);
 
+            for payload in &payloads {
                 let block = Block::new_for_dag(
                     0,
                     0,
                     0,
                     Vec::new(),
-                    payload,
+                    payload.clone(),
                     PeerId::ZERO,
                     Vec::new(),
                     HashValue::zero(),
@@ -1050,6 +1056,13 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
                     Err(_e) => unreachable!("Failed to get transactions for block {:?} even after waiting for the payload", block),
                 }
             }
+
+            payload_manager.notify_commit(
+                aptos_infallible::duration_since_epoch()
+                    .saturating_sub(Duration::from_secs(30))
+                    .as_micros() as u64,
+                payloads,
+            );
         });
     }
 

@@ -65,6 +65,7 @@ use aptos_vm_genesis::{generate_genesis_change_set_for_testing_with_count, Genes
 use aptos_vm_logging::log_schema::AdapterLogSchema;
 use aptos_vm_types::{
     module_and_script_storage::{module_storage::AptosModuleStorage, AsAptosCodeStorage},
+    resolver::NoopBlockSynchronizationKillSwitch,
     storage::change_set_configs::ChangeSetConfigs,
 };
 use bytes::Bytes;
@@ -74,6 +75,7 @@ use move_core_types::{
     identifier::Identifier,
     language_storage::{ModuleId, StructTag, TypeTag},
     move_resource::{MoveResource, MoveStructType},
+    value::MoveValue,
 };
 use move_vm_runtime::{
     module_traversal::{TraversalContext, TraversalStorage},
@@ -1042,13 +1044,23 @@ impl FakeExecutor {
             let mut arg = args.clone();
             match &dynamic_args {
                 ExecFuncTimerDynamicArgs::DistinctSigners => {
-                    arg.insert(0, bcs::to_bytes(&extra_accounts.pop().unwrap()).unwrap());
+                    arg.insert(
+                        0,
+                        MoveValue::Signer(extra_accounts.pop().unwrap())
+                            .simple_serialize()
+                            .unwrap(),
+                    );
                 },
                 ExecFuncTimerDynamicArgs::DistinctSignersAndFixed(signers) => {
                     for signer in signers.iter().rev() {
-                        arg.insert(0, bcs::to_bytes(&signer).unwrap());
+                        arg.insert(0, MoveValue::Signer(*signer).simple_serialize().unwrap());
                     }
-                    arg.insert(0, bcs::to_bytes(&extra_accounts.pop().unwrap()).unwrap());
+                    arg.insert(
+                        0,
+                        MoveValue::Signer(extra_accounts.pop().unwrap())
+                            .simple_serialize()
+                            .unwrap(),
+                    );
                 },
                 _ => {},
             }
@@ -1061,6 +1073,7 @@ impl FakeExecutor {
                         env.storage_gas_params().as_ref().unwrap().clone(),
                         false,
                         1_000_000_000_000_000.into(),
+                        &NoopBlockSynchronizationKillSwitch {},
                     )),
                     None,
                 ),
@@ -1171,6 +1184,7 @@ impl FakeExecutor {
                         env.storage_gas_params().as_ref().unwrap().clone(),
                         false,
                         10_000_000_000_000,
+                        &NoopBlockSynchronizationKillSwitch {},
                     ),
                     shared_buffer: Arc::clone(&a1),
                 }),

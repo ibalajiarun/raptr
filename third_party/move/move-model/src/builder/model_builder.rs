@@ -21,9 +21,9 @@ use crate::{
 };
 use codespan_reporting::diagnostic::Severity;
 use itertools::Itertools;
-use move_binary_format::file_format::{AbilitySet, Visibility};
+use move_binary_format::file_format::Visibility;
 use move_compiler::{expansion::ast as EA, parser::ast as PA, shared::NumericalAddress};
-use move_core_types::account_address::AccountAddress;
+use move_core_types::{ability::AbilitySet, account_address::AccountAddress};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A builder is used to enter a sequence of modules in acyclic dependency order into the model. The
@@ -490,7 +490,10 @@ impl<'env> ModelBuilder<'env> {
         let target_modules = self
             .env
             .get_modules()
-            .filter(|module_env| module_env.is_primary_target() && !module_env.is_script_module())
+            .filter(|module_env| {
+                (module_env.is_primary_target() || module_env.is_target())
+                    && !module_env.is_script_module()
+            })
             .map(|module_env| module_env.get_id())
             .collect_vec();
         for cur_mod in target_modules {

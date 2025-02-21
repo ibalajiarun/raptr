@@ -489,7 +489,7 @@ impl RaikouManager {
             module_id: module_network.module_id(),
             state_sync_notifier,
             optqs_payload_param_provider,
-            index_to_address: index_to_address.clone(),
+            index_to_address: Arc::new(index_to_address.clone()),
         };
 
         tokio::spawn(async move {
@@ -502,16 +502,21 @@ impl RaikouManager {
                         .downcast::<dissemination::ProposalReceived>()
                         .ok()
                         .unwrap();
-                    let dissemination::ProposalReceived { round, payload, .. } = *event;
+                    let dissemination::ProposalReceived {
+                        leader,
+                        round,
+                        payload,
+                        ..
+                    } = *event;
 
-                    payload_manager.prefetch_payload_data(
-                        &payload.inner,
-                        aptos_infallible::duration_since_epoch().as_micros() as u64,
-                    );
+                    let block_author = index_to_address[&payload.author()];
+
+                    payload_manager.prefetch_payload_data(&payload.inner, block_author, 0);
+
+                    let block_author = Some(block_author);
 
                     let module_network_sender = module_network.new_sender();
                     let payload_manager = payload_manager.clone();
-                    let block_author = Some(index_to_address[&payload.author()]);
                     tokio::spawn(async move {
                         let (prefix, _) =
                             payload_manager.available_prefix(&payload.inner.as_raikou_payload(), 0);
@@ -925,7 +930,7 @@ struct RaikouQSDisseminationLayer {
     module_id: ModuleId,
     state_sync_notifier: Arc<dyn ConsensusNotificationSender>,
     optqs_payload_param_provider: Arc<dyn TOptQSPullParamsProvider>,
-    index_to_address: HashMap<usize, Author>,
+    index_to_address: Arc<HashMap<usize, Author>>,
 }
 
 #[cfg(any(feature = "force-aptos-types", not(feature = "sim-types")))]
@@ -992,36 +997,36 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
         cached_value: Prefix,
     ) -> (Prefix, BitVec) {
         self.payload_manager
-            .prefetch_payload_data(&payload.inner, 0);
-        self.payload_manager
             .available_prefix(payload.inner.as_raikou_payload(), cached_value)
     }
 
-    async fn notify_commit(&self, payloads: Vec<raikou_types::Payload>) {
+    async fn notify_commit(&self, payloads: Vec<(raikou_types::Payload, NodeId, BitVec)>) {
         let payload_manager = self.payload_manager.clone();
         let state_sync_notifier = self.state_sync_notifier.clone();
-
+        let index_to_address = self.index_to_address.clone();
         tokio::spawn(async move {
             let _timer = RAIKOU_COMMIT_NOTIFY_TO_MEMPOOL_NOTIFY.start_timer();
             let _timer1 = RAIKOU_COMMIT_NOTIFY_WAIT_PAYLOAD.start_timer();
 
-            let payloads: Vec<Payload> =
-                payloads.into_iter().map(|payload| payload.inner).collect();
+            let payloads: Vec<_> = payloads
+                .into_iter()
+                .map(|(payload, author, signers)| (payload.inner, author, signers))
+                .collect();
 
-            for payload in &payloads {
+            for (payload, _, _) in &payloads {
                 quorum_store::counters::NUM_BATCH_PER_BLOCK
                     .observe(payload.as_raikou_payload().num_batches() as f64);
                 quorum_store::counters::NUM_TXNS_PER_BLOCK
                     .observe(payload.as_raikou_payload().num_txns() as f64);
-                payload_manager.prefetch_payload_data(payload, 0);
             }
 
             let mut waiters = Vec::with_capacity(payloads.len());
-            for payload in &payloads {
+            for (payload, author, signers) in &payloads {
                 let payload_manager = payload_manager.clone();
+                let author = *index_to_address.get(&author).unwrap();
                 waiters.push(async move {
                     while let Err(e) = payload_manager
-                        .wait_for_payload(&payload, None, 0, Duration::from_secs(1), true)
+                        .wait_for_payload(&payload, Some(author), 0, Duration::from_secs(1), true)
                         .await
                     {
                         error!("error {:?}", e);
@@ -1031,7 +1036,7 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
             futures::future::join_all(waiters).await;
             drop(_timer1);
 
-            for payload in &payloads {
+            for (payload, _, block_voters) in &payloads {
                 let block = Block::new_for_dag(
                     0,
                     0,
@@ -1045,7 +1050,7 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
                     Vec::new(),
                 );
 
-                match payload_manager.get_transactions(&block).await {
+                match payload_manager.get_transactions(&block, Some(block_voters.clone())).await {
                     Ok((txns, _)) => {
                         let txns = txns.into_iter().map(Transaction::UserTransaction).collect();
                         state_sync_notifier
@@ -1057,6 +1062,10 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
                 }
             }
 
+            let payloads = payloads
+                .into_iter()
+                .map(|(payload, _, _)| payload)
+                .collect();
             payload_manager.notify_commit(
                 aptos_infallible::duration_since_epoch()
                     .saturating_sub(Duration::from_secs(30))

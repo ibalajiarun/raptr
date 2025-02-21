@@ -10,14 +10,15 @@ use move_binary_format::{
     binary_views::BinaryIndexedView,
     errors::{Location, PartialVMError},
     file_format::{
-        Ability, AbilitySet, CompiledScript, FieldDefinition, SignatureToken,
-        StructDefinitionIndex, StructFieldInformation, StructHandleIndex,
+        CompiledScript, FieldDefinition, SignatureToken, StructDefinitionIndex,
+        StructFieldInformation, StructHandleIndex,
     },
     views::FunctionHandleView,
     CompiledModule,
 };
 use move_bytecode_utils::{compiled_module_viewer::CompiledModuleView, layout::TypeLayoutBuilder};
 use move_core_types::{
+    ability::{Ability, AbilitySet},
     account_address::AccountAddress,
     identifier::{IdentStr, Identifier},
     language_storage::{ModuleId, StructTag, TypeTag},
@@ -375,6 +376,10 @@ impl<V: CompiledModuleView> MoveValueAnnotator<V> {
             SignatureToken::Vector(ty) => {
                 FatType::Vector(Box::new(self.resolve_signature(module, ty, limit)?))
             },
+            SignatureToken::Function(..) => {
+                // TODO(#15664): implement
+                bail!("function types NYI by fat types")
+            },
             SignatureToken::Struct(idx) => {
                 FatType::Struct(Box::new(self.resolve_struct_handle(module, *idx, limit)?))
             },
@@ -437,6 +442,10 @@ impl<V: CompiledModuleView> MoveValueAnnotator<V> {
             TypeTag::U256 => FatType::U256,
             TypeTag::U128 => FatType::U128,
             TypeTag::Vector(ty) => FatType::Vector(Box::new(self.resolve_type_impl(ty, limit)?)),
+            TypeTag::Function(..) => {
+                // TODO(#15664) implement functions for fat types"
+                todo!("functions for fat types")
+            },
         })
     }
 
@@ -577,6 +586,10 @@ impl<V: CompiledModuleView> MoveValueAnnotator<V> {
             },
             (MoveValue::Struct(s), FatType::Struct(ty)) => {
                 AnnotatedMoveValue::Struct(self.annotate_struct(s, ty.as_ref(), limit)?)
+            },
+            (MoveValue::Closure(..), _) => {
+                // TODO(#15664) implement functions for annotated move values
+                todo!("functions not implemented")
             },
             (MoveValue::U8(_), _)
             | (MoveValue::U64(_), _)

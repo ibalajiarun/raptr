@@ -429,11 +429,11 @@ where
         available_prefix
     }
 
-    async fn notify_commit(&self, payloads: Vec<Payload>) {
+    async fn notify_commit(&self, payloads: Vec<(Payload, Author, BitVec)>) {
         let mut inner = self.inner.lock().await;
         let now = Instant::now();
 
-        for payload in &payloads {
+        for (payload, _, _) in &payloads {
             for batch in payload.all() {
                 if inner.committed_batches.contains(&batch.digest) {
                     // NB: This may happen because de-duplication is best-effort:

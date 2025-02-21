@@ -591,7 +591,11 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         self.dissemination.notify_commit(payloads).await;
     }
 
-    fn commit_qc_impl(&mut self, qc: QC, commit_reason: CommitReason) -> Vec<Payload> {
+    fn commit_qc_impl(
+        &mut self,
+        qc: QC,
+        commit_reason: CommitReason,
+    ) -> Vec<(Payload, NodeId, BitVec)> {
         if qc <= self.committed_qc {
             return vec![];
         }
@@ -611,6 +615,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
 
         // Then, commit the transactions of this block.
         let block = &self.blocks[&qc.block_digest];
+        let block_signers: BitVec = qc.vote_prefixes.signers().map(|idx| idx as u8).collect();
 
         if qc.round == self.committed_qc.round {
             // Extending the prefix of an already committed block.
@@ -627,11 +632,13 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                 commit_reason,
             ));
 
-            res.push(
+            res.push((
                 block
                     .payload()
                     .take_sub_blocks(self.committed_qc.prefix..qc.prefix),
-            );
+                block.author(),
+                block_signers,
+            ));
 
             // Record the metrics
             let now = Instant::now();
@@ -667,7 +674,11 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                 commit_reason,
             ));
 
-            res.push(block.payload().with_prefix(qc.prefix));
+            res.push((
+                block.payload().with_prefix(qc.prefix),
+                block.author(),
+                block_signers,
+            ));
 
             RAIKOU_BLOCK_COMMIT_RATE.inc();
 

@@ -1,7 +1,10 @@
 // Copyright © Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::module_and_script_storage::module_storage::AptosModuleStorage;
+use crate::{
+    module_and_script_storage::module_storage::AptosModuleStorage,
+    resolver::BlockSynchronizationKillSwitch,
+};
 use ambassador::Delegate;
 use aptos_types::{
     error::PanicError,
@@ -15,17 +18,20 @@ use move_binary_format::{
     CompiledModule,
 };
 use move_core_types::{
-    account_address::AccountAddress, identifier::IdentStr, language_storage::ModuleId,
+    account_address::AccountAddress,
+    identifier::IdentStr,
+    language_storage::{ModuleId, TypeTag},
     metadata::Metadata,
 };
 use move_vm_runtime::{
     ambassador_impl_CodeStorage, ambassador_impl_ModuleStorage,
     ambassador_impl_WithRuntimeEnvironment, AsUnsyncCodeStorage, BorrowedOrOwned, CodeStorage,
-    Module, ModuleStorage, RuntimeEnvironment, Script, UnsyncCodeStorage, UnsyncModuleStorage,
-    WithRuntimeEnvironment,
+    Function, Module, ModuleStorage, RuntimeEnvironment, Script, UnsyncCodeStorage,
+    UnsyncModuleStorage, WithRuntimeEnvironment,
 };
 use move_vm_types::{
     code::{ModuleBytesStorage, ModuleCode},
+    loaded_data::runtime_types::{StructType, Type},
     module_storage_error,
 };
 use std::{ops::Deref, sync::Arc};
@@ -160,6 +166,14 @@ impl<'s, S: StateView, E: WithRuntimeEnvironment> AptosModuleStorage
             .get_state_value(&state_key)
             .map_err(|err| module_storage_error!(address, module_name, err).to_partial())?
             .map(|state_value| state_value.into_metadata()))
+    }
+}
+
+impl<'s, S: StateView, E: WithRuntimeEnvironment> BlockSynchronizationKillSwitch
+    for AptosCodeStorageAdapter<'s, S, E>
+{
+    fn interrupt_requested(&self) -> bool {
+        false
     }
 }
 

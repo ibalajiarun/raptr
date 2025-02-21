@@ -9,7 +9,7 @@ use crate::{
         layout::{SourcePackageLayout, REFERENCE_TEMPLATE_FILENAME},
         parsed_manifest::{FileName, PackageDigest, PackageName},
     },
-    Architecture, BuildConfig, CompilerConfig, CompilerVersion,
+    BuildConfig, CompilerConfig, CompilerVersion,
 };
 use anyhow::{bail, ensure, Context, Result};
 use colored::Colorize;
@@ -22,9 +22,11 @@ use move_command_line_common::files::{
     extension_equals, find_filenames, MOVE_COMPILED_EXTENSION, MOVE_EXTENSION, SOURCE_MAP_EXTENSION,
 };
 use move_compiler::{
-    attr_derivation,
     compiled_unit::{self, CompiledUnit, NamedCompiledModule, NamedCompiledScript},
-    shared::{Flags, NamedAddressMap, NumericalAddress, PackagePaths},
+    shared::{
+        known_attributes::{AttributeKind, KnownAttribute},
+        Flags, NamedAddressMap, NumericalAddress, PackagePaths,
+    },
     Compiler,
 };
 use move_compiler_v2::{external_checks::ExternalChecks, Experiment};
@@ -83,7 +85,7 @@ pub struct CompiledPackage {
     /// The output compiled bytecode for dependencies
     pub deps_compiled_units: Vec<(PackageName, CompiledUnitWithSource)>,
     /// Bytecode dependencies of this compiled package
-    pub bytecode_deps: BTreeMap<PackageName, NumericalAddress>,
+    pub bytecode_deps: BTreeMap<PackageName, CompiledModule>,
 
     // Optional artifacts from compilation
     //
@@ -601,18 +603,7 @@ impl CompiledPackage {
             .compiler_config
             .known_attributes
             .clone();
-        match &resolution_graph.build_options.architecture {
-            Some(x) => {
-                match x {
-                    Architecture::Move => (),
-                    Architecture::Ethereum => {
-                        flags = flags.set_flavor("evm");
-                    },
-                };
-            },
-            None => (),
-        };
-        attr_derivation::add_attributes_for_flavor(&flags, &mut known_attributes);
+        KnownAttribute::add_attribute_names(&mut known_attributes);
 
         // Partition deps_package according whether src is available
         let (src_deps, bytecode_deps): (Vec<_>, Vec<_>) = deps_package_paths
@@ -809,8 +800,7 @@ impl CompiledPackage {
                 .flat_map(|package| {
                     let name = package.name.unwrap();
                     package.paths.iter().map(move |pkg_path| {
-                        get_addr_from_module_in_package(name, pkg_path.as_str())
-                            .map(|addr| (name, addr))
+                        get_module_in_package(name, pkg_path.as_str()).map(|module| (name, module))
                     })
                 })
                 .try_collect()?,
@@ -1137,8 +1127,9 @@ pub fn unimplemented_v2_driver(_options: move_compiler_v2::Options) -> CompilerD
 
 /// Runs the v2 compiler, exiting the process if any errors occurred.
 pub fn build_and_report_v2_driver(options: move_compiler_v2::Options) -> CompilerDriverResult {
-    let mut writer = StandardStream::stderr(ColorChoice::Auto);
-    match move_compiler_v2::run_move_compiler(&mut writer, options) {
+    let mut stderr = StandardStream::stderr(ColorChoice::Auto);
+    let mut emitter = options.error_emitter(&mut stderr);
+    match move_compiler_v2::run_move_compiler(emitter.as_mut(), options) {
         Ok((env, units)) => Ok((
             move_compiler_v2::make_files_source_text(&env),
             units,
@@ -1155,8 +1146,9 @@ pub fn build_and_report_v2_driver(options: move_compiler_v2::Options) -> Compile
 pub fn build_and_report_no_exit_v2_driver(
     options: move_compiler_v2::Options,
 ) -> CompilerDriverResult {
-    let mut writer = StandardStream::stderr(ColorChoice::Auto);
-    let (env, units) = move_compiler_v2::run_move_compiler(&mut writer, options)?;
+    let mut stderr = StandardStream::stderr(ColorChoice::Auto);
+    let mut emitter = options.error_emitter(&mut stderr);
+    let (env, units) = move_compiler_v2::run_move_compiler(emitter.as_mut(), options)?;
     Ok((
         move_compiler_v2::make_files_source_text(&env),
         units,
@@ -1164,8 +1156,8 @@ pub fn build_and_report_no_exit_v2_driver(
     ))
 }
 
-/// Returns the address of the module
-fn get_addr_from_module_in_package(pkg_name: Symbol, pkg_path: &str) -> Result<NumericalAddress> {
+/// Returns the deserialized module from the bytecode file
+fn get_module_in_package(pkg_name: Symbol, pkg_path: &str) -> Result<CompiledModule> {
     // Read the bytecode file
     let mut bytecode = Vec::new();
     std::fs::File::open(pkg_path)
@@ -1181,5 +1173,4 @@ fn get_addr_from_module_in_package(pkg_name: Symbol, pkg_path: &str) -> Result<N
                 pkg_name
             ))
         })
-        .map(|module| NumericalAddress::from_account_address(*module.self_addr()))
 }

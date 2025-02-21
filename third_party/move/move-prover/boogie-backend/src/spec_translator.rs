@@ -314,11 +314,27 @@ impl<'env> SpecTranslator<'env> {
             }
         };
         let type_info_params = if type_reflection {
+            let mut covered = BTreeSet::new();
             (0..fun.type_params.len())
                 .map(|i| {
+                    // Apply type instantiation if present
+                    let ty = self
+                        .type_inst
+                        .get(i)
+                        .cloned()
+                        .unwrap_or_else(|| Type::TypeParameter(i as u16));
+                    // There can be name clashes after instantiation. Parameters still need
+                    // to be there but all are instantiated with the same type. We escape
+                    // the redundant parameters.
+                    let prefix = if !covered.insert(ty.clone()) {
+                        format!("_{}_", i)
+                    } else {
+                        "".to_string()
+                    };
                     format!(
-                        "{}_info: $TypeParamInfo",
-                        boogie_type(self.env, &Type::TypeParameter(i as u16))
+                        "{}{}_info: $TypeParamInfo",
+                        prefix,
+                        boogie_type(self.env, &ty)
                     )
                 })
                 .collect_vec()
@@ -779,10 +795,6 @@ impl<'env> SpecTranslator<'env> {
                 let loc = self.env.get_node_loc(node_id);
                 self.error(&loc, &format!("tuple value not yet supported: {:#?}", val))
             },
-            Value::Function(_mid, _fid) => {
-                let loc = self.env.get_node_loc(node_id);
-                self.error(&loc, "Function values not yet supported") // TODO(LAMBDA)
-            },
         }
     }
 
@@ -1020,7 +1032,7 @@ impl<'env> SpecTranslator<'env> {
             | Operation::Deref
             | Operation::MoveTo
             | Operation::MoveFrom
-            | Operation::EarlyBind
+            | Operation::Closure(..)
             | Operation::Old => {
                 self.env.error(
                     &self.env.get_node_loc(node_id),
@@ -1154,13 +1166,9 @@ impl<'env> SpecTranslator<'env> {
             .env
             .spec_fun_uses_generic_type_reflection(&module_id.qualified_inst(fun_id, inst.clone()))
         {
-            for i in 0..fun_decl.type_params.len() {
+            for ty in inst {
                 maybe_comma();
-                emit!(
-                    self.writer,
-                    "{}_info",
-                    boogie_type(self.env, &Type::TypeParameter(i as u16))
-                )
+                emit!(self.writer, "{}_info", boogie_type(self.env, ty))
             }
         }
         // Add memory parameters.

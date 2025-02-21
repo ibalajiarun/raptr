@@ -76,7 +76,7 @@ pub use quorum_store::quorum_store_db::QUORUM_STORE_DB_NAME;
 pub use round_manager::round_manager_fuzzing;
 mod raikou_manager;
 
-struct IntGaugeGuard {
+pub struct IntGaugeGuard {
     gauge: IntGauge,
 }
 

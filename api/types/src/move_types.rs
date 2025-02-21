@@ -8,11 +8,10 @@ use aptos_resource_viewer::{AnnotatedMoveStruct, AnnotatedMoveValue};
 use aptos_types::{account_config::CORE_CODE_ADDRESS, event::EventKey, transaction::Module};
 use move_binary_format::{
     access::ModuleAccess,
-    file_format::{
-        Ability, AbilitySet, CompiledModule, CompiledScript, StructTypeParameter, Visibility,
-    },
+    file_format::{CompiledModule, CompiledScript, StructTypeParameter, Visibility},
 };
 use move_core_types::{
+    ability::{Ability, AbilitySet},
     account_address::AccountAddress,
     identifier::Identifier,
     language_storage::{ModuleId, StructTag, TypeTag},
@@ -682,6 +681,10 @@ impl From<TypeTag> for MoveType {
                 items: Box::new(MoveType::from(*v)),
             },
             TypeTag::Struct(v) => MoveType::Struct((*v).into()),
+            TypeTag::Function(..) => {
+                // TODO(#15664): support function values
+                MoveType::Unparsable("Function types are not supported".to_string())
+            },
         }
     }
 }
@@ -702,6 +705,10 @@ impl From<&TypeTag> for MoveType {
                 items: Box::new(MoveType::from(v.as_ref())),
             },
             TypeTag::Struct(v) => MoveType::Struct((&**v).into()),
+            TypeTag::Function(..) => {
+                // TODO(#15664): support function values
+                MoveType::Unparsable("Function types are not supported".to_string())
+            },
         }
     }
 }
@@ -1225,8 +1232,8 @@ pub fn verify_identifier(identifier: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use aptos_types::account_address::AccountAddress;
-    use move_binary_format::file_format::AbilitySet;
     use move_core_types::{
+        ability::AbilitySet,
         identifier::Identifier,
         language_storage::{StructTag, TypeTag},
     };

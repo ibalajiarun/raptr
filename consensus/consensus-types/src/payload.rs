@@ -409,6 +409,10 @@ impl CompressedPrefixSet {
     pub fn prefixes(&self) -> impl Iterator<Item = Prefix> + '_ {
         self.iter().map(|(_, prefix)| prefix)
     }
+
+    pub fn unzip(&self) -> (Vec<usize>, Vec<Prefix>) {
+        self.iter().unzip()
+    }
 }
 
 impl FromIterator<(usize, usize)> for CompressedPrefixSet {

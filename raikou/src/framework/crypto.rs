@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::framework::NodeId;
+use anyhow::ensure;
 use aptos_crypto::{
     bls12381::{self, PublicKey},
     hash::CryptoHash,
@@ -97,6 +98,10 @@ impl SignatureVerifier {
         }
     }
 
+    pub fn n_nodes(&self) -> usize {
+        self.inner.public_keys.len()
+    }
+
     /// Verify the correctness of a signature of a message by a known author.
     pub fn verify<T: Serialize + CryptoHash>(
         &self,
@@ -104,7 +109,29 @@ impl SignatureVerifier {
         message: &T,
         signature: &bls12381::Signature,
     ) -> anyhow::Result<()> {
+        ensure!(
+            author < self.inner.public_keys.len(),
+            "Invalid node index: {}",
+            author
+        );
         signature.verify(message, &self.inner.public_keys[author])
+    }
+
+    fn get_public_keys(
+        &self,
+        nodes: impl IntoIterator<Item = NodeId>,
+    ) -> anyhow::Result<Vec<&PublicKey>> {
+        nodes
+            .into_iter()
+            .map(|node| {
+                ensure!(
+                    node < self.inner.public_keys.len(),
+                    "Invalid node index: {}",
+                    node
+                );
+                Ok(&self.inner.public_keys[node])
+            })
+            .collect()
     }
 
     pub fn verify_aggregate_signatures<T: CryptoHash + Serialize>(
@@ -113,12 +140,7 @@ impl SignatureVerifier {
         messages: Vec<&T>,
         signature: &bls12381::Signature,
     ) -> anyhow::Result<()> {
-        let public_keys: Vec<_> = nodes
-            .into_iter()
-            .map(|node| &self.inner.public_keys[node])
-            .collect();
-
-        signature.verify_aggregate(&messages, &public_keys)
+        signature.verify_aggregate(&messages, &self.get_public_keys(nodes)?)
     }
 
     pub fn verify_multi_signature<T: CryptoHash + Serialize>(
@@ -127,13 +149,7 @@ impl SignatureVerifier {
         message: &T,
         multi_sig: &bls12381::Signature,
     ) -> anyhow::Result<()> {
-        let pub_keys: Vec<_> = nodes
-            .into_iter()
-            .map(|node| &self.inner.public_keys[node])
-            .collect();
-
-        let aggregated_key = PublicKey::aggregate(pub_keys)?;
-
+        let aggregated_key = PublicKey::aggregate(self.get_public_keys(nodes)?)?;
         multi_sig.verify(message, &aggregated_key)
     }
 
@@ -144,6 +160,16 @@ impl SignatureVerifier {
         tag: usize,
         signature: &bls12381::Signature,
     ) -> anyhow::Result<()> {
+        ensure!(
+            author < self.inner.tag_public_keys.len(),
+            "Invalid node index: {}",
+            author
+        );
+        ensure!(
+            tag < self.inner.tag_public_keys[author].len(),
+            "Invalid tag: {}",
+            tag
+        );
         signature.verify(message, &self.inner.tag_public_keys[author][tag])
     }
 
@@ -154,11 +180,23 @@ impl SignatureVerifier {
         tags: impl IntoIterator<Item = usize>,
         signature: &bls12381::Signature,
     ) -> anyhow::Result<()> {
-        let pub_keys: Vec<_> = nodes
+        let pub_keys = nodes
             .into_iter()
             .zip(tags.into_iter())
-            .map(|(node, tag)| &self.inner.tag_public_keys[node][tag])
-            .collect();
+            .map(|(node, tag)| {
+                ensure!(
+                    node < self.inner.tag_public_keys.len(),
+                    "Invalid node index: {}",
+                    node
+                );
+                ensure!(
+                    tag < self.inner.tag_public_keys[node].len(),
+                    "Invalid tag: {}",
+                    tag
+                );
+                Ok(&self.inner.tag_public_keys[node][tag])
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
 
         let aggregated_key = PublicKey::aggregate(pub_keys)?;
         signature.verify(message, &aggregated_key)
@@ -169,19 +207,27 @@ impl SignatureVerifier {
         &self,
         author: NodeId,
         tag: usize,
-    ) -> impl Iterator<Item = &PublicKey> {
-        self.inner.wendy_public_keys[author]
-            .iter()
-            .enumerate()
-            .map(
-                move |(bit, (key0, key1))| {
-                    if tag & (1 << bit) == 0 {
-                        key0
-                    } else {
-                        key1
-                    }
-                },
-            )
+    ) -> anyhow::Result<impl Iterator<Item = &PublicKey>> {
+        ensure!(
+            author < self.inner.wendy_public_keys.len(),
+            "Invalid node index: {}",
+            author
+        );
+        ensure!(
+            tag < (1 << self.inner.wendy_public_keys[author].len()),
+            "Invalid tag: {}",
+            tag
+        );
+
+        Ok(self.inner.wendy_public_keys[author].iter().enumerate().map(
+            move |(bit, (key0, key1))| {
+                if tag & (1 << bit) == 0 {
+                    key0
+                } else {
+                    key1
+                }
+            },
+        ))
     }
 
     #[cfg(feature = "wendy")]
@@ -192,7 +238,7 @@ impl SignatureVerifier {
         tag: usize,
         signature: &bls12381::Signature,
     ) -> anyhow::Result<()> {
-        let public_key = PublicKey::aggregate(self.get_wendy_public_keys(author, tag).collect())?;
+        let public_key = PublicKey::aggregate(self.get_wendy_public_keys(author, tag)?.collect())?;
         signature.verify(message, &public_key)
     }
 
@@ -204,11 +250,13 @@ impl SignatureVerifier {
         tags: impl IntoIterator<Item = usize>,
         signature: &bls12381::Signature,
     ) -> anyhow::Result<()> {
-        let pub_keys = nodes
+        let pub_key_iterators = nodes
             .into_iter()
             .zip(tags.into_iter())
-            .flat_map(|(node, tag)| self.get_wendy_public_keys(node, tag))
-            .collect();
+            .map(|(node, tag)| self.get_wendy_public_keys(node, tag))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        let pub_keys = pub_key_iterators.into_iter().flatten().collect::<Vec<_>>();
 
         let aggregated_key = PublicKey::aggregate(pub_keys)?;
         signature.verify(message, &aggregated_key)
@@ -219,7 +267,6 @@ impl SignatureVerifier {
         partial_signatures: impl IntoIterator<Item = bls12381::Signature>,
     ) -> anyhow::Result<bls12381::Signature> {
         let signatures = partial_signatures.into_iter().collect();
-
         bls12381::Signature::aggregate(signatures)
     }
 

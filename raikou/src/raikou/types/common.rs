@@ -15,7 +15,10 @@ use aptos_crypto::{bls12381::Signature, hash::CryptoHash, HashValue};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use std::fmt::{Debug, Display, Formatter};
+use std::{
+    fmt::{Debug, Display, Formatter},
+    sync::Arc,
+};
 
 pub type Txn = aptos_types::transaction::SignedTransaction;
 
@@ -192,102 +195,162 @@ impl From<(Round, Prefix)> for SubBlockId {
 
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
 pub struct QC {
-    pub round: Round,
-    pub block_digest: HashValue,
-    pub vote_prefixes: PrefixSet,
-    pub tagged_multi_signature: Option<Signature>, // `None` only for the genesis QC.
+    data: Arc<QcData>,
+}
 
-    pub missing_authors: Option<BitVec>,
+#[derive(CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
+struct QcData {
+    round: Round,
+    block_digest: HashValue,
+    vote_prefixes: PrefixSet,
+    tagged_multi_signature: Option<Signature>, // `None` only for the genesis QC.
+
+    missing_authors: Option<BitVec>,
 
     // Unlike in the pseudocode, for convenience, we include the prefix as part of the QC
     // and check it as part of the verification.
-    pub prefix: Prefix,
+    prefix: Prefix,
 }
 
 impl Debug for QC {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("QC")
-            .field("round", &self.round)
-            .field("prefix", &self.prefix)
+            .field("round", &self.round())
+            .field("prefix", &self.prefix())
             .finish()
     }
 }
 
 impl QC {
-    pub fn genesis() -> Self {
+    pub fn new(
+        round: Round,
+        block_digest: HashValue,
+        vote_prefixes: PrefixSet,
+        tagged_multi_signature: Signature,
+        missing_authors: BitVec,
+        storage_requirement: usize,
+    ) -> Self {
+        // `prefix` is the maximum number such that at least `storage_requirement` nodes
+        // have voted for a prefix of size `prefix` or larger.
+        let prefix = vote_prefixes
+            .prefixes()
+            .sorted()
+            .skip(storage_requirement - 1)
+            .next()
+            .unwrap();
+
         QC {
-            round: 0,
-            prefix: N_SUB_BLOCKS,
-            block_digest: HashValue::zero(),
-            vote_prefixes: PrefixSet::empty(),
-            tagged_multi_signature: None,
-            missing_authors: None,
+            data: Arc::new(QcData {
+                round,
+                block_digest,
+                vote_prefixes,
+                tagged_multi_signature: Some(tagged_multi_signature),
+                missing_authors: Some(missing_authors),
+                prefix,
+            }),
         }
     }
 
+    pub fn genesis() -> Self {
+        QC {
+            data: Arc::new(QcData {
+                round: 0,
+                block_digest: HashValue::zero(),
+                vote_prefixes: PrefixSet::empty(),
+                tagged_multi_signature: None,
+                missing_authors: None,
+                prefix: N_SUB_BLOCKS,
+            }),
+        }
+    }
+
+    pub fn round(&self) -> Round {
+        self.data.round
+    }
+
+    pub fn block_digest(&self) -> &HashValue {
+        &self.data.block_digest
+    }
+
+    pub fn vote_prefixes(&self) -> &PrefixSet {
+        &self.data.vote_prefixes
+    }
+
+    pub fn tagged_multi_signature(&self) -> &Option<Signature> {
+        &self.data.tagged_multi_signature
+    }
+
+    pub fn missing_authors(&self) -> &Option<BitVec> {
+        &self.data.missing_authors
+    }
+
+    pub fn prefix(&self) -> Prefix {
+        self.data.prefix
+    }
+
     pub fn signer_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
-        self.vote_prefixes.node_ids()
+        self.vote_prefixes().node_ids()
     }
 
     pub fn is_genesis(&self) -> bool {
-        self.round == 0
+        self.round() == 0
     }
 
     pub fn is_full(&self) -> bool {
-        self.prefix == N_SUB_BLOCKS
+        self.prefix() == N_SUB_BLOCKS
     }
 
     pub fn id(&self) -> SubBlockId {
-        (self.round, self.prefix).into()
+        (self.round(), self.prefix()).into()
     }
 
     fn verify_genesis(&self) -> anyhow::Result<()> {
-        ensure!(self.round == 0);
-        ensure!(self.prefix == N_SUB_BLOCKS);
-        ensure!(self.block_digest == HashValue::zero());
-        ensure!(self.vote_prefixes.is_empty());
-        ensure!(self.tagged_multi_signature.is_none());
-        ensure!(self.missing_authors.is_none());
+        ensure!(self.round() == 0);
+        ensure!(self.prefix() == N_SUB_BLOCKS);
+        ensure!(self.block_digest() == &HashValue::zero());
+        ensure!(self.vote_prefixes().is_empty());
+        ensure!(self.tagged_multi_signature().is_none());
+        ensure!(self.missing_authors().is_none());
 
         Ok(())
     }
 
     pub fn verify(&self, verifier: &protocol::Verifier) -> anyhow::Result<()> {
-        if self.round == 0 {
+        if self.round() == 0 {
             return self.verify_genesis().context("Invalid genesis QC");
         }
 
         ensure!(
-            self.tagged_multi_signature.is_some(),
+            self.tagged_multi_signature().is_some(),
             "Missing aggregated signature in non-genesis QC"
         );
 
-        let nodes = self.vote_prefixes.node_ids().collect_vec();
-        let tags = self.vote_prefixes.prefixes().collect_vec();
+        let nodes = self.vote_prefixes().node_ids().collect_vec();
+        let tags = self.vote_prefixes().prefixes().collect_vec();
         ensure!(
             nodes.len() >= verifier.config.quorum(),
             "Not enough signers"
         );
 
         let prefix = self
-            .vote_prefixes
+            .vote_prefixes()
             .prefixes()
             .sorted()
             .skip(verifier.config.storage_requirement - 1)
             .next()
             .unwrap();
-        ensure!(self.prefix == prefix, "Invalid prefix in QC");
+        ensure!(self.prefix() == prefix, "Invalid prefix in QC");
 
         let message = QcVoteSignatureCommonData {
-            round: self.round,
-            block_digest: self.block_digest,
+            round: self.round(),
+            block_digest: self.block_digest().clone(),
         };
 
         verifier.sig_verifier.verify_tagged_multi_signature(
             nodes,
             &message,
             tags,
-            self.tagged_multi_signature.as_ref().unwrap(),
+            self.tagged_multi_signature().as_ref().unwrap(),
         )
     }
 }
@@ -526,7 +589,7 @@ impl RoundEntryReason {
         match self {
             RoundEntryReason::ThisRoundQC(qc) => {
                 ensure!(
-                    qc.round == round,
+                    qc.round() == round,
                     "Invalid QC round in ThisRoundQC entry reason"
                 );
 
@@ -534,7 +597,7 @@ impl RoundEntryReason {
             },
             RoundEntryReason::FullPrefixQC(qc) => {
                 ensure!(
-                    qc.round == round - 1,
+                    qc.round() == round - 1,
                     "Invalid QC round in FullPrefixQC entry reason"
                 );
                 ensure!(
@@ -546,9 +609,12 @@ impl RoundEntryReason {
             },
             RoundEntryReason::CC(cc, qc) => {
                 ensure!(cc.round == round - 1, "Invalid CC round in CC entry reason");
-                ensure!(qc.round == round - 1, "Invalid QC round in CC entry reason");
                 ensure!(
-                    qc.prefix >= cc.extend_prefix,
+                    qc.round() == round - 1,
+                    "Invalid QC round in CC entry reason"
+                );
+                ensure!(
+                    qc.prefix() >= cc.extend_prefix,
                     "Invalid QC in CC entry reason"
                 );
 
@@ -561,7 +627,7 @@ impl RoundEntryReason {
                     "Invalid TC round in TC entry reason"
                 );
                 ensure!(qc.id() >= tc.extend_id(), "QC too low in TC entry reason");
-                ensure!(qc.round < round, "QC round too high in TC entry reason");
+                ensure!(qc.round() < round, "QC round too high in TC entry reason");
 
                 tc.verify(verifier).context("Error verifying the TC")?;
                 qc.verify(verifier).context("Error verifying the QC")?;

@@ -24,9 +24,9 @@ use crate::{
     },
 };
 use anyhow::Context;
+use aptos_bitvec::BitVec;
 use aptos_crypto::{bls12381::Signature, hash::CryptoHash, Genesis};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
-use bitvec::prelude::BitVec;
 use defaultmap::DefaultBTreeMap;
 use itertools::Itertools;
 use rand::seq::SliceRandom;
@@ -110,7 +110,7 @@ impl Batch {
 pub enum Message {
     Batch(Batch),
     AcVote(BatchId, BatchHash, Signature),
-    AvailabilityCert(AC),
+    ProofOfAvailability(PoA),
     Fetch(Vec<BatchHash>),
     FetchResp(Vec<Batch>),
     PenaltyTrackerReport(Round, PenaltyTrackerReports),
@@ -121,7 +121,7 @@ impl std::fmt::Debug for Message {
         match self {
             Message::Batch(batch) => write!(f, "Batch({})", batch.batch_id()),
             Message::AcVote(batch_id, _, _) => write!(f, "BatchStored({})", batch_id),
-            Message::AvailabilityCert(ac) => write!(f, "AvailabilityCert({})", ac.info.batch_id),
+            Message::ProofOfAvailability(ac) => write!(f, "AvailabilityCert({})", ac.info.batch_id),
             Message::Fetch(digests) => write!(f, "Fetch({} batches)", digests.len()),
             Message::FetchResp(batches) => write!(f, "FetchResp({} batches)", batches.len()),
             Message::PenaltyTrackerReport(round, reports) => {
@@ -150,12 +150,12 @@ impl MessageCertifier for Certifier {
             Message::AcVote(_batch_id, batch_digest, signature) => {
                 *signature = self
                     .signer
-                    .sign(&AcVoteSignatureData {
+                    .sign(&PoAVoteSignatureData {
                         batch_digest: batch_digest.clone(),
                     })
                     .unwrap();
             },
-            Message::AvailabilityCert(_) => {},
+            Message::ProofOfAvailability(_) => {},
             Message::Fetch(_) => {},
             Message::FetchResp(_) => {},
             Message::PenaltyTrackerReport(_, _) => {},
@@ -206,7 +206,7 @@ impl MessageVerifier for Verifier {
                     return Err(anyhow::anyhow!("Invalid batch digest in AcVote"));
                 }
 
-                let sig_data = AcVoteSignatureData {
+                let sig_data = PoAVoteSignatureData {
                     batch_digest: digest.clone(),
                 };
 
@@ -215,8 +215,8 @@ impl MessageVerifier for Verifier {
                     .context("Invalid signature in AcVote")
             },
 
-            Message::AvailabilityCert(ac) => ac
-                .verify(&self.sig_verifier, self.config.ac_quorum)
+            Message::ProofOfAvailability(poa) => poa
+                .verify(&self.sig_verifier, self.config.poa_quorum)
                 .context("Invalid AC"),
 
             Message::Fetch(_) => Ok(()),
@@ -258,9 +258,9 @@ impl BlockSizeLimit {
 
         let batch_size = bcs::to_bytes(&dummy_batch_info).unwrap().len();
 
-        let dummy_ac = AC {
+        let dummy_ac = PoA {
             info: dummy_batch_info,
-            signers: BitVec::repeat(true, n_nodes),
+            signers: BitVec::from(vec![true; n_nodes]),
             multi_signature: dummy_signature(),
         };
 
@@ -287,7 +287,7 @@ pub struct Config {
     pub module_id: ModuleId,
     pub n_nodes: usize,
     pub f: usize,
-    pub ac_quorum: usize,
+    pub poa_quorum: usize,
     pub delta: Duration,
     pub batch_interval: Duration,
     pub batch_fetch_interval: Duration,
@@ -362,10 +362,15 @@ where
         self.config.module_id
     }
 
-    async fn prepare_block(&self, round: Round, exclude: HashSet<BatchInfo>) -> Payload {
+    async fn prepare_block(
+        &self,
+        round: Round,
+        exclude: HashSet<BatchInfo>,
+        _missing_authors: Option<BitVec>,
+    ) -> Payload {
         let mut inner = self.inner.lock().await;
 
-        let mut acs: Vec<AC> = inner
+        let mut acs: Vec<PoA> = inner
             .uncommitted_acs
             .iter()
             .filter(|&(_batch_digest, ac)| !exclude.contains(ac.info()))
@@ -545,7 +550,7 @@ pub struct NativeDisseminationLayerProtocol<TI> {
     // Set of committed batches.
     committed_batches: BTreeSet<BatchHash>,
     // Set of known ACs that are not yet committed.
-    uncommitted_acs: BTreeMap<BatchHash, AC>,
+    uncommitted_acs: BTreeMap<BatchHash, PoA>,
     // Set of known uncertified batches that are not yet committed.
     uncommitted_uncertified_batches: BTreeSet<BatchHash>,
 
@@ -691,7 +696,7 @@ where
         }
     }
 
-    async fn on_new_ac(&mut self, ac: AC, ctx: &mut impl ContextFor<Self>) {
+    async fn on_new_ac(&mut self, ac: PoA, ctx: &mut impl ContextFor<Self>) {
         if !self.batches.contains_key(&ac.info.digest) {
             let signers = ac.signers.iter_ones().collect();
             // We set `override_current` to `true` because an AC typically has more
@@ -848,7 +853,7 @@ where
         upon receive [Message::AcVote(batch_id, batch_digest, signature)] from node [p] {
             self.batch_stored_votes[batch_id].insert(p, signature);
 
-            if self.batch_stored_votes[batch_id].len() == self.config.ac_quorum {
+            if self.batch_stored_votes[batch_id].len() == self.config.poa_quorum {
                 self.log_detail(format!(
                     "Forming the AC for batch #{} with digest {:#x}",
                     batch_id,
@@ -864,18 +869,18 @@ where
                     self.batch_stored_votes[batch_id].values().cloned()
                 ).unwrap();
 
-                let ac = AC {
+                let ac = PoA {
                     info: self.batches[&batch_digest].get_info(),
                     signers,
                     multi_signature,
                 };
 
-                ctx.multicast(Message::AvailabilityCert(ac)).await;
+                ctx.multicast(Message::ProofOfAvailability(ac)).await;
             }
         };
 
 
-        upon receive [Message::AvailabilityCert(ac)] from [_any_node] {
+        upon receive [Message::ProofOfAvailability(ac)] from [_any_node] {
             self.on_new_ac(ac, ctx).await;
         };
 

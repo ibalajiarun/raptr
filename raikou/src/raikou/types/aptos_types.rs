@@ -6,20 +6,23 @@ use crate::{
     framework::NodeId,
     raikou::{
         protocol,
-        types::common::{Prefix, Round},
+        types::{
+            common::{Prefix, Round},
+            Block,
+        },
     },
 };
-use aptos_consensus_types::proof_of_store::ProofCache;
+use anyhow::ensure;
+use aptos_consensus_types::payload::N_SUB_BLOCKS;
 pub use aptos_consensus_types::proof_of_store::{BatchId, BatchInfo};
 pub use aptos_crypto::hash::HashValue;
 use aptos_crypto::hash::{CryptoHash, CryptoHasher};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
-use aptos_types::validator_verifier::ValidatorVerifier;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use std::{fmt::Debug, ops::Range};
 
-pub type AC = aptos_consensus_types::proof_of_store::ProofOfStore;
+pub type PoA = aptos_consensus_types::proof_of_store::ProofOfStore;
 
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
 pub struct Payload {
@@ -64,7 +67,7 @@ impl Payload {
         }
     }
 
-    /// Returns a new payload that does not include any of the ACs and only includes sub-blocks
+    /// Returns a new payload that does not include any of the PoAs and only includes sub-blocks
     /// from `range`.
     pub fn take_sub_blocks(&self, range: Range<Prefix>) -> Self {
         Self {
@@ -92,7 +95,7 @@ impl Payload {
         self.author
     }
 
-    pub fn acs(&self) -> &Vec<AC> {
+    pub fn poas(&self) -> &Vec<PoA> {
         self.inner.as_raikou_payload().proofs()
     }
 
@@ -105,13 +108,20 @@ impl Payload {
     }
 
     pub fn all(&self) -> impl Iterator<Item = &BatchInfo> {
-        self.acs()
+        self.poas()
             .iter()
-            .map(|ac| ac.info())
+            .map(|poa| poa.info())
             .chain(self.sub_blocks().flatten())
     }
 
-    pub fn verify<S>(&self, verifier: &protocol::Verifier<S>) -> anyhow::Result<()> {
+    pub fn verify(&self, verifier: &protocol::Verifier, block: &Block) -> anyhow::Result<()> {
+        ensure!(self.round() == block.round(), "Invalid round");
+        ensure!(self.author() == block.author(), "Invalid author");
+        ensure!(
+            self.sub_blocks().len() == N_SUB_BLOCKS,
+            "Received a partial payload: Sub-blocks excluded"
+        );
+
         self.inner.verify(
             verifier.sig_verifier.aptos_verifier(),
             &verifier.proof_cache,

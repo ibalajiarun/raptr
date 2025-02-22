@@ -656,8 +656,7 @@ async fn test_raikou(
         n_nodes,
         f,
         storage_requirement: f + 1, // f + (f / 2 + 1),
-        leader_timeout: Duration::from_secs_f64(delta * 4.5),
-        leader_schedule: round_robin(n_nodes),
+        round_timeout: Duration::from_secs_f64(delta * 4.5),
         delta: Duration::from_secs_f64(delta),
         end_of_run: Instant::now() + Duration::from_secs_f64(delta) * total_duration_in_delta,
         extra_wait_before_qc_vote: Duration::from_secs_f64(delta * 0.1),
@@ -668,7 +667,7 @@ async fn test_raikou(
         round_sync_interval: Duration::from_secs_f64(delta * 15.),
         block_fetch_multiplicity: std::cmp::min(2, n_nodes),
         block_fetch_interval: Duration::from_secs_f64(delta) * 2,
-        ac_quorum,
+        poa_quorum: ac_quorum,
     };
 
     let mut join_handles = Vec::new();
@@ -791,7 +790,7 @@ async fn test_raikou(
                     module_id: diss_module_network.module_id(),
                     n_nodes,
                     f,
-                    ac_quorum,
+                    poa_quorum: ac_quorum,
                     delta: Duration::from_secs_f64(delta),
                     batch_interval: Duration::from_secs_f64(batch_interval_secs),
                     enable_optimistic_dissemination,

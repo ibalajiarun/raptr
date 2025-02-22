@@ -337,9 +337,9 @@ impl TPayloadManager for QuorumStorePayloadManager {
                     Err(missing_authors)
                 }
             },
-            Payload::Raikou(raikout_payload) => {
+            Payload::Raikou(raikou_payload) => {
                 let mut missing_authors = BitVec::with_num_bits(self.ordered_authors.len() as u16);
-                for batch in raikout_payload
+                for batch in raikou_payload
                     .sub_blocks()
                     .iter()
                     .flat_map(|inner| inner.deref())

@@ -273,7 +273,7 @@ impl QC {
             .vote_prefixes
             .prefixes()
             .sorted()
-            .skip(verifier.config.storage_requirement)
+            .skip(verifier.config.storage_requirement - 1)
             .next()
             .unwrap();
         ensure!(self.prefix == prefix, "Invalid prefix in QC");

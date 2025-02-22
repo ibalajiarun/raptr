@@ -559,7 +559,7 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
         if round > self.r_timeout && self.last_qc_vote < (round, prefix).into() {
             self.last_qc_vote = (self.r_cur, prefix).into();
 
-            assert!(!self.proposal.contains_key(&round));
+            assert!(self.proposal.contains_key(&round));
             let block_digest = self.proposal[&round].clone();
 
             // Metrics and logs.

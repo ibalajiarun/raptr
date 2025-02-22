@@ -815,8 +815,8 @@ impl NetworkTask {
     /// Establishes the initial connections with the peers and returns the receivers.
     pub fn new(
         network_service_events: NetworkServiceEvents<ConsensusMsg>,
-        qs_network_service_events: NetworkServiceEvents<ConsensusMsg>,
-        qs2_network_service_events: NetworkServiceEvents<ConsensusMsg>,
+        qs_network_service_events: Option<NetworkServiceEvents<ConsensusMsg>>,
+        qs2_network_service_events: Option<NetworkServiceEvents<ConsensusMsg>>,
         self_receiver: aptos_channels::UnboundedReceiver<Event<ConsensusMsg>>,
     ) -> (NetworkTask, NetworkReceivers) {
         let (consensus_messages_tx, consensus_messages) = aptos_channel::new(
@@ -840,24 +840,25 @@ impl NetworkTask {
         {
             panic!("The network has not been setup correctly for consensus!");
         }
-        let qs_network_and_events = qs_network_service_events.into_network_and_events();
-        if (qs_network_and_events.values().len() != 1
-            || !qs_network_and_events.contains_key(&NetworkId::Validator))
-        {
-            panic!("The network has not been setup correctly for consensus!");
-        }
-        let qs2_network_and_events = qs2_network_service_events.into_network_and_events();
-        if (qs2_network_and_events.values().len() != 1
-            || !qs2_network_and_events.contains_key(&NetworkId::Validator))
-        {
-            panic!("The network has not been setup correctly for consensus!");
-        }
+        let qs_network_and_events = qs_network_service_events.map(|e| e.into_network_and_events());
+        // if (qs_network_and_events.values().len() != 1
+        //     || !qs_network_and_events.contains_key(&NetworkId::Validator))
+        // {
+        //     panic!("The network has not been setup correctly for consensus!");
+        // }
+        let qs2_network_and_events =
+            qs2_network_service_events.map(|e| e.into_network_and_events());
+        // if (qs2_network_and_events.values().len() != 1
+        //     || !qs2_network_and_events.contains_key(&NetworkId::Validator))
+        // {
+        //     panic!("The network has not been setup correctly for consensus!");
+        // }
 
         // Collect all the network events into a single stream
         let network_events: Vec<_> = network_and_events
             .into_values()
-            .chain(qs_network_and_events.into_values())
-            .chain(qs2_network_and_events.into_values())
+            // .chain(qs_network_and_events.into_values())
+            // .chain(qs2_network_and_events.into_values())
             .collect();
         let network_events = select_all(network_events).fuse();
         let all_events = Box::new(select(network_events, self_receiver));

@@ -49,8 +49,6 @@ pub fn create_consensus_runtime(
     consensus_publisher: Option<Arc<ConsensusPublisher>>,
     admin_service: &mut AdminService,
 ) -> Option<Runtime> {
-    let qs_network_interfaces = qs_network_interfaces.unwrap();
-    let qs2_network_interfaces = qs2_network_interfaces.unwrap();
     consensus_network_interfaces.map(|consensus_network_interfaces| {
         let (consensus_runtime, consensus_db, quorum_store_db) = services::start_consensus_runtime(
             node_config,

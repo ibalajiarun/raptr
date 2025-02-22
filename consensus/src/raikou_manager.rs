@@ -79,7 +79,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 use tokio::{net::lookup_host, time::Instant};
 
@@ -262,7 +262,6 @@ impl RaikouManager {
             diss_module_network,
             delta,
             cons_module_id,
-            start_time,
             &ip_addresses,
             signer.clone(),
             sig_verifier.clone(),
@@ -576,7 +575,6 @@ impl RaikouManager {
         diss_module_network: ModuleNetworkService,
         delta: f64,
         consensus_module_id: ModuleId,
-        start_time: Instant,
         ip_addresses: &Vec<IpAddr>,
         signer: raikou::framework::crypto::Signer,
         sig_verifier: raikou::framework::crypto::SignatureVerifier,
@@ -632,7 +630,6 @@ impl RaikouManager {
             config,
             txns_iter,
             consensus_module_id,
-            start_time,
             true,
             metrics,
             signer.clone(),
@@ -1070,8 +1067,12 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
         });
     }
 
-    fn check_payload(&self, payload: &raikou::raikou::types::Payload) -> Result<(), BitVec> {
+    async fn check_payload(&self, payload: &raikou::raikou::types::Payload) -> Result<(), BitVec> {
         self.payload_manager
             .check_payload_availability(&payload.inner)
+    }
+
+    async fn set_first_committed_block_timestamp(&self, timestamp: SystemTime) {
+        // No-op.
     }
 }

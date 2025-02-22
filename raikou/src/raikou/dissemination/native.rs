@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
     sync::{atomic::AtomicBool, Arc},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 use tokio::{sync::RwLock, time::Instant};
 
@@ -311,7 +311,6 @@ where
         mut config: Config,
         txns_iter: TI,
         consensus_module_id: ModuleId,
-        start_time: Instant,
         detailed_logging: bool,
         metrics: Metrics,
         signer: Signer,
@@ -333,7 +332,6 @@ where
                     config,
                     txns_iter,
                     consensus_module_id,
-                    start_time,
                     detailed_logging,
                     metrics,
                     signer,
@@ -507,6 +505,28 @@ where
         );
         inner.execute_prefix().await;
     }
+
+    async fn check_payload(&self, payload: &Payload) -> Result<(), BitVec> {
+        let inner = self.inner.lock().await;
+
+        let mut missing_authors = BitVec::with_num_bits(inner.config.n_nodes as u16);
+
+        for batch in payload.all() {
+            if !inner.batches.contains_key(&batch.digest) {
+                missing_authors.set(batch.author as u16);
+            }
+        }
+
+        if missing_authors.all_zeros() {
+            Ok(())
+        } else {
+            Err(missing_authors)
+        }
+    }
+
+    async fn set_first_committed_block_timestamp(&self, timestamp: SystemTime) {
+        self.inner.lock().await.first_committed_block_timestamp = Some(timestamp);
+    }
 }
 
 #[derive(Clone)]
@@ -572,7 +592,7 @@ pub struct NativeDisseminationLayerProtocol<TI> {
 
     // Logging and metrics
     detailed_logging: bool,
-    start_time: Instant,
+    first_committed_block_timestamp: Option<SystemTime>,
     metrics: Metrics,
     batch_send_time: BTreeMap<BatchHash, Instant>,
     batch_commit_time: BTreeMap<BatchHash, Instant>,
@@ -584,15 +604,26 @@ impl<TI> NativeDisseminationLayerProtocol<TI> {
         duration.as_secs_f64() / self.config.delta.as_secs_f64()
     }
 
-    fn time_in_delta(&self) -> f64 {
-        self.to_deltas(Instant::now() - self.start_time)
+    fn time_in_delta(&self) -> Option<f64> {
+        Some(
+            self.to_deltas(
+                SystemTime::now()
+                    .duration_since(self.first_committed_block_timestamp?)
+                    .ok()?,
+            ),
+        )
     }
 
     fn log_info(&self, msg: String) {
+        let time_str = self
+            .time_in_delta()
+            .map(|t| format!("{:.2}Δ", t))
+            .unwrap_or_else(|| "???Δ".to_string());
+
         aptos_logger::info!(
-            "Node {} at {:.2}Δ: Dissemination Layer: {}",
+            "Node {} at {}: Dissemination Layer: {}",
             self.node_id,
-            self.time_in_delta(),
+            time_str,
             msg
         );
     }
@@ -613,7 +644,6 @@ where
         config: Config,
         txns_iter: TI,
         consensus_module_id: ModuleId,
-        start_time: Instant,
         detailed_logging: bool,
         metrics: Metrics,
         signer: Signer,
@@ -643,7 +673,7 @@ where
             consensus_module_id,
             execution_queue: Default::default(),
             detailed_logging,
-            start_time,
+            first_committed_block_timestamp: None,
             metrics,
             batch_send_time: Default::default(),
             batch_commit_time: Default::default(),

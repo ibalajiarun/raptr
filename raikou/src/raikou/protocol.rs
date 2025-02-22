@@ -252,7 +252,7 @@ pub struct RaikouNode<DL> {
     dissemination: DL,
 
     // Logging and metrics
-    start_time: Instant,
+    first_committed_block_timestamp: Option<SystemTime>,
     detailed_logging: bool,
     metrics: Metrics,
     block_create_time: BTreeMap<Round, Instant>,
@@ -325,7 +325,7 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
             node_id: id,
             config: config.clone(),
             dissemination,
-            start_time: Instant::now(), // Will be overwritten once the protocol is actually started.
+            first_committed_block_timestamp: None,
             detailed_logging,
             metrics,
             block_create_time: Default::default(),
@@ -589,16 +589,14 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
     }
 
     async fn create_and_propose_block(&mut self, ctx: &mut impl ContextFor<Self>) {
-        let parent_qc = self.qc_high.clone();
-
-        let missing_authors = parent_qc.missing_authors.clone();
+        let reason = self.entry_reason.clone();
 
         let payload = self
             .dissemination
             .prepare_block(
                 self.r_cur,
-                self.uncommitted_batches(&parent_qc),
-                missing_authors,
+                self.uncommitted_batches(reason.qc()),
+                reason.qc().missing_authors.clone(),
             )
             .await;
 
@@ -606,7 +604,7 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
         let block_data = BlockData {
             timestamp_usecs,
             payload,
-            reason: self.entry_reason.clone(),
+            reason,
         };
 
         let digest = block_data.hash();
@@ -685,7 +683,14 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
             return vec![];
         }
 
-        let parent = self.blocks[&qc.block_digest].parent_qc().clone();
+        let block = &self.blocks[&qc.block_digest];
+        let parent = block.parent_qc().clone();
+
+        if parent.is_genesis() {
+            self.first_committed_block_timestamp =
+                Some(UNIX_EPOCH + Duration::from_micros(block.data.timestamp_usecs));
+            self.log_detail(format!("First committed block: {}", qc.round));
+        }
 
         // Check for safety violations:
         if qc.round > self.committed_qc.round && parent.round < self.committed_qc.round {
@@ -851,17 +856,23 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
         duration.as_secs_f64() / self.config.delta.as_secs_f64()
     }
 
-    fn time_in_delta(&self) -> f64 {
-        self.to_deltas(Instant::now() - self.start_time)
+    fn time_in_delta(&self) -> Option<f64> {
+        Some(
+            self.to_deltas(
+                SystemTime::now()
+                    .duration_since(self.first_committed_block_timestamp?)
+                    .ok()?,
+            ),
+        )
     }
 
     fn log_info(&self, msg: String) {
-        aptos_logger::info!(
-            "Node {} at {:.2}Δ: Raikou: {}",
-            self.node_id,
-            self.time_in_delta(),
-            msg
-        );
+        let time_str = self
+            .time_in_delta()
+            .map(|t| format!("{:.2}Δ", t))
+            .unwrap_or_else(|| "???Δ".to_string());
+
+        aptos_logger::info!("Node {} at {}: Raikou: {}", self.node_id, time_str, msg);
     }
 
     fn log_detail(&self, msg: String) {
@@ -870,7 +881,7 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
         }
     }
 
-    fn compute_timeout_reason(&self, round: Round) -> RoundTimeoutReason {
+    async fn compute_timeout_reason(&self, round: Round) -> RoundTimeoutReason {
         if self.last_qc_vote.round == round {
             return RoundTimeoutReason::NoQC;
         }
@@ -879,7 +890,7 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
             None => RoundTimeoutReason::ProposalNotReceived,
             Some(hash) => {
                 let payload = self.blocks[hash].payload();
-                if let Err(missing_authors) = self.dissemination.check_payload(payload) {
+                if let Err(missing_authors) = self.dissemination.check_payload(payload).await {
                     RoundTimeoutReason::PayloadUnavailable { missing_authors }
                 } else {
                     RoundTimeoutReason::Unknown
@@ -1257,7 +1268,7 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
                     round,
                     self.qc_high.id(),
                 ));
-                let reason = self.compute_timeout_reason(round);
+                let reason = self.compute_timeout_reason(round).await;
 
                 ctx.multicast(Message::TcVote(round, self.qc_high.clone(), signature, reason)).await;
             }
@@ -1392,7 +1403,7 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
                 )
                 .unwrap();
 
-                let reason = self.compute_timeout_reason(self.r_timeout);
+                let reason = self.compute_timeout_reason(self.r_timeout).await;
 
                 ctx.multicast(Message::TcVote(self.r_timeout, self.qc_high.clone(), signature, reason)).await;
             }
@@ -1403,9 +1414,8 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
         // Logging and halting
 
         upon start {
-            self.start_time = Instant::now();
             self.log_detail("Started".to_string());
-            ctx.set_timer(self.config.end_of_run - self.start_time, TimerEvent::EndOfRun);
+            ctx.set_timer(self.config.end_of_run - Instant::now(), TimerEvent::EndOfRun);
             ctx.set_timer(self.config.status_interval, TimerEvent::Status);
         };
 

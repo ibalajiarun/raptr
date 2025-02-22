@@ -589,16 +589,14 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
     }
 
     async fn create_and_propose_block(&mut self, ctx: &mut impl ContextFor<Self>) {
-        let parent_qc = self.qc_high.clone();
-
-        let missing_authors = parent_qc.missing_authors.clone();
+        let reason = self.entry_reason.clone();
 
         let payload = self
             .dissemination
             .prepare_block(
                 self.r_cur,
-                self.uncommitted_batches(&parent_qc),
-                missing_authors,
+                self.uncommitted_batches(reason.qc()),
+                reason.qc().missing_authors.clone(),
             )
             .await;
 
@@ -606,7 +604,7 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
         let block_data = BlockData {
             timestamp_usecs,
             payload,
-            reason: self.entry_reason.clone(),
+            reason,
         };
 
         let digest = block_data.hash();

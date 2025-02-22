@@ -44,7 +44,7 @@ pub trait TPayloadManager: Send + Sync {
         block_voters: Option<BitVec>,
     ) -> ExecutorResult<(Vec<SignedTransaction>, Option<u64>)>;
 
-    fn available_prefix(&self, payload: &RaikouPayload, cached_value: usize) -> (usize, BitVec);
+    fn available_prefix(&self, payload: &RaikouPayload) -> (usize, BitVec);
 
     async fn wait_for_payload(
         &self,

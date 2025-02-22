@@ -3,7 +3,6 @@
 
 use crate::{
     framework::{
-        crypto,
         crypto::{dummy_signature, SignatureVerifier, Signer},
         module_network::ModuleId,
         network::{MessageCertifier, MessageVerifier, NetworkSender, NetworkService},
@@ -28,12 +27,10 @@ use aptos_bitvec::BitVec;
 use aptos_crypto::{bls12381::Signature, hash::CryptoHash, Genesis};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
 use defaultmap::DefaultBTreeMap;
-use itertools::Itertools;
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
-    future::Future,
     sync::{atomic::AtomicBool, Arc},
     time::Duration,
 };
@@ -153,7 +150,7 @@ impl MessageCertifier for Certifier {
                     .sign(&PoAVoteSignatureData {
                         batch_digest: batch_digest.clone(),
                     })
-                    .unwrap();
+                    .expect("Failed to sign AcVote");
             },
             Message::ProofOfAvailability(_) => {},
             Message::Fetch(_) => {},
@@ -249,7 +246,7 @@ pub struct BlockSizeLimit {
 }
 
 impl BlockSizeLimit {
-    pub fn from_max_number_of_acs(ac_limit: usize, n_nodes: usize) -> Self {
+    pub fn from_max_number_of_poas(ac_limit: usize, n_nodes: usize) -> Self {
         let dummy_batch_info = BatchInfo {
             author: n_nodes,
             batch_id: 1234,
@@ -277,8 +274,8 @@ impl BlockSizeLimit {
         self.byte_limit / self.ac_size
     }
 
-    pub fn batch_limit(&self, n_acs: usize) -> usize {
-        (self.byte_limit - n_acs * self.ac_size) / self.batch_size
+    pub fn batch_limit(&self, n_poas: usize) -> usize {
+        (self.byte_limit - n_poas * self.ac_size) / self.batch_size
     }
 }
 
@@ -370,24 +367,24 @@ where
     ) -> Payload {
         let mut inner = self.inner.lock().await;
 
-        let mut acs: Vec<PoA> = inner
-            .uncommitted_acs
+        let mut poas: Vec<PoA> = inner
+            .uncommitted_poas
             .iter()
             .filter(|&(_batch_digest, ac)| !exclude.contains(ac.info()))
             .map(|(_batch_digest, ac)| ac.clone())
             .collect();
 
         let limit = inner.config.block_size_limit.ac_limit();
-        if acs.len() > limit {
+        if poas.len() > limit {
             aptos_logger::warn!(
-                "Block size limit reached: {} ACs, {} allowed",
-                acs.len(),
+                "Block size limit reached: {} PoAs, {} allowed",
+                poas.len(),
                 limit
             );
-            acs.truncate(limit);
+            poas.truncate(limit);
         }
 
-        let batches = if inner.config.enable_optimistic_dissemination && acs.len() < limit {
+        let batches = if inner.config.enable_optimistic_dissemination && poas.len() < limit {
             let mut batches: Vec<BatchInfo> = inner
                 .uncommitted_uncertified_batches
                 .iter()
@@ -395,7 +392,7 @@ where
                 .filter(|batch_info| !exclude.contains(batch_info))
                 .collect();
 
-            let limit = inner.config.block_size_limit.batch_limit(acs.len());
+            let limit = inner.config.block_size_limit.batch_limit(poas.len());
             if batches.len() > limit {
                 aptos_logger::warn!(
                     "Block size limit reached: {} batches, {} allowed",
@@ -412,29 +409,34 @@ where
             Default::default()
         };
 
-        Payload::new(round, inner.node_id, acs, batches)
+        Payload::new(round, inner.node_id, poas, batches)
     }
 
-    async fn available_prefix(&self, payload: &Payload, cached_value: usize) -> Prefix {
+    async fn available_prefix(&self, payload: &Payload) -> (Prefix, BitVec) {
         let inner = self.inner.lock().await;
 
-        let mut available_prefix = cached_value;
-        while available_prefix < payload.sub_blocks().len() {
-            let sub_block = payload.sub_block(available_prefix);
-            if !sub_block
-                .iter()
-                .all(|batch| inner.batches.contains_key(&batch.digest))
-            {
-                return available_prefix;
-            }
+        let mut missing_authors = BitVec::with_num_bits(inner.config.n_nodes as u16);
+        let mut prefix = N_SUB_BLOCKS;
 
-            available_prefix += 1;
+        for (i, sub_block) in payload.sub_blocks().enumerate() {
+            for batch_info in sub_block {
+                if !inner.batches.contains_key(&batch_info.digest) {
+                    missing_authors.set(batch_info.author as u16);
+                    if prefix == N_SUB_BLOCKS {
+                        prefix = i;
+                    }
+                }
+            }
         }
 
-        available_prefix
+        if prefix == N_SUB_BLOCKS {
+            assert!(missing_authors.all_zeros());
+        }
+
+        (prefix, missing_authors)
     }
 
-    async fn notify_commit(&self, payloads: Vec<(Payload, Author, BitVec)>) {
+    async fn notify_commit(&self, payloads: Vec<(Payload, NodeId, BitVec)>) {
         let mut inner = self.inner.lock().await;
         let now = Instant::now();
 
@@ -453,7 +455,7 @@ where
                 }
 
                 inner.committed_batches.insert(batch.digest.clone());
-                inner.uncommitted_acs.remove(&batch.digest);
+                inner.uncommitted_poas.remove(&batch.digest);
                 inner.uncommitted_uncertified_batches.remove(&batch.digest);
 
                 inner.batch_commit_time.insert(batch.digest.clone(), now);
@@ -468,7 +470,7 @@ where
         // Metrics:
         // Only track queueing time and penalties for the committed batches.
         // At the moment, they are only tracked for optimistically committed batches.
-        for payload in &payloads {
+        for (payload, _, _) in &payloads {
             for batch in payload.sub_blocks().flatten() {
                 if payload.author() == inner.node_id {
                     let block_prepare_time =
@@ -500,7 +502,7 @@ where
         inner.execution_queue.extend(
             payloads
                 .iter()
-                .flat_map(|payload| payload.all())
+                .flat_map(|(payload, _, _)| payload.all())
                 .map(|batch_info| batch_info.digest.clone()),
         );
         inner.execute_prefix().await;
@@ -549,8 +551,8 @@ pub struct NativeDisseminationLayerProtocol<TI> {
     my_batches: Arc<RwLock<BTreeMap<BatchId, BatchHash>>>,
     // Set of committed batches.
     committed_batches: BTreeSet<BatchHash>,
-    // Set of known ACs that are not yet committed.
-    uncommitted_acs: BTreeMap<BatchHash, PoA>,
+    // Set of known PoAs that are not yet committed.
+    uncommitted_poas: BTreeMap<BatchHash, PoA>,
     // Set of known uncertified batches that are not yet committed.
     uncommitted_uncertified_batches: BTreeSet<BatchHash>,
 
@@ -634,7 +636,7 @@ where
             fetch_tasks: Default::default(),
             my_batches: Default::default(),
             committed_batches: BTreeSet::new(),
-            uncommitted_acs: BTreeMap::new(),
+            uncommitted_poas: BTreeMap::new(),
             uncommitted_uncertified_batches: BTreeSet::new(),
             batch_stored_votes: Default::default(),
             current_proposal_status: Default::default(),
@@ -688,7 +690,7 @@ where
             .await;
 
             // Track the list of known uncommitted uncertified batches.
-            if !self.uncommitted_acs.contains_key(&digest)
+            if !self.uncommitted_poas.contains_key(&digest)
                 && !self.committed_batches.contains(&digest)
             {
                 self.uncommitted_uncertified_batches.insert(digest);
@@ -705,11 +707,11 @@ where
                 .await;
         }
 
-        // Track the list of known uncommitted ACs
+        // Track the list of known uncommitted PoAs
         // and the list of known uncommitted uncertified batches.
         if !self.committed_batches.contains(&ac.info.digest) {
             self.uncommitted_uncertified_batches.remove(&ac.info.digest);
-            self.uncommitted_acs.insert(ac.info.digest.clone(), ac);
+            self.uncommitted_poas.insert(ac.info.digest.clone(), ac);
         }
     }
 
@@ -860,9 +862,9 @@ where
                     batch_digest,
                 ));
 
-                let mut signers = BitVec::repeat(false, self.config.n_nodes);
+                let mut signers = BitVec::with_num_bits(self.config.n_nodes as u16);
                 for (node, _) in self.batch_stored_votes[batch_id].iter() {
-                    signers.set(*node, true);
+                    signers.set(*node as u16);
                 }
 
                 let multi_signature = self.sig_verifier.aggregate_signatures(
@@ -886,8 +888,8 @@ where
 
         upon event of type [ProposalReceived] from [_any_module] {
             upon [ProposalReceived { leader, round, payload, .. }] {
-                for ac in payload.acs() {
-                    if !self.uncommitted_acs.contains_key(&ac.info.digest)
+                for ac in payload.poas() {
+                    if !self.uncommitted_poas.contains_key(&ac.info.digest)
                         && !self.committed_batches.contains(&ac.info.digest)
                     {
                         self.on_new_ac(ac.clone(), ctx).await;
@@ -1002,14 +1004,14 @@ where
                 \tbatches produced: {}\n\
                 \tbatches stored: {}\n\
                 \tbatches committed: {}\n\
-                \tuncommitted_acs.len(): {}\n\
+                \tuncommitted_poas.len(): {}\n\
                 \tuncommitted_uncertified_batches.len(): {}\n\
                 \texecution_queue.len(): {}\n\
                 \tactive fetch tasks: {}\n",
                 self.my_batches.read().await.len(),
                 self.batches.len(),
                 self.committed_batches.len(),
-                self.uncommitted_acs.len(),
+                self.uncommitted_poas.len(),
                 self.uncommitted_uncertified_batches.len(),
                 self.execution_queue.len(),
                 self.fetch_tasks.len(),

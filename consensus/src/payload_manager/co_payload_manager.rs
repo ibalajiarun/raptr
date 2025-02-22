@@ -111,7 +111,7 @@ impl TPayloadManager for ConsensusObserverPayloadManager {
             .await;
     }
 
-    fn available_prefix(&self, payload: &RaikouPayload, cached_value: usize) -> (usize, BitVec) {
+    fn available_prefix(&self, payload: &RaikouPayload) -> (usize, BitVec) {
         todo!()
     }
 

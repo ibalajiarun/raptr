@@ -16,30 +16,22 @@ use crate::{
             RAIKOU_BLOCK_CONSENSUS_LATENCY, ROUND_ENTER_REASON,
         },
         dissemination::{
-            self, DisseminationLayer, FullBlockAvailable, Kill, NewQCWithPayload, ProposalReceived,
+            DisseminationLayer, FullBlockAvailable, Kill, NewQCWithPayload, ProposalReceived,
         },
         types::*,
     },
-    utils::kth_max_set::KthMaxMap,
 };
 use anyhow::{ensure, Context};
 use aptos_bitvec::BitVec;
-use aptos_consensus_types::{
-    payload::BatchPointer, proof_of_store::ProofCache, round_timeout::RoundTimeoutReason,
-};
+use aptos_consensus_types::{proof_of_store::ProofCache, round_timeout::RoundTimeoutReason};
 use aptos_crypto::{bls12381::Signature, hash::CryptoHash};
-use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
-use aptos_types::{
-    aggregate_signature::{AggregateSignature, PartialSignatures},
-    validator_verifier::ValidatorVerifier,
-};
 use defaultmap::DefaultBTreeMap;
 use itertools::Itertools;
 use mini_moka::sync::Cache;
 use rand::prelude::SliceRandom;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use std::{
-    cmp::{max_by, max_by_key, min, Ordering},
+    cmp::{min, Ordering},
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt::{Debug, Display, Formatter},
     num::NonZeroU8,
@@ -229,7 +221,7 @@ pub struct Config {
     pub status_interval: Duration,
     pub end_of_run: Instant,
 
-    /// Used for AC verification. Must be the same as in the Quorum Store module.
+    /// Used for PoA verification. Must be the same as in the Quorum Store module.
     pub poa_quorum: usize,
 }
 
@@ -267,7 +259,6 @@ pub struct RaikouNode<DL> {
 
     // Protocol state for the pseudocode
     entry_reason: RoundEntryReason, // The justification for entering the round r_read.
-    r_allowed: Round,               // The highest round the node is allowed to enter.
     r_cur: Round,                   // The current round the node is in.
     r_timeout: Round,               // The highest round the node has voted to time out.
     last_qc_vote: SubBlockId,
@@ -300,7 +291,6 @@ pub struct RaikouNode<DL> {
 
     proposal: BTreeMap<Round, BlockHash>,
     blocks: BTreeMap<BlockHash, Block>,
-    available_prefix_cache: SubBlockId,
     qc_votes: DefaultBTreeMap<
         Round,
         DefaultBTreeMap<BlockHash, BTreeMap<NodeId, (Prefix, Signature, BitVec)>>,
@@ -339,7 +329,6 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
             detailed_logging,
             metrics,
             block_create_time: Default::default(),
-            r_allowed: 0,
             entry_reason: RoundEntryReason::FullPrefixQC(QC::genesis()),
             r_cur: 0,
             last_qc_vote: (0, 0).into(),
@@ -356,7 +345,6 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
             qcs_to_commit: Default::default(),
             proposal: Default::default(),
             blocks: Default::default(),
-            available_prefix_cache: (0, 0).into(),
             qc_votes: Default::default(),
             full_prefix_votes: Default::default(),
             received_cc_vote: Default::default(),
@@ -559,7 +547,6 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
         if round > self.r_timeout && self.last_qc_vote < (round, prefix).into() {
             self.last_qc_vote = (self.r_cur, prefix).into();
 
-            assert!(self.proposal.contains_key(&round));
             let block_digest = self.proposal[&round].clone();
 
             // Metrics and logs.
@@ -682,27 +669,6 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
             // Upon entering round r, the node starts a timer for round timeout.
             ctx.set_timer(self.config.round_timeout, TimerEvent::RoundTimeout(round));
         }
-    }
-
-    /// Returns the number of sub-blocks in the block from the current round's block that are
-    /// fully stored locally.
-    async fn available_prefix(&mut self) -> (Prefix, BitVec) {
-        assert!(self.proposal.contains_key(&self.r_cur));
-
-        let block = &self.blocks[&self.proposal[&self.r_cur]];
-
-        if self.available_prefix_cache.round != self.r_cur {
-            self.available_prefix_cache = (self.r_cur, 0).into();
-        }
-
-        let (prefix, missing_authors) = self
-            .dissemination
-            .available_prefix(&block.payload(), self.available_prefix_cache.prefix)
-            .await;
-
-        self.available_prefix_cache.prefix = prefix;
-
-        (prefix, missing_authors)
     }
 
     async fn commit_qc(&mut self, qc: QC, commit_reason: CommitReason) {
@@ -851,7 +817,7 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
             }
 
             let block = &self.blocks[&cur.block_digest];
-            uncommitted.extend(block.poas().iter().map(|ac| ac.info().clone()));
+            uncommitted.extend(block.poas().iter().map(|poa| poa.info().clone()));
             uncommitted.extend(
                 block
                     .sub_blocks()
@@ -1093,7 +1059,10 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
         // A node only QC-votes if r_cur > r_timeout.
         upon timer [TimerEvent::QcVote(round)] {
             if round == self.r_cur {
-                let (prefix, missing_authors) = self.available_prefix().await;
+                let (prefix, missing_authors) = self.dissemination
+                    .available_prefix(self.blocks[&self.proposal[&self.r_cur]].payload())
+                    .await;
+
                 self.qc_vote(QcVoteReason::Timer, prefix, missing_authors, ctx).await;
             }
         };
@@ -1458,7 +1427,6 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
             self.log_detail(format!(
                 "STATUS:\n\
                 \tr_cur: {}\n\
-                \tr_allowed: {}\n\
                 \tr_timeout: {}\n\
                 \tqc_high: {:?}\n\
                 \tcommitted_qc: {:?}\n\
@@ -1470,7 +1438,6 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
                 \tnum of cc votes: {:?}\n\
                 \tnum of tc votes: {:?}\n",
                 self.r_cur,
-                self.r_allowed,
                 self.r_timeout,
                 self.qc_high.id(),
                 self.committed_qc.id(),
@@ -1478,9 +1445,9 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
                 self.qcs_to_commit.first_key_value().map(|(k, _)| k),
                 self.qcs_to_commit.last_key_value().map(|(k, _)| k),
                 self.satisfied_qcs.last(),
-                self.qc_votes.iter().filter(|(round, _)| **round == self.r_cur).map(|(_, v)| v.len()).collect_vec(),
-                self.received_cc_vote.get(self.r_cur).len(),
-                self.tc_votes.get(self.r_cur).len(),
+                self.qc_votes[self.r_cur].len(),
+                self.cc_votes[self.r_cur].len(),
+                self.tc_votes[self.r_cur].len(),
             ));
             ctx.set_timer(self.config.status_interval, TimerEvent::Status);
         };

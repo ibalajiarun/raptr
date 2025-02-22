@@ -79,11 +79,9 @@ pub trait DisseminationLayer: Send + Sync + 'static {
         exclude_authors: Option<BitVec>,
     ) -> impl Future<Output = Payload> + Send;
 
-    fn available_prefix(
-        &self,
-        payload: &Payload,
-        cached_value: Prefix,
-    ) -> impl Future<Output = (Prefix, BitVec)> + Send;
+    /// Returns the number of sub-blocks in the block from the current round's block that are
+    /// fully stored locally.
+    fn available_prefix(&self, payload: &Payload) -> impl Future<Output = (Prefix, BitVec)> + Send;
 
     fn notify_commit(
         &self,

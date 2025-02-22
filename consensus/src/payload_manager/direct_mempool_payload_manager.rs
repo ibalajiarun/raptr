@@ -53,7 +53,7 @@ impl TPayloadManager for DirectMempoolPayloadManager {
         }
     }
 
-    fn available_prefix(&self, payload: &RaikouPayload, cached_value: usize) -> (usize, BitVec) {
+    fn available_prefix(&self, payload: &RaikouPayload) -> (usize, BitVec) {
         todo!()
     }
 

@@ -173,6 +173,8 @@ impl Payload {
         }
     }
 
+    // NB: returns `impl ExactSizeIterator<Item = &Vec<BatchInfo>>` for compatibility with
+    // aptos_types::Payload.
     pub fn sub_blocks(&self) -> impl ExactSizeIterator<Item = &Vec<BatchInfo>> {
         (&self.data.sub_blocks[self.sub_blocks.clone()]).into_iter()
     }

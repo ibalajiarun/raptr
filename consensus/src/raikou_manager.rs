@@ -518,7 +518,7 @@ impl RaikouManager {
                     let payload_manager = payload_manager.clone();
                     tokio::spawn(async move {
                         let (prefix, _) =
-                            payload_manager.available_prefix(&payload.inner.as_raikou_payload(), 0);
+                            payload_manager.available_prefix(&payload.inner.as_raikou_payload());
                         if prefix == N_SUB_BLOCKS {
                             info!("Full prefix available {}/{}", prefix, N_SUB_BLOCKS);
                             module_network_sender
@@ -601,7 +601,7 @@ impl RaikouManager {
             batch_fetch_multiplicity: std::cmp::min(2, n_nodes),
             batch_fetch_interval: Duration::from_secs_f64(delta) * 2,
             status_interval: Duration::from_secs_f64(delta) * 10,
-            block_size_limit: dissemination::native::BlockSizeLimit::from_max_number_of_acs(
+            block_size_limit: dissemination::native::BlockSizeLimit::from_max_number_of_poas(
                 f64::ceil(expected_load as f64 * 1.5) as usize,
                 n_nodes,
             ),
@@ -990,20 +990,9 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
         raikou_types::Payload::new(round, self.node_id, payload)
     }
 
-    async fn available_prefix(
-        &self,
-        payload: &raikou_types::Payload,
-        cached_value: Prefix,
-    ) -> (Prefix, BitVec) {
-        if cached_value == N_SUB_BLOCKS {
-            return (
-                N_SUB_BLOCKS,
-                BitVec::with_num_bits(self.index_to_address.len() as u16),
-            );
-        }
-
+    async fn available_prefix(&self, payload: &raikou_types::Payload) -> (Prefix, BitVec) {
         self.payload_manager
-            .available_prefix(payload.inner.as_raikou_payload(), cached_value)
+            .available_prefix(payload.inner.as_raikou_payload())
     }
 
     async fn notify_commit(&self, payloads: Vec<(raikou_types::Payload, NodeId, BitVec)>) {

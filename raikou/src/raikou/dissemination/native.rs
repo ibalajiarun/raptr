@@ -977,7 +977,7 @@ where
         upon event of type [NewQCWithPayload] from [_any_module] {
             upon [NewQCWithPayload { payload, qc }] {
                 for (idx, sub_block) in payload.sub_blocks().enumerate() {
-                    let signers: Vec<_> = qc.vote_prefixes.sub_block_signers(idx).collect();
+                    let signers: Vec<_> = qc.vote_prefixes().sub_block_signers(idx).collect();
 
                     for batch in sub_block {
                         if !self.batches.contains_key(&batch.digest) {

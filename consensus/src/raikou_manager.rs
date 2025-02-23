@@ -510,15 +510,15 @@ impl RaikouManager {
 
                     let block_author = index_to_address[&payload.author()];
 
-                    payload_manager.prefetch_payload_data(&payload.inner, block_author, 0);
-
                     let block_author = Some(block_author);
 
                     let module_network_sender = module_network.new_sender();
                     let payload_manager = payload_manager.clone();
                     tokio::spawn(async move {
-                        let (prefix, _) =
-                            payload_manager.available_prefix(&payload.inner.as_raikou_payload());
+                        let (prefix, _) = monitor!(
+                            "payload_manager_available",
+                            payload_manager.available_prefix(&payload.inner.as_raikou_payload())
+                        );
                         if prefix == N_SUB_BLOCKS {
                             info!("Full prefix available {}/{}", prefix, N_SUB_BLOCKS);
                             module_network_sender
@@ -547,6 +547,14 @@ impl RaikouManager {
                                     .await;
                             }
                         }
+                        monitor!(
+                            "payload_manager_prefetch",
+                            payload_manager.prefetch_payload_data(
+                                &payload.inner,
+                                block_author.unwrap(),
+                                0
+                            )
+                        );
                     });
                 } else if match_event_type::<dissemination::NewQCWithPayload>(&event) {
                     let event: Box<_> = event

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
+    counters::RAIKOU_COMMIT_NOTIFY_TO_MEMPOOL_NOTIFY,
     liveness::proposal_status_tracker::{
         ExponentialWindowFailureTracker, LockedExponentialWindowFailureTracker,
         OptQSPullParamsProvider, TOptQSPullParamsProvider,
@@ -505,18 +506,13 @@ impl RaikouManager {
 
                     let block_author = index_to_address.get(&payload.author()).cloned();
 
-                    payload_manager.prefetch_payload_data(
-                        &payload.inner,
-                        block_author.unwrap(),
-                        aptos_infallible::duration_since_epoch().as_micros() as u64,
-                    );
-
                     let module_network_sender = module_network.new_sender();
                     let payload_manager = payload_manager.clone();
-                    let block_author = Some(index_to_address[&payload.author()]);
                     tokio::spawn(async move {
-                        let (prefix, _) =
-                            payload_manager.available_prefix(&payload.inner.as_raikou_payload(), 0);
+                        let (prefix, _) = monitor!(
+                            "payload_manager_available",
+                            payload_manager.available_prefix(&payload.inner.as_raikou_payload(), 0)
+                        );
                         if prefix == N_SUB_BLOCKS {
                             info!("Full prefix available {}/{}", prefix, N_SUB_BLOCKS);
                             module_network_sender
@@ -545,6 +541,15 @@ impl RaikouManager {
                                     .await;
                             }
                         }
+
+                        monitor!(
+                            "payload_manager_prefetch",
+                            payload_manager.prefetch_payload_data(
+                                &payload.inner,
+                                block_author.unwrap(),
+                                0,
+                            )
+                        );
                     });
                 } else if match_event_type::<dissemination::NewQCWithPayload>(&event) {
                     let event: Box<_> = event
@@ -553,7 +558,11 @@ impl RaikouManager {
                         .ok()
                         .unwrap();
                     let dissemination::NewQCWithPayload { payload, qc } = *event;
-                    // TODO: add fetching here
+                    let block_author = index_to_address[&payload.author()];
+                    monitor!(
+                        "raikouman_newqc_fetch",
+                        payload_manager.prefetch_payload_data(&payload.inner, block_author, 0)
+                    ) // TODO: add fetching here
                 } else if match_event_type::<dissemination::Kill>(&event) {
                     break;
                 } else {
@@ -993,8 +1002,11 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
         payload: &raikou_types::Payload,
         cached_value: Prefix,
     ) -> (Prefix, BitVec) {
-        self.payload_manager
-            .available_prefix(payload.inner.as_raikou_payload(), cached_value)
+        monitor!(
+            "raikouman_dl_availprefix",
+            self.payload_manager
+                .available_prefix(payload.inner.as_raikou_payload(), cached_value)
+        )
     }
 
     async fn notify_commit(&self, payloads: Vec<raikou_types::Payload>) {
@@ -1002,6 +1014,8 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
         let state_sync_notifier = self.state_sync_notifier.clone();
 
         tokio::spawn(async move {
+            let _timer = RAIKOU_COMMIT_NOTIFY_TO_MEMPOOL_NOTIFY.start_timer();
+
             let payloads: Vec<Payload> =
                 payloads.into_iter().map(|payload| payload.inner).collect();
 
@@ -1011,14 +1025,8 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
                 quorum_store::counters::NUM_TXNS_PER_BLOCK
                     .observe(payload.as_raikou_payload().num_txns() as f64);
             }
-            payload_manager.notify_commit(
-                aptos_infallible::duration_since_epoch()
-                    .saturating_sub(Duration::from_secs(30))
-                    .as_micros() as u64,
-                payloads.clone(),
-            );
 
-            for payload in payloads {
+            for payload in &payloads {
                 while let Err(e) = payload_manager
                     .wait_for_payload(&payload, None, 0, Duration::from_secs(1), true)
                     .await
@@ -1031,7 +1039,7 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
                     0,
                     0,
                     Vec::new(),
-                    payload,
+                    payload.clone(),
                     PeerId::ZERO,
                     Vec::new(),
                     HashValue::zero(),
@@ -1051,6 +1059,13 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
                     Err(_e) => unreachable!("Failed to get transactions for block {:?} even after waiting for the payload", block),
                 }
             }
+
+            payload_manager.notify_commit(
+                aptos_infallible::duration_since_epoch()
+                    .saturating_sub(Duration::from_secs(30))
+                    .as_micros() as u64,
+                payloads,
+            );
         });
     }
 

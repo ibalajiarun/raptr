@@ -3,12 +3,17 @@
 
 use crate::proof_of_store::{BatchInfo, ProofOfStore};
 use anyhow::ensure;
+use aptos_executor_types::ExecutorResult;
+use aptos_infallible::Mutex;
 use aptos_types::{transaction::SignedTransaction, PeerId};
 use core::fmt;
+use futures::future::{BoxFuture, Shared};
 use serde::{Deserialize, Serialize};
 use std::{
     fmt::Debug,
+    future::Future,
     ops::{Deref, DerefMut, Range},
+    pin::Pin,
     sync::{Arc, OnceLock},
     usize,
 };
@@ -27,9 +32,14 @@ pub trait TDataInfo {
     fn signers(&self, ordered_authors: &[PeerId]) -> Vec<PeerId>;
 }
 
+pub type DataFetchFut =
+    Vec<Shared<Pin<Box<dyn Future<Output = ExecutorResult<Vec<SignedTransaction>>> + Send>>>>;
+
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct BatchPointer<T> {
     pub batch_summary: Vec<T>,
+    #[serde(skip)]
+    pub data_fut: Arc<Mutex<Option<DataFetchFut>>>,
 }
 
 impl<T> BatchPointer<T>
@@ -39,12 +49,14 @@ where
     pub fn new(metadata: Vec<T>) -> Self {
         Self {
             batch_summary: metadata,
+            data_fut: Arc::new(Mutex::new(None)),
         }
     }
 
     pub fn empty() -> Self {
         Self {
             batch_summary: Vec::new(),
+            data_fut: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -84,6 +96,7 @@ where
     fn from(value: Vec<T>) -> Self {
         Self {
             batch_summary: value,
+            data_fut: Arc::new(Mutex::new(None)),
         }
     }
 }

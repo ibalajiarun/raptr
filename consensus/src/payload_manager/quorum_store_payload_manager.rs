@@ -6,7 +6,7 @@ use crate::{
         network::observer_message::{BlockTransactionPayload, ConsensusObserverMessage},
         publisher::consensus_publisher::ConsensusPublisher,
     },
-    counters,
+    counters, monitor,
     payload_manager::TPayloadManager,
     quorum_store::{batch_store::BatchReader, quorum_store_coordinator::CoordinatorCommand},
 };
@@ -23,9 +23,15 @@ use aptos_executor_types::*;
 use aptos_logger::prelude::*;
 use aptos_types::{transaction::SignedTransaction, PeerId};
 use async_trait::async_trait;
+use dashmap::DashMap;
 use futures::{channel::mpsc::Sender, future::Shared};
 use itertools::Itertools;
+use rayon::{
+    iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator},
+    prelude::IntoParallelRefIterator,
+};
 use std::{collections::HashMap, future::Future, ops::Deref, pin::Pin, sync::Arc, time::Duration};
+use tokio::runtime::Handle;
 
 pub trait TQuorumStoreCommitNotifier: Send + Sync {
     fn notify(&self, block_timestamp: u64, batches: Vec<BatchInfo>);
@@ -105,13 +111,25 @@ impl QuorumStorePayloadManager {
         futures
     }
 
+    async fn wait_transactions(
+        futs: Vec<
+            Shared<Pin<Box<dyn Future<Output = ExecutorResult<Vec<SignedTransaction>>> + Send>>>,
+        >,
+    ) -> ExecutorResult<Vec<SignedTransaction>> {
+        let mut all_txns = Vec::with_capacity(30_000);
+        for result in futures::future::join_all(futs).await {
+            all_txns.append(&mut result?);
+        }
+        Ok(all_txns)
+    }
+
     async fn request_and_wait_transactions(
         batches: Vec<(BatchInfo, Vec<PeerId>)>,
         block_timestamp: u64,
         batch_reader: Arc<dyn BatchReader>,
     ) -> ExecutorResult<Vec<SignedTransaction>> {
         let futures = Self::request_transactions(batches, block_timestamp, batch_reader);
-        let mut all_txns = Vec::new();
+        let mut all_txns = Vec::with_capacity(30_000);
         for result in futures::future::join_all(futures).await {
             all_txns.append(&mut result?);
         }
@@ -194,6 +212,11 @@ impl TPayloadManager for QuorumStorePayloadManager {
             timestamp: u64,
             ordered_authors: &[PeerId],
         ) {
+            let mut fut_lock = data_pointer.data_fut.lock();
+            if fut_lock.is_some() {
+                return;
+            }
+
             let batches_and_responders = data_pointer
                 .batch_summary
                 .iter()
@@ -205,11 +228,30 @@ impl TPayloadManager for QuorumStorePayloadManager {
                     (data_info.info().clone(), signers)
                 })
                 .collect();
-            QuorumStorePayloadManager::request_transactions(
+            let fut = QuorumStorePayloadManager::request_transactions(
                 batches_and_responders,
                 timestamp,
                 batch_reader,
             );
+            *fut_lock = Some(fut);
+        }
+
+        fn prefetch_helper_raikou<T: TDataInfo>(
+            sub_blocks: &[BatchPointer<T>],
+            batch_reader: Arc<dyn BatchReader>,
+            author: Option<Author>,
+            timestamp: u64,
+            ordered_authors: &[PeerId],
+        ) {
+            for sub_block in sub_blocks {
+                prefetch_helper(
+                    sub_block,
+                    batch_reader.clone(),
+                    author,
+                    timestamp,
+                    ordered_authors,
+                );
+            }
         }
 
         match payload {
@@ -245,15 +287,13 @@ impl TPayloadManager for QuorumStorePayloadManager {
                 )
             },
             Payload::Raikou(raikou_payload) => {
-                for sub_block in raikou_payload.sub_blocks() {
-                    prefetch_helper(
-                        sub_block,
-                        self.batch_reader.clone(),
-                        Some(author),
-                        timestamp,
-                        &self.ordered_authors,
-                    );
-                }
+                prefetch_helper_raikou(
+                    raikou_payload.sub_blocks(),
+                    self.batch_reader.clone(),
+                    Some(author),
+                    timestamp.clone(),
+                    &self.ordered_authors,
+                );
                 prefetch_helper(
                     raikou_payload.proof_with_data(),
                     self.batch_reader.clone(),
@@ -397,29 +437,33 @@ impl TPayloadManager for QuorumStorePayloadManager {
                 unreachable!("Only Raikou payload is supported");
             };
 
-            for sub_block in payload.sub_blocks() {
-                // TODO: pass `sub_block_signers` to the helper.
-                process_optqs_payload(
-                    sub_block,
+            // TODO: pass `sub_block_signers` to the helper.
+            monitor!(
+                "pm_wfp_raikou",
+                process_raikou_payload(
+                    payload.sub_blocks(),
                     self.batch_reader.clone(),
                     block_author,
                     block_timestamp,
                     &self.ordered_authors,
                     None,
                 )
-                .await?;
-            }
+                .await
+            )?;
 
             if wait_for_proof {
-                process_optqs_payload(
-                    payload.proof_with_data(),
-                    self.batch_reader.clone(),
-                    block_author,
-                    block_timestamp,
-                    &self.ordered_authors,
-                    None,
-                )
-                .await?;
+                monitor!(
+                    "pm_wfp_proofs",
+                    process_optqs_payload(
+                        payload.proof_with_data(),
+                        self.batch_reader.clone(),
+                        block_author,
+                        block_timestamp,
+                        &self.ordered_authors,
+                        None,
+                    )
+                    .await
+                )?;
             }
 
             Ok(())
@@ -530,30 +574,31 @@ impl TPayloadManager for QuorumStorePayloadManager {
                 )
             },
             Payload::Raikou(raikou_payload) => {
-                let mut sub_blocks_txns = Vec::new();
-
-                for sub_block in raikou_payload.sub_blocks() {
-                    sub_blocks_txns.extend(
-                        process_optqs_payload(
-                            sub_block,
-                            self.batch_reader.clone(),
-                            block.author(),
-                            block.timestamp_usecs(),
-                            &self.ordered_authors,
-                            None,
-                        )
-                        .await?,
+                let sub_blocks_txns = monitor!(
+                    "pm_gt_raikou",
+                    process_raikou_payload(
+                        raikou_payload.sub_blocks(),
+                        self.batch_reader.clone(),
+                        block.author(),
+                        block.timestamp_usecs(),
+                        &self.ordered_authors,
+                        None,
                     )
-                }
-                let proof_batch_txns = process_optqs_payload(
-                    raikou_payload.proof_with_data(),
-                    self.batch_reader.clone(),
-                    block.author(),
-                    block.timestamp_usecs(),
-                    &self.ordered_authors,
-                    None,
-                )
-                .await?;
+                    .await
+                )?;
+
+                let proof_batch_txns = monitor!(
+                    "pm_gt_proof",
+                    process_optqs_payload(
+                        raikou_payload.proof_with_data(),
+                        self.batch_reader.clone(),
+                        block.author(),
+                        block.timestamp_usecs(),
+                        &self.ordered_authors,
+                        None,
+                    )
+                    .await
+                )?;
                 let all_txns = [proof_batch_txns, sub_blocks_txns].concat();
                 BlockTransactionPayload::new_raikou_payload(
                     all_txns,
@@ -593,6 +638,19 @@ async fn process_optqs_payload<T: TDataInfo>(
     ordered_authors: &[PeerId],
     additional_peers_to_request: Option<&BitVec>,
 ) -> ExecutorResult<Vec<SignedTransaction>> {
+    let mut futs = Vec::new();
+    {
+        let data_fut_lock = data_ptr.data_fut.lock();
+        if let Some(data_fut) = data_fut_lock.as_ref() {
+            if data_fut.iter().all(|fut| fut.peek().is_some()) {
+                futs = data_fut.clone();
+            }
+        }
+    }
+    if !futs.is_empty() {
+        return QuorumStorePayloadManager::wait_transactions(futs).await;
+    }
+
     let mut signers = Vec::new();
     if let Some(peers) = additional_peers_to_request {
         for i in peers.iter_ones() {
@@ -608,6 +666,68 @@ async fn process_optqs_payload<T: TDataInfo>(
     let batches_and_responders = data_ptr
         .batch_summary
         .iter()
+        .map(|summary| {
+            let mut signers = signers.clone();
+            signers.append(&mut summary.signers(ordered_authors));
+
+            (summary.info().clone(), signers)
+        })
+        .collect();
+
+    QuorumStorePayloadManager::request_and_wait_transactions(
+        batches_and_responders,
+        block_ts,
+        batch_reader,
+    )
+    .await
+}
+
+async fn process_raikou_payload<T: TDataInfo>(
+    sub_blocks: &[BatchPointer<T>],
+    batch_reader: Arc<dyn BatchReader>,
+    block_author: Option<Author>,
+    block_ts: u64,
+    ordered_authors: &[PeerId],
+    additional_peers_to_request: Option<&BitVec>,
+) -> ExecutorResult<Vec<SignedTransaction>> {
+    let mut ready_futs = true;
+    for data_ptr in sub_blocks {
+        let data_fut_lock = data_ptr.data_fut.lock();
+        if let Some(data_fut) = data_fut_lock.as_ref() {
+            if data_fut.iter().any(|fut| fut.peek().is_none()) {
+                ready_futs = false;
+                break;
+            }
+        }
+    }
+    if ready_futs {
+        let mut futs = Vec::with_capacity(30_000);
+        for data_ptr in sub_blocks {
+            let data_fut_lock = data_ptr.data_fut.lock();
+            if let Some(data_fut) = data_fut_lock.as_ref() {
+                for fut in data_fut.iter() {
+                    futs.push(fut.clone());
+                }
+            }
+        }
+        return QuorumStorePayloadManager::wait_transactions(futs).await;
+    }
+
+    let mut signers = Vec::new();
+    if let Some(peers) = additional_peers_to_request {
+        for i in peers.iter_ones() {
+            if let Some(author) = ordered_authors.get(i) {
+                signers.push(*author);
+            }
+        }
+    }
+    if let Some(author) = block_author {
+        signers.push(author);
+    }
+
+    let batches_and_responders = sub_blocks
+        .iter()
+        .flat_map(|sub_block| &sub_block.batch_summary)
         .map(|summary| {
             let mut signers = signers.clone();
             signers.append(&mut summary.signers(ordered_authors));

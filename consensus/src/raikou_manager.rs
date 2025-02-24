@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    counters::{RAIKOU_COMMIT_NOTIFY_TO_MEMPOOL_NOTIFY, RAIKOU_COMMIT_NOTIFY_WAIT_PAYLOAD},
+    counters::{
+        RAIKOU_COMMIT_NOTIFY_PAYLOAD_LEN, RAIKOU_COMMIT_NOTIFY_TO_MEMPOOL_NOTIFY,
+        RAIKOU_COMMIT_NOTIFY_WAIT_PAYLOAD,
+    },
     liveness::proposal_status_tracker::{
         ExponentialWindowFailureTracker, LockedExponentialWindowFailureTracker,
         OptQSPullParamsProvider, TOptQSPullParamsProvider,
@@ -562,7 +565,12 @@ impl RaikouManager {
                         .ok()
                         .unwrap();
                     let dissemination::NewQCWithPayload { payload, qc } = *event;
-                    // TODO: add fetching here
+                    // TODO: double-check fetching here
+                    let block_author = index_to_address[&payload.author()];
+                    monitor!(
+                        "raikouman_newqc_fetch",
+                        payload_manager.prefetch_payload_data(&payload.inner, block_author, 0)
+                    )
                 } else if match_event_type::<dissemination::Kill>(&event) {
                     break;
                 } else {
@@ -996,8 +1004,11 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
     }
 
     async fn available_prefix(&self, payload: &raikou_types::Payload) -> (Prefix, BitVec) {
-        self.payload_manager
-            .available_prefix(payload.inner.as_raikou_payload())
+        monitor!(
+            "raikouman_dl_availprefix",
+            self.payload_manager
+                .available_prefix(payload.inner.as_raikou_payload())
+        )
     }
 
     async fn notify_commit(&self, payloads: Vec<(raikou_types::Payload, NodeId, BitVec)>) {
@@ -1020,6 +1031,7 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
                     .observe(payload.as_raikou_payload().num_txns() as f64);
             }
 
+            RAIKOU_COMMIT_NOTIFY_PAYLOAD_LEN.inc_by(payloads.len() as u64);
             let mut waiters = Vec::with_capacity(payloads.len());
             for (payload, author, signers) in &payloads {
                 let payload_manager = payload_manager.clone();

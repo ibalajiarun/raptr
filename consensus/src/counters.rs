@@ -1395,3 +1395,11 @@ pub static RAIKOU_COMMIT_NOTIFY_WAIT_PAYLOAD: Lazy<Histogram> = Lazy::new(|| {
     )
     .unwrap()
 });
+
+pub static RAIKOU_COMMIT_NOTIFY_PAYLOAD_LEN: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "raikou_commit_notify_payload_len",
+        "Commit to mempool notify payload len",
+    )
+    .unwrap()
+});

@@ -81,10 +81,17 @@ impl PendingTracker {
     }
 }
 
+const COMMIT_LATENCY_BUCKETS: &[f64] = &[
+    0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.6, 0.7, 0.8,
+    0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 2.0, 2.2, 2.4, 2.6, 2.8, 3.0, 3.2, 3.4,
+    3.6, 3.8, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0, 7.5, 10.0,
+];
+
 pub static RAIKOU_MEMPOOL_PULL_LATENCY: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "raikou_mempool_insert_to_pull_latency",
         "Raikou Mempool Insert to Pull Latency",
+        COMMIT_LATENCY_BUCKETS.to_vec(),
     )
     .unwrap()
 });
@@ -92,7 +99,8 @@ pub static RAIKOU_MEMPOOL_PULL_LATENCY: Lazy<Histogram> = Lazy::new(|| {
 pub static RAIKOU_MEMPOOL_INSERT_TO_COMMIT_LATENCY: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!(
         "raikou_mempool_insert_to_commit_latency",
-        "Raikou Pull to Commit Latnecy"
+        "Raikou Pull to Commit Latnecy",
+        COMMIT_LATENCY_BUCKETS.to_vec()
     )
     .unwrap()
 });

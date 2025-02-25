@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
+    counters::RAIKOU_COMMIT_NOTIFY_TO_MEMPOOL_NOTIFY,
     liveness::proposal_status_tracker::{
         ExponentialWindowFailureTracker, LockedExponentialWindowFailureTracker,
         OptQSPullParamsProvider, TOptQSPullParamsProvider,
@@ -503,17 +504,22 @@ impl RaikouManager {
                         .unwrap();
                     let dissemination::ProposalReceived { round, payload, .. } = *event;
 
-                    payload_manager.prefetch_payload_data(
-                        &payload.inner,
-                        aptos_infallible::duration_since_epoch().as_micros() as u64,
+                    monitor!(
+                        "payload_manager_prefetch",
+                        payload_manager.prefetch_payload_data(
+                            &payload.inner,
+                            aptos_infallible::duration_since_epoch().as_micros() as u64,
+                        )
                     );
 
                     let module_network_sender = module_network.new_sender();
                     let payload_manager = payload_manager.clone();
                     let block_author = Some(index_to_address[&payload.author()]);
                     tokio::spawn(async move {
-                        let (prefix, _) =
-                            payload_manager.available_prefix(&payload.inner.as_raikou_payload(), 0);
+                        let (prefix, _) = monitor!(
+                            "payload_manager_available",
+                            payload_manager.available_prefix(&payload.inner.as_raikou_payload(), 0)
+                        );
                         if prefix == N_SUB_BLOCKS {
                             info!("Full prefix available {}/{}", prefix, N_SUB_BLOCKS);
                             module_network_sender
@@ -992,8 +998,11 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
     ) -> (Prefix, BitVec) {
         self.payload_manager
             .prefetch_payload_data(&payload.inner, 0);
-        self.payload_manager
-            .available_prefix(payload.inner.as_raikou_payload(), cached_value)
+        monitor!(
+            "raikouman_dl_availprefix",
+            self.payload_manager
+                .available_prefix(payload.inner.as_raikou_payload(), cached_value)
+        )
     }
 
     async fn notify_commit(&self, payloads: Vec<raikou_types::Payload>) {
@@ -1001,6 +1010,8 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
         let state_sync_notifier = self.state_sync_notifier.clone();
 
         tokio::spawn(async move {
+            let _timer = RAIKOU_COMMIT_NOTIFY_TO_MEMPOOL_NOTIFY.start_timer();
+
             let payloads: Vec<Payload> =
                 payloads.into_iter().map(|payload| payload.inner).collect();
 

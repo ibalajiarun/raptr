@@ -1368,3 +1368,11 @@ pub static OPTQS_LAST_CONSECUTIVE_SUCCESS_COUNT: Lazy<Histogram> = Lazy::new(|| 
         "The number of last consecutive successes capped at window length",
     )
 });
+
+pub static RAIKOU_COMMIT_NOTIFY_TO_MEMPOOL_NOTIFY: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "raikou_commit_notify_to_mempool_notify_latency",
+        "Commit to mempool notify latency",
+    )
+    .unwrap()
+});

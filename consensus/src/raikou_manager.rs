@@ -1057,6 +1057,7 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
                 // TODO(ibalaiarun) fix authors
                 match payload_manager.get_transactions(&block, None).await {
                     Ok((txns, _)) => {
+                        assert_eq!(txns.len(), payload.as_raikou_payload().num_txns());
                         let txns = txns.into_iter().map(Transaction::UserTransaction).collect();
                         state_sync_notifier
                             .notify_new_commit(txns, Vec::new())

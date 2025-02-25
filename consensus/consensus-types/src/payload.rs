@@ -14,7 +14,9 @@ use futures::{
 use serde::{Deserialize, Serialize};
 use std::{
     fmt::Debug,
+    future::Future,
     ops::{Deref, DerefMut, Range},
+    pin::Pin,
     sync::{Arc, OnceLock},
 };
 
@@ -32,9 +34,14 @@ pub trait TDataInfo {
     fn signers(&self, ordered_authors: &[PeerId]) -> Vec<PeerId>;
 }
 
+pub type DataFetchFut =
+    Shared<Pin<Box<dyn Future<Output = ExecutorResult<Vec<SignedTransaction>>> + Send>>>;
+
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct BatchPointer<T> {
     pub batch_summary: Vec<T>,
+    #[serde(skip)]
+    pub data_fut: Arc<Mutex<Option<DataFetchFut>>>,
 }
 
 impl<T> BatchPointer<T>
@@ -44,12 +51,14 @@ where
     pub fn new(metadata: Vec<T>) -> Self {
         Self {
             batch_summary: metadata,
+            data_fut: Arc::new(Mutex::new(None)),
         }
     }
 
     pub fn empty() -> Self {
         Self {
             batch_summary: Vec::new(),
+            data_fut: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -89,6 +98,7 @@ where
     fn from(value: Vec<T>) -> Self {
         Self {
             batch_summary: value,
+            data_fut: Arc::new(Mutex::new(None)),
         }
     }
 }

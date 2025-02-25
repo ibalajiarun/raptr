@@ -188,8 +188,8 @@ impl RaikouManager {
             leader_schedule: round_robin(n_nodes),
             delta: Duration::from_secs_f64(delta),
             end_of_run: Instant::now() + Duration::from_secs_f64(delta) * total_duration_in_delta,
-            extra_wait_before_qc_vote: Duration::from_secs_f64(delta * 0.1),
-            extra_wait_before_commit_vote: Duration::from_secs_f64(delta * 0.1),
+            extra_wait_before_qc_vote: Duration::from_secs_f64(delta * 0.15),
+            extra_wait_before_commit_vote: Duration::from_secs_f64(delta * 0.15),
             enable_round_entry_permission: false,
             enable_commit_votes: true,
             status_interval: Duration::from_secs_f64(delta) * 10,
@@ -522,18 +522,20 @@ impl RaikouManager {
                                 .await;
                         } else {
                             info!("Partial prefix available {}/{}", prefix, N_SUB_BLOCKS);
-                            if let Ok(_) = payload_manager
-                                .wait_for_payload(
-                                    &payload.inner,
-                                    block_author,
-                                    // timestamp is only used for batch expiration, which is not
-                                    // supported in this prototype.
-                                    0,
-                                    round_initial_timeout,
-                                    false,
-                                )
-                                .await
-                            {
+                            if let Ok(_) = monitor!(
+                                "rm_dl_pm_wfp",
+                                payload_manager
+                                    .wait_for_payload(
+                                        &payload.inner,
+                                        block_author,
+                                        // timestamp is only used for batch expiration, which is not
+                                        // supported in this prototype.
+                                        0,
+                                        round_initial_timeout,
+                                        false,
+                                    )
+                                    .await
+                            ) {
                                 module_network_sender
                                     .notify(consensus_module, dissemination::FullBlockAvailable {
                                         round,
@@ -558,11 +560,12 @@ impl RaikouManager {
                         .ok()
                         .unwrap();
                     let dissemination::NewQCWithPayload { payload, qc } = *event;
-                    let block_author = index_to_address[&payload.author()];
-                    monitor!(
-                        "raikouman_newqc_fetch",
-                        payload_manager.prefetch_payload_data(&payload.inner, block_author, 0)
-                    ) // TODO: add fetching here
+                    // let block_author = index_to_address[&payload.author()];
+                    // TODO: add fetching here
+                    // monitor!(
+                    //     "raikouman_newqc_fetch",
+                    //     payload_manager.prefetch_payload_data(&payload.inner, block_author, 0)
+                    // )
                 } else if match_event_type::<dissemination::Kill>(&event) {
                     break;
                 } else {
@@ -954,15 +957,19 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
         exclude: HashSet<raikou_types::BatchInfo>,
         exclude_authors: Option<BitVec>,
     ) -> raikou_types::Payload {
-        let mut optqs_params = self.optqs_payload_param_provider.get_params();
-        if let Some(param) = optqs_params.as_mut() {
-            if let Some(additional_exclude) = exclude_authors {
-                for idx in additional_exclude.iter_ones() {
-                    let author = *self.index_to_address.get(&idx).unwrap();
-                    param.exclude_authors.insert(author);
-                }
-            }
-        }
+        // let mut optqs_params = self.optqs_payload_param_provider.get_params();
+        // if let Some(param) = optqs_params.as_mut() {
+        //     if let Some(additional_exclude) = exclude_authors {
+        //         for idx in additional_exclude.iter_ones() {
+        //             let author = *self.index_to_address.get(&idx).unwrap();
+        //             param.exclude_authors.insert(author);
+        //         }
+        //     }
+        // }
+        let optqs_params = Some(OptQSPayloadPullParams {
+            exclude_authors: HashSet::new(),
+            minimum_batch_age_usecs: Duration::from_millis(30).as_micros() as u64,
+        });
         let (_, payload) = self
             .payload_client
             .pull_payload(
@@ -983,7 +990,7 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
                     pending_uncommitted_blocks: 0,
                     recent_max_fill_fraction: 0.0,
                     block_timestamp: aptos_infallible::duration_since_epoch(),
-                    maybe_optqs_payload_pull_params: self.optqs_payload_param_provider.get_params(),
+                    maybe_optqs_payload_pull_params: optqs_params,
                 },
                 TransactionFilter::no_op(),
                 async {}.boxed(),

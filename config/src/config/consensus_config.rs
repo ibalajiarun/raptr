@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, u64};
 
 // NOTE: when changing, make sure to update QuorumStoreBackPressureConfig::backlog_txn_limit_count as well.
-const MAX_SENDING_BLOCK_TXNS_AFTER_FILTERING: u64 = 21000;
-const MAX_SENDING_BLOCK_TXNS: u64 = 21000;
+const MAX_SENDING_BLOCK_TXNS_AFTER_FILTERING: u64 = 25000;
+const MAX_SENDING_BLOCK_TXNS: u64 = 25000;
 pub(crate) static MAX_RECEIVING_BLOCK_TXNS: Lazy<u64> =
     Lazy::new(|| 10000.max(2 * MAX_SENDING_BLOCK_TXNS));
 // stop reducing size at this point, so 1MB transactions can still go through

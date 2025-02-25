@@ -15,7 +15,7 @@ use anyhow::bail;
 use aptos_consensus_types::proof_of_store::{BatchInfo, SignedBatchInfo};
 use aptos_crypto::{CryptoMaterialError, HashValue};
 use aptos_executor_types::{ExecutorError, ExecutorResult};
-use aptos_infallible::Mutex;
+use aptos_infallible::{Mutex, RwLock};
 use aptos_logger::prelude::*;
 use aptos_types::{transaction::SignedTransaction, validator_signer::ValidatorSigner, PeerId};
 use dashmap::{
@@ -26,7 +26,7 @@ use fail::fail_point;
 use futures::{future::Shared, FutureExt};
 use once_cell::sync::OnceCell;
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{hash_map, BTreeSet, HashMap},
     future::Future,
     pin::Pin,
     sync::{
@@ -516,7 +516,7 @@ struct BatchFetchUnit {
 pub struct BatchReaderImpl<T> {
     batch_store: Arc<BatchStore>,
     batch_requester: Arc<BatchRequester<T>>,
-    inflight_fetch_requests: Arc<Mutex<HashMap<HashValue, BatchFetchUnit>>>,
+    inflight_fetch_requests: Arc<RwLock<HashMap<HashValue, BatchFetchUnit>>>,
 }
 
 impl<T: QuorumStoreSender + Clone + Send + Sync + 'static> BatchReaderImpl<T> {
@@ -524,7 +524,7 @@ impl<T: QuorumStoreSender + Clone + Send + Sync + 'static> BatchReaderImpl<T> {
         Self {
             batch_store,
             batch_requester: Arc::new(batch_requester),
-            inflight_fetch_requests: Arc::new(Mutex::new(HashMap::new())),
+            inflight_fetch_requests: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -535,8 +535,13 @@ impl<T: QuorumStoreSender + Clone + Send + Sync + 'static> BatchReaderImpl<T> {
     ) -> Shared<Pin<Box<dyn Future<Output = ExecutorResult<Vec<SignedTransaction>>> + Send>>> {
         let mut responders = responders.into_iter().collect();
 
+        if let Some(fetch_unit) = self.inflight_fetch_requests.read().get(batch_info.digest()) {
+            fetch_unit.responders.lock().append(&mut responders);
+            return fetch_unit.fut.clone();
+        }
+
         self.inflight_fetch_requests
-            .lock()
+            .write()
             .entry(*batch_info.digest())
             .and_modify(|fetch_unit| {
                 fetch_unit.responders.lock().append(&mut responders);
@@ -552,7 +557,7 @@ impl<T: QuorumStoreSender + Clone + Send + Sync + 'static> BatchReaderImpl<T> {
                 let fut = async move {
                     let batch_digest = *batch_info.digest();
                     defer!({
-                        inflight_requests_clone.lock().remove(&batch_digest);
+                        inflight_requests_clone.write().remove(&batch_digest);
                     });
                     if let Ok(mut value) = batch_store.get_batch_from_local(&batch_digest) {
                         Ok(value.take_payload().expect("Must have payload"))

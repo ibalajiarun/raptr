@@ -516,7 +516,7 @@ struct BatchFetchUnit {
 pub struct BatchReaderImpl<T> {
     batch_store: Arc<BatchStore>,
     batch_requester: Arc<BatchRequester<T>>,
-    inflight_fetch_requests: Arc<RwLock<HashMap<HashValue, BatchFetchUnit>>>,
+    inflight_fetch_requests: Arc<DashMap<HashValue, BatchFetchUnit>>,
 }
 
 impl<T: QuorumStoreSender + Clone + Send + Sync + 'static> BatchReaderImpl<T> {
@@ -524,7 +524,7 @@ impl<T: QuorumStoreSender + Clone + Send + Sync + 'static> BatchReaderImpl<T> {
         Self {
             batch_store,
             batch_requester: Arc::new(batch_requester),
-            inflight_fetch_requests: Arc::new(RwLock::new(HashMap::new())),
+            inflight_fetch_requests: Arc::new(DashMap::with_capacity(5000)),
         }
     }
 
@@ -535,13 +535,7 @@ impl<T: QuorumStoreSender + Clone + Send + Sync + 'static> BatchReaderImpl<T> {
     ) -> Shared<Pin<Box<dyn Future<Output = ExecutorResult<Vec<SignedTransaction>>> + Send>>> {
         let mut responders = responders.into_iter().collect();
 
-        if let Some(fetch_unit) = self.inflight_fetch_requests.read().get(batch_info.digest()) {
-            fetch_unit.responders.lock().append(&mut responders);
-            return fetch_unit.fut.clone();
-        }
-
         self.inflight_fetch_requests
-            .write()
             .entry(*batch_info.digest())
             .and_modify(|fetch_unit| {
                 fetch_unit.responders.lock().append(&mut responders);
@@ -557,7 +551,7 @@ impl<T: QuorumStoreSender + Clone + Send + Sync + 'static> BatchReaderImpl<T> {
                 let fut = async move {
                     let batch_digest = *batch_info.digest();
                     defer!({
-                        inflight_requests_clone.write().remove(&batch_digest);
+                        inflight_requests_clone.remove(&batch_digest);
                     });
                     if let Ok(mut value) = batch_store.get_batch_from_local(&batch_digest) {
                         Ok(value.take_payload().expect("Must have payload"))

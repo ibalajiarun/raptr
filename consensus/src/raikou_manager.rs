@@ -1033,20 +1033,28 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
                     .observe(payload.as_raikou_payload().num_txns() as f64);
             }
 
-            for payload in &payloads {
+            payload_manager.notify_commit(
+                aptos_infallible::duration_since_epoch()
+                    .saturating_sub(Duration::from_secs(30))
+                    .as_micros() as u64,
+                payloads.clone(),
+            );
+
+            for payload in payloads {
                 while let Err(e) = payload_manager
                     .wait_for_payload(&payload, None, 0, Duration::from_secs(1), true)
                     .await
                 {
                     error!("error {:?}", e);
                 }
+                let num_txns = payload.as_raikou_payload().num_txns();
 
                 let block = Block::new_for_dag(
                     0,
                     0,
                     0,
                     Vec::new(),
-                    payload.clone(),
+                    payload,
                     PeerId::ZERO,
                     Vec::new(),
                     HashValue::zero(),
@@ -1057,7 +1065,7 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
                 // TODO(ibalaiarun) fix authors
                 match payload_manager.get_transactions(&block, None).await {
                     Ok((txns, _)) => {
-                        assert_eq!(txns.len(), payload.as_raikou_payload().num_txns());
+                        assert_eq!(txns.len(), num_txns);
                         let txns = txns.into_iter().map(Transaction::UserTransaction).collect();
                         state_sync_notifier
                             .notify_new_commit(txns, Vec::new())
@@ -1067,13 +1075,6 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
                     Err(_e) => unreachable!("Failed to get transactions for block {:?} even after waiting for the payload", block),
                 }
             }
-
-            payload_manager.notify_commit(
-                aptos_infallible::duration_since_epoch()
-                    .saturating_sub(Duration::from_secs(30))
-                    .as_micros() as u64,
-                payloads,
-            );
         });
     }
 

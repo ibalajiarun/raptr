@@ -263,7 +263,7 @@ pub struct RaikouNode<DL> {
     dissemination: DL,
 
     // Logging and metrics
-    start_time: Instant,
+    first_committed_block_timestamp: Option<SystemTime>,
     detailed_logging: bool,
     metrics: Metrics,
     block_create_time: BTreeMap<Round, Instant>,
@@ -339,7 +339,7 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
             node_id: id,
             config: config.clone(),
             dissemination,
-            start_time: Instant::now(), // Will be overwritten once the protocol is actually started.
+            first_committed_block_timestamp: None,
             detailed_logging,
             metrics,
             block_create_time: Default::default(),
@@ -657,7 +657,20 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
 
     async fn commit_qc(&mut self, qc: QC, commit_reason: CommitReason) {
         let ts = self.blocks[qc.block_digest()].data.timestamp_usecs;
+        let is_first_commit = self.first_committed_block_timestamp.is_none();
+
         let payloads = self.commit_qc_impl(qc, commit_reason);
+
+        if is_first_commit {
+            if let Some(ts) = self.first_committed_block_timestamp {
+                // Notify the dissemination layer about the first committed block timestamp.
+                // Used as the common base timestamp by all nodes for logging.
+                self.dissemination
+                    .set_first_committed_block_timestamp(ts)
+                    .await;
+            }
+        }
+
         self.dissemination.notify_commit(payloads, ts).await;
     }
 
@@ -666,7 +679,14 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
             return vec![];
         }
 
-        let parent = self.blocks[qc.block_digest()].parent_qc().clone();
+        let block = &self.blocks[qc.block_digest()];
+        let parent = block.parent_qc().clone();
+
+        if parent.is_genesis() {
+            self.log_detail(format!("First committed block: {}", qc.round()));
+            self.first_committed_block_timestamp =
+                Some(UNIX_EPOCH + Duration::from_micros(block.data.timestamp_usecs));
+        }
 
         // Check for safety violations:
         if qc.round() > self.committed_qc.round() && parent.round() < self.committed_qc.round() {
@@ -825,17 +845,23 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
         duration.as_secs_f64() / self.config.delta.as_secs_f64()
     }
 
-    fn time_in_delta(&self) -> f64 {
-        self.to_deltas(Instant::now() - self.start_time)
+    fn time_in_delta(&self) -> Option<f64> {
+        Some(
+            self.to_deltas(
+                SystemTime::now()
+                    .duration_since(self.first_committed_block_timestamp?)
+                    .ok()?,
+            ),
+        )
     }
 
     fn log_info(&self, msg: String) {
-        aptos_logger::info!(
-            "Node {} at {:.2}Δ: Raikou: {}",
-            self.node_id,
-            self.time_in_delta(),
-            msg
-        );
+        let time_str = self
+            .time_in_delta()
+            .map(|t| format!("{:.2}Δ", t))
+            .unwrap_or_else(|| "???Δ".to_string());
+
+        aptos_logger::info!("Node {} at {}: Raikou: {}", self.node_id, time_str, msg);
     }
 
     fn log_detail(&self, msg: String) {
@@ -1410,9 +1436,8 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
         // Logging and halting
 
         upon start {
-            self.start_time = Instant::now();
             self.log_detail("Started".to_string());
-            ctx.set_timer(self.config.end_of_run - self.start_time, TimerEvent::EndOfRun);
+            ctx.set_timer(self.config.end_of_run - Instant::now(), TimerEvent::EndOfRun);
             ctx.set_timer(self.config.status_interval, TimerEvent::Status);
         };
 
@@ -1456,9 +1481,9 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
                 self.qcs_to_commit.first_key_value().map(|(k, _)| k),
                 self.qcs_to_commit.last_key_value().map(|(k, _)| k),
                 self.satisfied_qcs.last(),
-                self.qc_votes.iter().filter(|(round, _)| **round == self.r_cur).map(|(_, v)| v.len()).collect_vec(),
-                self.received_cc_vote.get(self.r_cur).len(),
-                self.tc_votes.get(self.r_cur).len(),
+                self.qc_votes[self.r_cur].len(),
+                self.cc_votes[self.r_cur].len(),
+                self.tc_votes[self.r_cur].len(),
             ));
             ctx.set_timer(self.config.status_interval, TimerEvent::Status);
         };

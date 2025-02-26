@@ -11,7 +11,7 @@ use crate::{
 };
 use aptos_bitvec::BitVec;
 use aptos_consensus_types::common::Author;
-use std::{any::Any, collections::HashSet, fmt::Debug, future::Future};
+use std::{any::Any, collections::HashSet, fmt::Debug, future::Future, time::SystemTime};
 use tokio::time::Instant;
 
 #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
@@ -94,6 +94,11 @@ pub trait DisseminationLayer: Send + Sync + 'static {
     fn check_payload(&self, payload: &Payload) -> Result<(), BitVec> {
         Ok(())
     }
+
+    fn set_first_committed_block_timestamp(
+        &self,
+        timestamp: SystemTime,
+    ) -> impl Future<Output = ()> + Send;
 }
 
 pub struct Metrics {

@@ -24,9 +24,9 @@ use crate::{
     },
 };
 use anyhow::Context;
+use aptos_bitvec::BitVec;
 use aptos_crypto::{bls12381::Signature, hash::CryptoHash, Genesis};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
-use bitvec::prelude::BitVec;
 use defaultmap::DefaultBTreeMap;
 use itertools::Itertools;
 use rand::seq::SliceRandom;
@@ -260,7 +260,7 @@ impl BlockSizeLimit {
 
         let dummy_ac = AC {
             info: dummy_batch_info,
-            signers: BitVec::repeat(true, n_nodes),
+            signers: BitVec::from(vec![true; n_nodes]),
             multi_signature: dummy_signature(),
         };
 
@@ -362,10 +362,15 @@ where
         self.config.module_id
     }
 
-    async fn prepare_block(&self, round: Round, exclude: HashSet<BatchInfo>) -> Payload {
+    async fn prepare_block(
+        &self,
+        round: Round,
+        exclude: HashSet<BatchInfo>,
+        _missing_authors: Option<BitVec>,
+    ) -> Payload {
         let mut inner = self.inner.lock().await;
 
-        let mut acs: Vec<AC> = inner
+        let mut poas: Vec<AC> = inner
             .uncommitted_acs
             .iter()
             .filter(|&(_batch_digest, ac)| !exclude.contains(ac.info()))
@@ -373,16 +378,16 @@ where
             .collect();
 
         let limit = inner.config.block_size_limit.ac_limit();
-        if acs.len() > limit {
+        if poas.len() > limit {
             aptos_logger::warn!(
-                "Block size limit reached: {} ACs, {} allowed",
-                acs.len(),
+                "Block size limit reached: {} PoAs, {} allowed",
+                poas.len(),
                 limit
             );
-            acs.truncate(limit);
+            poas.truncate(limit);
         }
 
-        let batches = if inner.config.enable_optimistic_dissemination && acs.len() < limit {
+        let batches = if inner.config.enable_optimistic_dissemination && poas.len() < limit {
             let mut batches: Vec<BatchInfo> = inner
                 .uncommitted_uncertified_batches
                 .iter()
@@ -390,7 +395,7 @@ where
                 .filter(|batch_info| !exclude.contains(batch_info))
                 .collect();
 
-            let limit = inner.config.block_size_limit.batch_limit(acs.len());
+            let limit = inner.config.block_size_limit.batch_limit(poas.len());
             if batches.len() > limit {
                 aptos_logger::warn!(
                     "Block size limit reached: {} batches, {} allowed",
@@ -407,26 +412,31 @@ where
             Default::default()
         };
 
-        Payload::new(round, inner.node_id, acs, batches)
+        Payload::new(round, inner.node_id, poas, batches)
     }
 
-    async fn available_prefix(&self, payload: &Payload, cached_value: usize) -> Prefix {
+    async fn available_prefix(&self, payload: &Payload, _cached_value: usize) -> (Prefix, BitVec) {
         let inner = self.inner.lock().await;
 
-        let mut available_prefix = cached_value;
-        while available_prefix < payload.sub_blocks().len() {
-            let sub_block = payload.sub_block(available_prefix);
-            if !sub_block
-                .iter()
-                .all(|batch| inner.batches.contains_key(&batch.digest))
-            {
-                return available_prefix;
-            }
+        let mut missing_authors = BitVec::with_num_bits(inner.config.n_nodes as u16);
+        let mut prefix = N_SUB_BLOCKS;
 
-            available_prefix += 1;
+        for (i, sub_block) in payload.sub_blocks().enumerate() {
+            for batch_info in sub_block {
+                if !inner.batches.contains_key(&batch_info.digest) {
+                    missing_authors.set(batch_info.author as u16);
+                    if prefix == N_SUB_BLOCKS {
+                        prefix = i;
+                    }
+                }
+            }
         }
 
-        available_prefix
+        if prefix == N_SUB_BLOCKS {
+            assert!(missing_authors.all_zeros());
+        }
+
+        (prefix, missing_authors)
     }
 
     async fn notify_commit(&self, payloads: Vec<Payload>) {
@@ -855,9 +865,9 @@ where
                     batch_digest,
                 ));
 
-                let mut signers = BitVec::repeat(false, self.config.n_nodes);
+                let mut signers = BitVec::with_num_bits(self.config.n_nodes as u16);
                 for (node, _) in self.batch_stored_votes[batch_id].iter() {
-                    signers.set(*node, true);
+                    signers.set(*node as u16);
                 }
 
                 let multi_signature = self.sig_verifier.aggregate_signatures(

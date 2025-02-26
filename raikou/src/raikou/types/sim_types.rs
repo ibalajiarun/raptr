@@ -9,9 +9,9 @@ use crate::{
     },
 };
 use anyhow::Context;
+use aptos_bitvec::BitVec;
 use aptos_crypto::bls12381::Signature;
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
-use bitvec::prelude::BitVec;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use std::{

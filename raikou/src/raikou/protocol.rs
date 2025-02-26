@@ -221,7 +221,7 @@ pub struct Config {
     /// The time  waits after receiving a block before voting for a QC for it
     /// if it doesn't have all the batches yet.
     pub extra_wait_before_qc_vote: Duration,
-    pub extra_wait_before_commit_vote: Duration,
+    pub enable_partial_qc_votes: bool,
 
     pub block_fetch_multiplicity: usize,
     pub block_fetch_interval: Duration,
@@ -1088,7 +1088,9 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
                         leader,
                     ));
 
-                    ctx.set_timer(self.config.extra_wait_before_qc_vote, TimerEvent::QcVote(round));
+                    if self.config.enable_partial_qc_votes {
+                        ctx.set_timer(self.config.extra_wait_before_qc_vote, TimerEvent::QcVote(round));
+                    }
                 }
             }
         };

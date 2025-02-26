@@ -276,7 +276,7 @@ pub struct RaikouNode<S, DL> {
     r_cur: Round,                   // The current round the node is in.
     r_timeout: Round,               // The highest round the node has voted to time out.
     last_qc_vote: SubBlockId,
-    last_commit_vote: SubBlockId,
+    cc_voted: DefaultBTreeMap<Round, bool>, // Whether the node has CC-voted in round r.
     last_tc_round: Round,
     qc_high: QC,
     committed_qc: QC,
@@ -349,7 +349,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             entry_reason: RoundEntryReason::FullPrefixQC(QC::genesis()),
             r_cur: 0,
             last_qc_vote: (0, 0).into(),
-            last_commit_vote: (0, 0).into(),
+            cc_voted: Default::default(),
             last_tc_round: 0,
             r_timeout: 0,
             qc_high: QC::genesis(),
@@ -476,10 +476,11 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             self.qc_high = new_qc.clone();
         }
 
-        // If new_qc.round() > r_commit_vote and new_qc.round() > r_timeout,
-        // multicast a commit vote and update r_commit_vote.
+        // If not yet CC-voted in new_qc.round() and new_qc.round() > r_timeout, multicast a CC-vote.
         if self.config.enable_commit_votes {
-            if new_qc.round() > self.last_commit_vote.round && new_qc.round() > self.r_timeout {
+            if !self.cc_voted[new_qc.round()] && new_qc.round() > self.r_timeout {
+                self.cc_voted[new_qc.round()] = true;
+
                 let signature = self
                     .signer
                     .sign_tagged(
@@ -492,7 +493,8 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                     .unwrap();
 
                 self.log_detail(format!("CC-voting for QC {:?}", new_qc.sub_block_id()));
-                if let Some(block) = self.blocks.get(&new_qc.block_digest()) {
+
+                if let Some(block) = self.blocks.get(new_qc.block_digest()) {
                     observe_block(block.data.timestamp_usecs, "CCVote");
                 }
                 ctx.multicast(Message::CcVote(new_qc.clone(), signature))
@@ -684,9 +686,10 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                         .as_secs_f64(),
                 );
                 observe_block(block.data.timestamp_usecs, "COMMITBLOCK");
-                self.metrics
-                    .block_consensus_latency
-                    .push((now, self.to_deltas(now - self.block_create_time[&qc.round()])));
+                self.metrics.block_consensus_latency.push((
+                    now,
+                    self.to_deltas(now - self.block_create_time[&qc.round()]),
+                ));
                 for _ in 0..(block.acs().len() + qc.prefix()) {
                     RAIKOU_BATCH_CONSENSUS_LATENCY.observe(
                         now.saturating_duration_since(self.block_create_time[&qc.round()])

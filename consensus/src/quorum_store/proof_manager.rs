@@ -185,6 +185,10 @@ impl ProofManager {
         counters::NUM_INLINE_BATCHES.observe(inline_block.len() as f64);
         counters::NUM_INLINE_TXNS.observe(inline_block_size.count() as f64);
 
+        let proof_ratio = txns_with_proof_size.count() as f64
+            / (txns_with_proof_size.count() as f64 + opt_batch_txns_size.count() as f64);
+        counters::BATCH_PROOF_RATIO.observe(proof_ratio);
+
         let response = if request.maybe_optqs_payload_pull_params.is_some() {
             let mut sub_blocks = SubBlocks::default();
 

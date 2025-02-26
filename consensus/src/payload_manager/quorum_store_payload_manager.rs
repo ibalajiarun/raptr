@@ -459,6 +459,7 @@ impl TPayloadManager for QuorumStorePayloadManager {
             return Ok((Vec::new(), None));
         };
 
+        let mut txns = Vec::new();
         let transaction_payload = match payload {
             Payload::InQuorumStore(proof_with_data) => {
                 let transactions = process_qs_payload(
@@ -553,7 +554,7 @@ impl TPayloadManager for QuorumStorePayloadManager {
                 )
             },
             Payload::Raikou(raikou_payload) => {
-                let mut sub_blocks_txns = Vec::new();
+                let mut sub_blocks_txns = Vec::with_capacity(30_000);
 
                 monitor!(
                     "pm_gt_raikou",
@@ -583,9 +584,10 @@ impl TPayloadManager for QuorumStorePayloadManager {
                     )
                     .await
                 )?;
-                let all_txns = [proof_batch_txns, sub_blocks_txns].concat();
+                sub_blocks_txns.extend(proof_batch_txns);
+                txns = sub_blocks_txns;
                 BlockTransactionPayload::new_raikou_payload(
-                    all_txns,
+                    Vec::new(),
                     raikou_payload.proof_with_data().deref().clone(),
                     raikou_payload.all_sub_block_batches(),
                 )
@@ -599,18 +601,15 @@ impl TPayloadManager for QuorumStorePayloadManager {
             ),
         };
 
-        if let Some(consensus_publisher) = &self.maybe_consensus_publisher {
-            let message = ConsensusObserverMessage::new_block_payload_message(
-                block.gen_block_info(HashValue::zero(), 0, None),
-                transaction_payload.clone(),
-            );
-            consensus_publisher.publish_message(message);
-        }
+        // if let Some(consensus_publisher) = &self.maybe_consensus_publisher {
+        //     let message = ConsensusObserverMessage::new_block_payload_message(
+        //         block.gen_block_info(HashValue::zero(), 0, None),
+        //         transaction_payload.clone(),
+        //     );
+        //     consensus_publisher.publish_message(message);
+        // }
 
-        Ok((
-            transaction_payload.transactions(),
-            transaction_payload.limit(),
-        ))
+        Ok((txns, transaction_payload.limit()))
     }
 }
 
@@ -632,8 +631,10 @@ async fn process_optqs_payload<T: TDataInfo>(
         }
     }
     if futs.is_some() {
+        debug!("waiting for cached future");
         return futs.unwrap().await;
     }
+    debug!("calling into batch store again");
 
     let mut signers = Vec::new();
     if let Some(peers) = additional_peers_to_request {

@@ -66,7 +66,11 @@ use raikou::{
         RaikouNode,
     },
 };
-use rayon::slice::ParallelSlice;
+use rayon::{
+    iter::ParallelIterator,
+    prelude::{IndexedParallelIterator, IntoParallelIterator},
+    slice::ParallelSlice,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     any::{Any, TypeId},
@@ -1016,9 +1020,14 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
         )
     }
 
-    async fn notify_commit(&self, payloads: Vec<raikou_types::Payload>) {
+    async fn notify_commit(
+        &self,
+        payloads: Vec<raikou_types::Payload>,
+        block_timestamp_usecs: u64,
+    ) {
         let payload_manager = self.payload_manager.clone();
         let state_sync_notifier = self.state_sync_notifier.clone();
+        let self_peer = *self.index_to_address.get(&self.node_id).unwrap();
 
         tokio::spawn(async move {
             let _timer = RAIKOU_COMMIT_NOTIFY_TO_MEMPOOL_NOTIFY.start_timer();
@@ -1031,22 +1040,21 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
                     .observe(payload.as_raikou_payload().num_batches() as f64);
                 quorum_store::counters::NUM_TXNS_PER_BLOCK
                     .observe(payload.as_raikou_payload().num_txns() as f64);
+                for batch in payload.as_raikou_payload().get_all_batch_infos() {
+                    if batch.author == self_peer {
+                        raikou::raikou::observe_block(block_timestamp_usecs, "ORIGINCOMMIT");
+                    }
+                }
             }
 
             payload_manager.notify_commit(
                 aptos_infallible::duration_since_epoch()
-                    .saturating_sub(Duration::from_secs(30))
+                    .saturating_sub(Duration::from_secs(1))
                     .as_micros() as u64,
                 payloads.clone(),
             );
 
             for payload in payloads {
-                while let Err(e) = payload_manager
-                    .wait_for_payload(&payload, None, 0, Duration::from_secs(1), true)
-                    .await
-                {
-                    error!("error {:?}", e);
-                }
                 let num_txns = payload.as_raikou_payload().num_txns();
 
                 let block = Block::new_for_dag(
@@ -1063,10 +1071,14 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
                 );
 
                 // TODO(ibalaiarun) fix authors
-                match payload_manager.get_transactions(&block, None).await {
+                let txns_result = monitor!(
+                    "raikouman_dl_nc_gt",
+                    payload_manager.get_transactions(&block, None).await
+                );
+                match  txns_result {
                     Ok((txns, _)) => {
                         assert_eq!(txns.len(), num_txns);
-                        let txns = txns.into_iter().map(Transaction::UserTransaction).collect();
+                        let txns = txns.into_par_iter().with_min_len(20).map(Transaction::UserTransaction).collect();
                         state_sync_notifier
                             .notify_new_commit(txns, Vec::new())
                             .await

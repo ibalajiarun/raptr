@@ -50,3 +50,18 @@ pub static ROUND_ENTER_REASON: Lazy<IntCounterVec> = Lazy::new(|| {
     ])
     .unwrap()
 });
+
+pub static QC_VOTING_PREFIX_HISTOGRAM: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!("raikou_qc_voting_prefix", "Raikou Voting Prefix", vec![
+        0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0
+    ])
+    .unwrap()
+});
+
+pub static PREFIX_VOTED_PREVIOUSLY_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "raikou_prefix_voted_previously_count",
+        "Raikou Voting Prefix Previous Count",
+    )
+    .unwrap()
+});

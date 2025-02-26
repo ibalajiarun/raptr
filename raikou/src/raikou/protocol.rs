@@ -13,7 +13,8 @@ use crate::{
     monitor, protocol,
     raikou::{
         counters::{
-            BLOCK_TRACING, RAIKOU_BATCH_CONSENSUS_LATENCY, RAIKOU_BLOCK_COMMIT_RATE,
+            BLOCK_TRACING, PREFIX_VOTED_PREVIOUSLY_COUNTER, QC_VOTING_PREFIX_HISTOGRAM,
+            RAIKOU_BATCH_CONSENSUS_LATENCY, RAIKOU_BLOCK_COMMIT_RATE,
             RAIKOU_BLOCK_CONSENSUS_LATENCY, ROUND_ENTER_REASON,
         },
         dissemination::{
@@ -587,8 +588,9 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
     }
 
     async fn commit_qc(&mut self, qc: QC, commit_reason: CommitReason) {
+        let ts = self.blocks[&qc.block_digest].data.timestamp_usecs;
         let payloads = self.commit_qc_impl(qc, commit_reason);
-        self.dissemination.notify_commit(payloads).await;
+        self.dissemination.notify_commit(payloads, ts).await;
     }
 
     fn commit_qc_impl(&mut self, qc: QC, commit_reason: CommitReason) -> Vec<Payload> {
@@ -678,6 +680,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                     now.saturating_duration_since(self.block_create_time[&qc.round])
                         .as_secs_f64(),
                 );
+                observe_block(block.data.timestamp_usecs, "COMMITBLOCK");
                 self.metrics
                     .block_consensus_latency
                     .push((now, self.to_deltas(now - self.block_create_time[&qc.round])));
@@ -1022,6 +1025,7 @@ where
                 let (prefix, missing_authors) = self.available_prefix().await;
                 let block_digest = self.leader_proposal[&round].clone();
 
+                QC_VOTING_PREFIX_HISTOGRAM.observe(prefix as f64);
                 self.log_detail(format!(
                     "QC-voting for block {} proposed by node {} by Timer with prefix {}/{}",
                     round,
@@ -1057,11 +1061,18 @@ where
                     let prefix = N_SUB_BLOCKS;
                     let block_digest = self.leader_proposal[&round].clone();
 
+                    let prev_prefix = if self.last_qc_vote.round == round {
+                        PREFIX_VOTED_PREVIOUSLY_COUNTER.inc();
+                        Some(self.last_qc_vote.prefix)
+                    } else {
+                        None
+                    };
                     self.log_detail(format!(
-                        "QC-voting for block {} proposed by node {} by Full Prefix with prefix {}",
+                        "QC-voting for block {} proposed by node {} by Full Prefix with prefix {}, prev prefix {:?}",
                         round,
                         self.config.leader(round),
                         N_SUB_BLOCKS,
+                        prev_prefix
                     ));
                     self.last_qc_vote = (round, prefix).into();
 

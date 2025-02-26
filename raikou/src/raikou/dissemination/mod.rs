@@ -85,7 +85,11 @@ pub trait DisseminationLayer: Send + Sync + 'static {
         cached_value: Prefix,
     ) -> impl Future<Output = (Prefix, BitVec)> + Send;
 
-    fn notify_commit(&self, payloads: Vec<Payload>) -> impl Future<Output = ()> + Send;
+    fn notify_commit(
+        &self,
+        payloads: Vec<Payload>,
+        block_timestamp: u64,
+    ) -> impl Future<Output = ()> + Send;
 
     fn check_payload(&self, payload: &Payload) -> Result<(), BitVec> {
         Ok(())

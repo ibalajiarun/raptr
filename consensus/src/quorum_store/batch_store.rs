@@ -419,9 +419,12 @@ impl BatchStore {
             .fetch_max(certified_time, Ordering::SeqCst);
 
         let expired_keys = self.clear_expired_payload(certified_time);
-        if let Err(e) = self.db.delete_batches(expired_keys) {
-            debug!("Error deleting batches: {:?}", e)
-        }
+        let db = self.db.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Err(e) = db.delete_batches(expired_keys) {
+                debug!("Error deleting batches: {:?}", e)
+            }
+        });
     }
 
     fn last_certified_time(&self) -> u64 {

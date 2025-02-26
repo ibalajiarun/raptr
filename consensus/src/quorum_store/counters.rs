@@ -1036,3 +1036,7 @@ pub static PROOF_MANAGER_OUT_OF_ORDER_PROOF_INSERTION: Lazy<IntCounterVec> = Laz
     )
     .unwrap()
 });
+
+pub static BATCH_PROOF_RATIO: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!("quorum_store_batch_proof_ratio", "QS Batch Proof Ratio").unwrap()
+});

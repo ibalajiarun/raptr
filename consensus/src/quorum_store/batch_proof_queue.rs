@@ -643,8 +643,8 @@ impl BatchProofQueue {
             iters.push(batch_iter);
         }
 
+        iters.shuffle(&mut thread_rng());
         while !iters.is_empty() {
-            // iters.shuffle(&mut thread_rng());
             iters.retain_mut(|iter| {
                 if full {
                     return false;

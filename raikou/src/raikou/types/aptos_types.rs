@@ -19,7 +19,7 @@ use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use std::{fmt::Debug, ops::Range};
 
-pub type AC = aptos_consensus_types::proof_of_store::ProofOfStore;
+pub type PoA = aptos_consensus_types::proof_of_store::ProofOfStore;
 
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
 pub struct Payload {
@@ -64,7 +64,7 @@ impl Payload {
         }
     }
 
-    /// Returns a new payload that does not include any of the ACs and only includes sub-blocks
+    /// Returns a new payload that does not include any of the PoAs and only includes sub-blocks
     /// from `range`.
     pub fn take_sub_blocks(&self, range: Range<Prefix>) -> Self {
         Self {
@@ -92,7 +92,7 @@ impl Payload {
         self.author
     }
 
-    pub fn acs(&self) -> &Vec<AC> {
+    pub fn poas(&self) -> &Vec<PoA> {
         self.inner.as_raikou_payload().proofs()
     }
 
@@ -105,9 +105,9 @@ impl Payload {
     }
 
     pub fn all(&self) -> impl Iterator<Item = &BatchInfo> {
-        self.acs()
+        self.poas()
             .iter()
-            .map(|ac| ac.info())
+            .map(|poa| poa.info())
             .chain(self.sub_blocks().flatten())
     }
 

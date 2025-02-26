@@ -650,7 +650,7 @@ async fn test_raikou(
     let mut network = InjectedLocalNetwork::new(n_nodes, network_injection(delay_function));
 
     let f = (n_nodes - 1) / 3;
-    let ac_quorum = 2 * f + 1;
+    let poa_quorum = 2 * f + 1;
 
     let config = raikou::Config {
         n_nodes,
@@ -668,7 +668,7 @@ async fn test_raikou(
         round_sync_interval: Duration::from_secs_f64(delta * 15.),
         block_fetch_multiplicity: std::cmp::min(2, n_nodes),
         block_fetch_interval: Duration::from_secs_f64(delta) * 2,
-        ac_quorum,
+        poa_quorum,
     };
 
     let mut join_handles = Vec::new();
@@ -791,7 +791,7 @@ async fn test_raikou(
                     module_id: diss_module_network.module_id(),
                     n_nodes,
                     f,
-                    ac_quorum,
+                    poa_quorum,
                     delta: Duration::from_secs_f64(delta),
                     batch_interval: Duration::from_secs_f64(batch_interval_secs),
                     enable_optimistic_dissemination,
@@ -800,10 +800,11 @@ async fn test_raikou(
                     batch_fetch_multiplicity: std::cmp::min(2, n_nodes),
                     batch_fetch_interval: Duration::from_secs_f64(delta) * 2,
                     status_interval: Duration::from_secs_f64(delta) * 10,
-                    block_size_limit: dissemination::native::BlockSizeLimit::from_max_number_of_acs(
-                        f64::ceil(expected_load as f64 * 1.5) as usize,
-                        n_nodes,
-                    ),
+                    block_size_limit:
+                        dissemination::native::BlockSizeLimit::from_max_number_of_poas(
+                            f64::ceil(expected_load as f64 * 1.5) as usize,
+                            n_nodes,
+                        ),
                 },
                 txns_iter,
                 cons_module_network.module_id(),

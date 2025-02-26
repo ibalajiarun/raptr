@@ -132,7 +132,7 @@ impl RaikouManager {
     ) {
         let n_nodes = epoch_state.verifier.len();
         let f = (n_nodes - 1) / 3;
-        let ac_quorum = 2 * f + 1;
+        let poa_quorum = 2 * f + 1;
         let start_time = Instant::now();
 
         let timer = LocalTimerService::new();
@@ -200,7 +200,7 @@ impl RaikouManager {
             round_sync_interval: Duration::from_secs_f64(delta) * 15,
             block_fetch_multiplicity: std::cmp::min(2, n_nodes),
             block_fetch_interval: Duration::from_secs_f64(delta) * 2,
-            ac_quorum,
+            poa_quorum,
         };
 
         let mut module_network = ModuleNetwork::new();
@@ -263,7 +263,7 @@ impl RaikouManager {
             node_id,
             n_nodes,
             f,
-            ac_quorum,
+            poa_quorum,
             diss_module_network,
             delta,
             cons_module_id,
@@ -586,7 +586,7 @@ impl RaikouManager {
         node_id: NodeId,
         n_nodes: usize,
         f: usize,
-        ac_quorum: usize,
+        poa_quorum: usize,
         diss_module_network: ModuleNetworkService,
         delta: f64,
         consensus_module_id: ModuleId,
@@ -605,7 +605,7 @@ impl RaikouManager {
             module_id: diss_module_network.module_id(),
             n_nodes,
             f,
-            ac_quorum,
+            poa_quorum,
             delta: Duration::from_secs_f64(delta),
             batch_interval: Duration::from_secs_f64(batch_interval_secs),
             enable_optimistic_dissemination,
@@ -615,7 +615,7 @@ impl RaikouManager {
             batch_fetch_multiplicity: std::cmp::min(2, n_nodes),
             batch_fetch_interval: Duration::from_secs_f64(delta) * 2,
             status_interval: Duration::from_secs_f64(delta) * 10,
-            block_size_limit: dissemination::native::BlockSizeLimit::from_max_number_of_acs(
+            block_size_limit: dissemination::native::BlockSizeLimit::from_max_number_of_poas(
                 f64::ceil(expected_load as f64 * 1.5) as usize,
                 n_nodes,
             ),

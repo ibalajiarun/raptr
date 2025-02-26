@@ -6,7 +6,7 @@ use crate::{
     monitor,
     raikou::{
         protocol,
-        types::{BatchInfo, Payload, AC},
+        types::{BatchInfo, Payload, PoA},
     },
 };
 use anyhow::{ensure, Context};
@@ -103,8 +103,8 @@ impl Block {
         &self.data.reason
     }
 
-    pub fn acs(&self) -> &Vec<AC> {
-        self.payload().acs()
+    pub fn poas(&self) -> &Vec<PoA> {
+        self.payload().poas()
     }
 
     pub fn sub_blocks(&self) -> impl ExactSizeIterator<Item = &Vec<BatchInfo>> {
@@ -126,7 +126,7 @@ impl Block {
         );
 
         let sig_verifier = &verifier.sig_verifier;
-        let quorum = verifier.config.ac_quorum;
+        let quorum = verifier.config.poa_quorum;
 
         self.payload()
             .verify(verifier)
@@ -441,10 +441,10 @@ pub struct TC {
     timeout_round: Round,
     vote_data: Vec<(NodeId, SubBlockId)>,
     aggregated_signature: Signature,
+    round_timeout_reason: RoundTimeoutReason,
 
     #[serde(skip)]
     max_vote: SubBlockId,
-    round_timeout_reason: RoundTimeoutReason,
 }
 
 impl Debug for TC {

@@ -239,7 +239,7 @@ pub struct Config<S> {
     pub end_of_run: Instant,
 
     /// Used for AC verification. Must be the same as in the Quorum Store module.
-    pub ac_quorum: usize,
+    pub poa_quorum: usize,
 }
 
 impl<S: LeaderSchedule> Config<S> {
@@ -733,7 +733,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                 and prefix {}/{} [{}/{} batches]{} ({:?}).",
                 qc.round(),
                 self.config.leader(qc.round()),
-                block.acs().len(),
+                block.poas().len(),
                 qc.prefix(),
                 N_SUB_BLOCKS,
                 block
@@ -762,7 +762,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                     now,
                     self.to_deltas(now - self.block_create_time[&qc.round()]),
                 ));
-                for _ in 0..(block.acs().len() + qc.prefix()) {
+                for _ in 0..(block.poas().len() + qc.prefix()) {
                     RAIKOU_BATCH_CONSENSUS_LATENCY.observe(
                         now.saturating_duration_since(self.block_create_time[&qc.round()])
                             .as_secs_f64(),
@@ -797,7 +797,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             }
 
             let block = &self.blocks[cur.block_digest()];
-            uncommitted.extend(block.acs().iter().map(|ac| ac.info().clone()));
+            uncommitted.extend(block.poas().iter().map(|ac| ac.info().clone()));
             uncommitted.extend(
                 block
                     .sub_blocks()
@@ -1014,7 +1014,7 @@ where
                 self.log_detail(format!(
                     "Proposing block {} with {} ACs and {} sub-blocks",
                     round,
-                    block.acs().len(),
+                    block.poas().len(),
                     N_SUB_BLOCKS,
                 ));
 
@@ -1040,7 +1040,7 @@ where
                     "Received block {} proposed by node {} with {} ACs and {} optimistically proposed batches",
                     block.round(),
                     leader,
-                    block.acs().len(),
+                    block.poas().len(),
                     block.sub_blocks().map(|b| b.len()).sum::<usize>(),
                 ));
 

@@ -55,30 +55,34 @@ impl Debug for BatchInfo {
 }
 
 #[derive(Clone, Hash, Serialize, Deserialize)]
-pub struct AC {
+pub struct PoA {
     pub info: BatchInfo,
     pub signers: BitVec,
     pub multi_signature: Signature,
 }
 
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
-pub struct AcVoteSignatureData {
+pub struct PoAVoteSignatureData {
     pub batch_digest: BatchHash,
 }
 
-impl AC {
+impl PoA {
     pub fn info(&self) -> &BatchInfo {
         &self.info
     }
 
-    pub fn verify(&self, sig_verifier: &SignatureVerifier, ac_quorum: usize) -> anyhow::Result<()> {
+    pub fn verify(
+        &self,
+        sig_verifier: &SignatureVerifier,
+        poa_quorum: usize,
+    ) -> anyhow::Result<()> {
         let signers = self.signers.iter_ones().collect_vec();
 
-        if signers.len() < ac_quorum {
-            return Err(anyhow::anyhow!("AC has too few signers"));
+        if signers.len() < poa_quorum {
+            return Err(anyhow::anyhow!("PoA has too few signers"));
         }
 
-        let sig_data = AcVoteSignatureData {
+        let sig_data = PoAVoteSignatureData {
             batch_digest: self.info.digest,
         };
 
@@ -91,7 +95,7 @@ pub struct Payload {
     round: Round,
     author: NodeId,
     data: Arc<PayloadData>,
-    include_acs: bool,
+    include_poas: bool,
     sub_blocks: Range<Prefix>,
 }
 
@@ -106,7 +110,7 @@ impl Debug for Payload {
 
 #[derive(Hash, Serialize, Deserialize)]
 struct PayloadData {
-    acs: Vec<AC>,
+    poas: Vec<PoA>,
     sub_blocks: [Vec<BatchInfo>; N_SUB_BLOCKS],
 }
 
@@ -114,14 +118,14 @@ impl Payload {
     pub fn new(
         round: Round,
         author: NodeId,
-        acs: Vec<AC>,
+        poas: Vec<PoA>,
         sub_blocks: [Vec<BatchInfo>; N_SUB_BLOCKS],
     ) -> Self {
         Self {
             round,
             author,
-            data: Arc::new(PayloadData { acs, sub_blocks }),
-            include_acs: true,
+            data: Arc::new(PayloadData { poas, sub_blocks }),
+            include_poas: true,
             sub_blocks: 0..N_SUB_BLOCKS,
         }
     }
@@ -133,7 +137,7 @@ impl Payload {
             round: self.round,
             author: self.author,
             data: self.data.clone(),
-            include_acs: true,
+            include_poas: true,
             sub_blocks: 0..prefix,
         }
     }
@@ -145,7 +149,7 @@ impl Payload {
             round: self.round,
             author: self.author,
             data: self.data.clone(),
-            include_acs: false,
+            include_poas: false,
             sub_blocks: range,
         }
     }
@@ -163,11 +167,11 @@ impl Payload {
         self.author
     }
 
-    pub fn acs(&self) -> &Vec<AC> {
-        if self.include_acs {
-            &self.data.acs
+    pub fn poas(&self) -> &Vec<PoA> {
+        if self.include_poas {
+            &self.data.poas
         } else {
-            static EMPTY: Vec<AC> = Vec::new();
+            static EMPTY: Vec<PoA> = Vec::new();
             &EMPTY
         }
     }
@@ -181,16 +185,16 @@ impl Payload {
     }
 
     pub fn all(&self) -> impl Iterator<Item = &BatchInfo> {
-        self.acs()
+        self.poas()
             .iter()
-            .map(|ac| &ac.info)
+            .map(|poa| &poa.info)
             .chain(self.sub_blocks().flatten())
     }
 
     pub fn verify<S>(&self, verifier: &protocol::Verifier<S>) -> anyhow::Result<()> {
-        for ac in self.acs() {
-            ac.verify(&verifier.sig_verifier, verifier.config.ac_quorum)
-                .context("Invalid AC")?;
+        for poa in self.poas() {
+            poa.verify(&verifier.sig_verifier, verifier.config.poa_quorum)
+                .context("Invalid PoA")?;
         }
         Ok(())
     }

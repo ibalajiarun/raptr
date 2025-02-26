@@ -109,8 +109,8 @@ impl Batch {
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Message {
     Batch(Batch),
-    AcVote(BatchId, BatchHash, Signature),
-    AvailabilityCert(AC),
+    PoAVote(BatchId, BatchHash, Signature),
+    AvailabilityCert(PoA),
     Fetch(Vec<BatchHash>),
     FetchResp(Vec<Batch>),
     PenaltyTrackerReport(Round, PenaltyTrackerReports),
@@ -120,8 +120,8 @@ impl std::fmt::Debug for Message {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Message::Batch(batch) => write!(f, "Batch({})", batch.batch_id()),
-            Message::AcVote(batch_id, _, _) => write!(f, "BatchStored({})", batch_id),
-            Message::AvailabilityCert(ac) => write!(f, "AvailabilityCert({})", ac.info.batch_id),
+            Message::PoAVote(batch_id, _, _) => write!(f, "BatchStored({})", batch_id),
+            Message::AvailabilityCert(poa) => write!(f, "AvailabilityCert({})", poa.info.batch_id),
             Message::Fetch(digests) => write!(f, "Fetch({} batches)", digests.len()),
             Message::FetchResp(batches) => write!(f, "FetchResp({} batches)", batches.len()),
             Message::PenaltyTrackerReport(round, reports) => {
@@ -147,10 +147,10 @@ impl MessageCertifier for Certifier {
     async fn certify(&self, message: &mut Self::Message) -> anyhow::Result<()> {
         match message {
             Message::Batch(_batch) => {},
-            Message::AcVote(_batch_id, batch_digest, signature) => {
+            Message::PoAVote(_batch_id, batch_digest, signature) => {
                 *signature = self
                     .signer
-                    .sign(&AcVoteSignatureData {
+                    .sign(&PoAVoteSignatureData {
                         batch_digest: batch_digest.clone(),
                     })
                     .unwrap();
@@ -194,30 +194,30 @@ impl MessageVerifier for Verifier {
                 batch.verify(&self.sig_verifier).context("Invalid batch")
             },
 
-            Message::AcVote(batch_id, batch_digest, signature) => {
+            Message::PoAVote(batch_id, batch_digest, signature) => {
                 let Some(digest) = self.my_batches.read().await.get(batch_id).cloned() else {
                     return Err(anyhow::anyhow!(
-                        "AcVote for an unknown batch id {}",
+                        "PoAVote for an unknown batch id {}",
                         batch_id
                     ));
                 };
 
                 if digest != *batch_digest {
-                    return Err(anyhow::anyhow!("Invalid batch digest in AcVote"));
+                    return Err(anyhow::anyhow!("Invalid batch digest in PoAVote"));
                 }
 
-                let sig_data = AcVoteSignatureData {
+                let sig_data = PoAVoteSignatureData {
                     batch_digest: digest.clone(),
                 };
 
                 self.sig_verifier
                     .verify(sender, &sig_data, signature)
-                    .context("Invalid signature in AcVote")
+                    .context("Invalid signature in PoAVote")
             },
 
-            Message::AvailabilityCert(ac) => ac
-                .verify(&self.sig_verifier, self.config.ac_quorum)
-                .context("Invalid AC"),
+            Message::AvailabilityCert(poa) => poa
+                .verify(&self.sig_verifier, self.config.poa_quorum)
+                .context("Invalid PoA"),
 
             Message::Fetch(_) => Ok(()),
 
@@ -243,13 +243,13 @@ pub enum TimerEvent {
 
 #[derive(Clone)]
 pub struct BlockSizeLimit {
-    ac_size: usize,
+    poa_size: usize,
     batch_size: usize,
     byte_limit: usize,
 }
 
 impl BlockSizeLimit {
-    pub fn from_max_number_of_acs(ac_limit: usize, n_nodes: usize) -> Self {
+    pub fn from_max_number_of_poas(poa_limit: usize, n_nodes: usize) -> Self {
         let dummy_batch_info = BatchInfo {
             author: n_nodes,
             batch_id: 1234,
@@ -258,27 +258,27 @@ impl BlockSizeLimit {
 
         let batch_size = bcs::to_bytes(&dummy_batch_info).unwrap().len();
 
-        let dummy_ac = AC {
+        let dummy_poa = PoA {
             info: dummy_batch_info,
             signers: BitVec::from(vec![true; n_nodes]),
             multi_signature: dummy_signature(),
         };
 
-        let ac_size = bcs::to_bytes(&dummy_ac).unwrap().len();
+        let poa_size = bcs::to_bytes(&dummy_poa).unwrap().len();
 
         Self {
-            ac_size,
+            poa_size,
             batch_size,
-            byte_limit: ac_limit * ac_size,
+            byte_limit: poa_limit * poa_size,
         }
     }
 
-    pub fn ac_limit(&self) -> usize {
-        self.byte_limit / self.ac_size
+    pub fn poa_limit(&self) -> usize {
+        self.byte_limit / self.poa_size
     }
 
-    pub fn batch_limit(&self, n_acs: usize) -> usize {
-        (self.byte_limit - n_acs * self.ac_size) / self.batch_size
+    pub fn batch_limit(&self, n_poas: usize) -> usize {
+        (self.byte_limit - n_poas * self.poa_size) / self.batch_size
     }
 }
 
@@ -287,7 +287,7 @@ pub struct Config {
     pub module_id: ModuleId,
     pub n_nodes: usize,
     pub f: usize,
-    pub ac_quorum: usize,
+    pub poa_quorum: usize,
     pub delta: Duration,
     pub batch_interval: Duration,
     pub batch_fetch_interval: Duration,
@@ -370,14 +370,14 @@ where
     ) -> Payload {
         let mut inner = self.inner.lock().await;
 
-        let mut poas: Vec<AC> = inner
-            .uncommitted_acs
+        let mut poas: Vec<PoA> = inner
+            .uncommitted_poas
             .iter()
-            .filter(|&(_batch_digest, ac)| !exclude.contains(ac.info()))
-            .map(|(_batch_digest, ac)| ac.clone())
+            .filter(|&(_batch_digest, poa)| !exclude.contains(poa.info()))
+            .map(|(_batch_digest, poa)| poa.clone())
             .collect();
 
-        let limit = inner.config.block_size_limit.ac_limit();
+        let limit = inner.config.block_size_limit.poa_limit();
         if poas.len() > limit {
             aptos_logger::warn!(
                 "Block size limit reached: {} PoAs, {} allowed",
@@ -458,7 +458,7 @@ where
                 }
 
                 inner.committed_batches.insert(batch.digest.clone());
-                inner.uncommitted_acs.remove(&batch.digest);
+                inner.uncommitted_poas.remove(&batch.digest);
                 inner.uncommitted_uncertified_batches.remove(&batch.digest);
 
                 inner.batch_commit_time.insert(batch.digest.clone(), now);
@@ -554,8 +554,8 @@ pub struct NativeDisseminationLayerProtocol<TI> {
     my_batches: Arc<RwLock<BTreeMap<BatchId, BatchHash>>>,
     // Set of committed batches.
     committed_batches: BTreeSet<BatchHash>,
-    // Set of known ACs that are not yet committed.
-    uncommitted_acs: BTreeMap<BatchHash, AC>,
+    // Set of known PoAs that are not yet committed.
+    uncommitted_poas: BTreeMap<BatchHash, PoA>,
     // Set of known uncertified batches that are not yet committed.
     uncommitted_uncertified_batches: BTreeSet<BatchHash>,
 
@@ -639,7 +639,7 @@ where
             fetch_tasks: Default::default(),
             my_batches: Default::default(),
             committed_batches: BTreeSet::new(),
-            uncommitted_acs: BTreeMap::new(),
+            uncommitted_poas: BTreeMap::new(),
             uncommitted_uncertified_batches: BTreeSet::new(),
             batch_stored_votes: Default::default(),
             current_proposal_status: Default::default(),
@@ -683,7 +683,7 @@ where
             self.penalty_tracker.on_new_batch(digest.clone());
 
             ctx.unicast(
-                Message::AcVote(
+                Message::PoAVote(
                     batch_id,
                     digest.clone(),
                     dummy_signature(), // Populated in the `sign` method.
@@ -693,7 +693,7 @@ where
             .await;
 
             // Track the list of known uncommitted uncertified batches.
-            if !self.uncommitted_acs.contains_key(&digest)
+            if !self.uncommitted_poas.contains_key(&digest)
                 && !self.committed_batches.contains(&digest)
             {
                 self.uncommitted_uncertified_batches.insert(digest);
@@ -701,20 +701,21 @@ where
         }
     }
 
-    async fn on_new_ac(&mut self, ac: AC, ctx: &mut impl ContextFor<Self>) {
-        if !self.batches.contains_key(&ac.info.digest) {
-            let signers = ac.signers.iter_ones().collect();
-            // We set `override_current` to `true` because an AC typically has more
+    async fn on_new_poa(&mut self, poa: PoA, ctx: &mut impl ContextFor<Self>) {
+        if !self.batches.contains_key(&poa.info.digest) {
+            let signers = poa.signers.iter_ones().collect();
+            // We set `override_current` to `true` because a PoA typically has more
             // signers than a QC.
-            self.fetch_batch(ac.info.digest.clone(), signers, true, ctx)
+            self.fetch_batch(poa.info.digest.clone(), signers, true, ctx)
                 .await;
         }
 
-        // Track the list of known uncommitted ACs
+        // Track the list of known uncommitted PoAs
         // and the list of known uncommitted uncertified batches.
-        if !self.committed_batches.contains(&ac.info.digest) {
-            self.uncommitted_uncertified_batches.remove(&ac.info.digest);
-            self.uncommitted_acs.insert(ac.info.digest.clone(), ac);
+        if !self.committed_batches.contains(&poa.info.digest) {
+            self.uncommitted_uncertified_batches
+                .remove(&poa.info.digest);
+            self.uncommitted_poas.insert(poa.info.digest.clone(), poa);
         }
     }
 
@@ -854,13 +855,13 @@ where
         };
 
         // Upon receiving a quorum of BatchStored messages for a batch,
-        // form an AC and broadcast it.
-        upon receive [Message::AcVote(batch_id, batch_digest, signature)] from node [p] {
+        // form a PoA and broadcast it.
+        upon receive [Message::PoAVote(batch_id, batch_digest, signature)] from node [p] {
             self.batch_stored_votes[batch_id].insert(p, signature);
 
-            if self.batch_stored_votes[batch_id].len() == self.config.ac_quorum {
+            if self.batch_stored_votes[batch_id].len() == self.config.poa_quorum {
                 self.log_detail(format!(
-                    "Forming the AC for batch #{} with digest {:#x}",
+                    "Forming the PoA for batch #{} with digest {:#x}",
                     batch_id,
                     batch_digest,
                 ));
@@ -874,28 +875,28 @@ where
                     self.batch_stored_votes[batch_id].values().cloned()
                 ).unwrap();
 
-                let ac = AC {
+                let poa = PoA {
                     info: self.batches[&batch_digest].get_info(),
                     signers,
                     multi_signature,
                 };
 
-                ctx.multicast(Message::AvailabilityCert(ac)).await;
+                ctx.multicast(Message::AvailabilityCert(poa)).await;
             }
         };
 
 
-        upon receive [Message::AvailabilityCert(ac)] from [_any_node] {
-            self.on_new_ac(ac, ctx).await;
+        upon receive [Message::AvailabilityCert(poa)] from [_any_node] {
+            self.on_new_poa(poa, ctx).await;
         };
 
         upon event of type [ProposalReceived] from [_any_module] {
             upon [ProposalReceived { leader, round, payload, .. }] {
-                for ac in payload.acs() {
-                    if !self.uncommitted_acs.contains_key(&ac.info.digest)
-                        && !self.committed_batches.contains(&ac.info.digest)
+                for poa in payload.poas() {
+                    if !self.uncommitted_poas.contains_key(&poa.info.digest)
+                        && !self.committed_batches.contains(&poa.info.digest)
                     {
-                        self.on_new_ac(ac.clone(), ctx).await;
+                        self.on_new_poa(poa.clone(), ctx).await;
                     }
                 }
 
@@ -1007,14 +1008,14 @@ where
                 \tbatches produced: {}\n\
                 \tbatches stored: {}\n\
                 \tbatches committed: {}\n\
-                \tuncommitted_acs.len(): {}\n\
+                \tuncommitted_poas.len(): {}\n\
                 \tuncommitted_uncertified_batches.len(): {}\n\
                 \texecution_queue.len(): {}\n\
                 \tactive fetch tasks: {}\n",
                 self.my_batches.read().await.len(),
                 self.batches.len(),
                 self.committed_batches.len(),
-                self.uncommitted_acs.len(),
+                self.uncommitted_poas.len(),
                 self.uncommitted_uncertified_batches.len(),
                 self.execution_queue.len(),
                 self.fetch_tasks.len(),

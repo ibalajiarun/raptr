@@ -208,6 +208,12 @@ pub enum CommitReason {
     Indirect,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum QcVoteReason {
+    FullBlock,
+    Timer,
+}
+
 #[derive(Clone, Copy)]
 pub struct Config<S> {
     pub n_nodes: usize,
@@ -547,6 +553,65 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             }
 
             self.pending_qcs[*new_qc.block_digest()].push(new_qc);
+        }
+    }
+
+    /// Issues the QC-vote in the current round.
+    async fn qc_vote(
+        &mut self,
+        reason: QcVoteReason,
+        prefix: Prefix,
+        missing_authors: BitVec,
+        ctx: &mut impl ContextFor<Self>,
+    ) {
+        let round = self.r_cur;
+
+        if reason == QcVoteReason::FullBlock {
+            assert_eq!(prefix, N_SUB_BLOCKS);
+            assert!(missing_authors.all_zeros());
+        }
+
+        if round > self.r_timeout && self.last_qc_vote < (round, prefix).into() {
+            self.last_qc_vote = (self.r_cur, prefix).into();
+
+            let block_digest = self.leader_proposal[&round].clone();
+
+            // Metrics and logs.
+            self.log_detail(format!(
+                "QC-voting for block {} proposed by node {} with prefix {}/{} (reason: {:?})",
+                round,
+                self.config.leader(round),
+                prefix,
+                N_SUB_BLOCKS,
+                reason,
+            ));
+
+            let block_timestamp = self.blocks[&block_digest].data.timestamp_usecs;
+            match reason {
+                QcVoteReason::FullBlock => observe_block(block_timestamp, "FullBlockQCVote"),
+                QcVoteReason::Timer => observe_block(block_timestamp, "TimerQCVote"),
+            }
+
+            // Sign and multicast the vote.
+            let signature = self
+                .signer
+                .sign_tagged(
+                    &QcVoteSignatureCommonData {
+                        round,
+                        block_digest: block_digest.clone(),
+                    },
+                    prefix,
+                )
+                .unwrap();
+
+            ctx.multicast(Message::QcVote(
+                round,
+                prefix,
+                block_digest,
+                signature,
+                missing_authors,
+            ))
+            .await;
         }
     }
 
@@ -1025,77 +1090,22 @@ where
         // A node only qc-votes if r_cur > r_timeout.
 
         upon timer [TimerEvent::QcVote(round)] {
-            if round == self.r_cur && self.last_qc_vote.round < round && round > self.r_timeout {
+            if round == self.r_cur {
                 let (prefix, missing_authors) = self.available_prefix().await;
-                let block_digest = self.leader_proposal[&round].clone();
-
-                QC_VOTING_PREFIX_HISTOGRAM.observe(prefix as f64);
-                self.log_detail(format!(
-                    "QC-voting for block {} proposed by node {} by Timer with prefix {}/{}",
-                    round,
-                    self.config.leader(round),
-                    prefix,
-                    N_SUB_BLOCKS,
-                ));
-
-                self.last_qc_vote = (self.r_cur, prefix).into();
-
-                let signature = self.signer.sign_tagged(
-                    &QcVoteSignatureCommonData {
-                        round,
-                        block_digest: block_digest.clone(),
-                    },
-                    prefix,
-                )
-                .unwrap();
-
-                if let Some(block) = self.blocks.get(&block_digest) {
-                    observe_block(block.data.timestamp_usecs, "TimerQCVote");
-                }
-
-                ctx.multicast(Message::QcVote(round, prefix, block_digest, signature, missing_authors)).await;
+                self.qc_vote(QcVoteReason::Timer, prefix, missing_authors, ctx).await;
             }
         };
 
         upon event of type [FullBlockAvailable] from [_dissemination_module] {
             upon [FullBlockAvailable { round }] {
                 if round == self.r_cur {
-                    // TODO: merge with the QC-voting by timer event by moving this code to a function.
-                    let round = self.r_cur;
-                    let prefix = N_SUB_BLOCKS;
-                    let block_digest = self.leader_proposal[&round].clone();
-
-                    let prev_prefix = if self.last_qc_vote.round == round {
-                        PREFIX_VOTED_PREVIOUSLY_COUNTER.inc();
-                        Some(self.last_qc_vote.prefix)
-                    } else {
-                        None
-                    };
-                    self.log_detail(format!(
-                        "QC-voting for block {} proposed by node {} by Full Prefix with prefix {}, prev prefix {:?}",
-                        round,
-                        self.config.leader(round),
+                    self.qc_vote(
+                        QcVoteReason::FullBlock,
                         N_SUB_BLOCKS,
-                        prev_prefix
-                    ));
-                    self.last_qc_vote = (round, prefix).into();
-
-                    let signature = self.signer.sign_tagged(
-                        &QcVoteSignatureCommonData {
-                            round,
-                            block_digest: block_digest.clone(),
-                        },
-                        prefix,
+                        BitVec::with_num_bits(self.config.n_nodes as u16),
+                        ctx
                     )
-                    .unwrap();
-
-                    if let Some(block) = self.blocks.get(&block_digest) {
-                        observe_block(block.data.timestamp_usecs, "FullBlockQCVote");
-                    }
-
-                    let missing_authors = BitVec::with_num_bits(self.config.n_nodes as u16);
-
-                    ctx.multicast(Message::QcVote(round, prefix, block_digest, signature, missing_authors)).await;
+                    .await;
                 }
             };
         };

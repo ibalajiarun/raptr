@@ -19,6 +19,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::{
     cmp::Ordering,
     fmt::{Debug, Display, Formatter},
+    sync::Arc,
     time::Instant,
 };
 
@@ -191,56 +192,120 @@ impl From<(Round, Prefix)> for SubBlockId {
 
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
 pub struct QC {
-    pub round: Round,
-    pub prefix: Prefix,
-    pub block_digest: HashValue,
-    pub vote_prefixes: PrefixSet,
-    pub tagged_multi_signature: Option<Signature>, // `None` only for the genesis QC.
-    pub missing_authors: Option<BitVec>,
+    data: Arc<QcData>,
+}
+
+#[derive(CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
+struct QcData {
+    round: Round,
+    block_digest: HashValue,
+    vote_prefixes: PrefixSet,
+    tagged_multi_signature: Option<Signature>, // `None` only for the genesis QC.
+
+    missing_authors: Option<BitVec>,
+
+    // Unlike in the pseudocode, for convenience, we include the prefix as part of the QC
+    // and check it as part of the verification.
+    prefix: Prefix,
 }
 
 impl Debug for QC {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("QC")
-            .field("round", &self.round)
-            .field("prefix", &self.prefix)
+            .field("round", &self.round())
+            .field("prefix", &self.prefix())
             .finish()
     }
 }
 
 impl QC {
-    pub fn genesis() -> Self {
+    pub fn new(
+        round: Round,
+        block_digest: HashValue,
+        vote_prefixes: PrefixSet,
+        tagged_multi_signature: Signature,
+        missing_authors: BitVec,
+        storage_requirement: usize,
+    ) -> Self {
+        // `prefix` is the maximum number such that at least `storage_requirement` nodes
+        // have voted for a prefix of size `prefix` or larger.
+        let prefix = vote_prefixes
+            .prefixes()
+            .sorted()
+            .skip(storage_requirement - 1)
+            .next()
+            .unwrap();
+
         QC {
-            round: 0,
-            prefix: N_SUB_BLOCKS,
-            block_digest: HashValue::zero(),
-            vote_prefixes: PrefixSet::empty(),
-            tagged_multi_signature: None,
-            missing_authors: None,
+            data: Arc::new(QcData {
+                round,
+                block_digest,
+                vote_prefixes,
+                tagged_multi_signature: Some(tagged_multi_signature),
+                missing_authors: Some(missing_authors),
+                prefix,
+            }),
         }
     }
 
+    pub fn genesis() -> Self {
+        QC {
+            data: Arc::new(QcData {
+                round: 0,
+                prefix: N_SUB_BLOCKS,
+                block_digest: HashValue::zero(),
+                vote_prefixes: PrefixSet::empty(),
+                tagged_multi_signature: None,
+                missing_authors: None,
+            }),
+        }
+    }
+
+    pub fn round(&self) -> Round {
+        self.data.round
+    }
+
+    pub fn block_digest(&self) -> &HashValue {
+        &self.data.block_digest
+    }
+
+    pub fn vote_prefixes(&self) -> &PrefixSet {
+        &self.data.vote_prefixes
+    }
+
+    pub fn tagged_multi_signature(&self) -> &Option<Signature> {
+        &self.data.tagged_multi_signature
+    }
+
+    pub fn missing_authors(&self) -> &Option<BitVec> {
+        &self.data.missing_authors
+    }
+
+    pub fn prefix(&self) -> Prefix {
+        self.data.prefix
+    }
+
     pub fn signer_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
-        self.vote_prefixes.node_ids()
+        self.vote_prefixes().node_ids()
     }
 
     pub fn is_genesis(&self) -> bool {
-        self.round == 0
+        self.round() == 0
     }
 
     pub fn is_full(&self) -> bool {
-        self.prefix == N_SUB_BLOCKS
+        self.prefix() == N_SUB_BLOCKS
     }
 
     pub fn sub_block_id(&self) -> SubBlockId {
-        (self.round, self.prefix).into()
+        (self.round(), self.prefix()).into()
     }
 
     pub fn verify(&self, sig_verifier: &SignatureVerifier, quorum: usize) -> anyhow::Result<()> {
         if self.is_genesis() {
-            return if self.vote_prefixes.is_empty()
-                && self.block_digest == HashValue::zero()
-                && self.tagged_multi_signature.is_none()
+            return if self.vote_prefixes().is_empty()
+                && *self.block_digest() == HashValue::zero()
+                && self.tagged_multi_signature().is_none()
             {
                 Ok(())
             } else {
@@ -248,17 +313,17 @@ impl QC {
             };
         }
 
-        if self.tagged_multi_signature.is_none() {
+        if self.tagged_multi_signature().is_none() {
             return Err(anyhow::anyhow!("Missing aggregated signature"));
         }
 
         let message = QcVoteSignatureCommonData {
-            round: self.round,
-            block_digest: self.block_digest,
+            round: self.round(),
+            block_digest: self.block_digest().clone(),
         };
 
-        let node_ids = self.vote_prefixes.node_ids().collect_vec();
-        let tags = self.vote_prefixes.prefixes().collect_vec();
+        let node_ids = self.vote_prefixes().node_ids().collect_vec();
+        let tags = self.vote_prefixes().prefixes().collect_vec();
 
         if node_ids.len() < quorum {
             return Err(anyhow::anyhow!("Not enough signers"));
@@ -268,7 +333,7 @@ impl QC {
             node_ids,
             &message,
             tags,
-            self.tagged_multi_signature.as_ref().unwrap(),
+            self.tagged_multi_signature().as_ref().unwrap(),
         )
     }
 }
@@ -523,7 +588,7 @@ impl RoundEntryReason {
     ) -> anyhow::Result<()> {
         match self {
             RoundEntryReason::FullPrefixQC(qc) => {
-                if !(qc.round == round - 1 && qc.is_full()) {
+                if !(qc.round() == round - 1 && qc.is_full()) {
                     return Err(anyhow::anyhow!("Invalid FullPrefixQC entry reason"));
                 }
                 qc.verify(verifier, quorum)

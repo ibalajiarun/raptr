@@ -73,7 +73,7 @@ impl Debug for Message {
             Message::Propose(block) => write!(f, "Propose({})", block.round()),
             Message::QcVote(round, _, _, _, _) => write!(f, "QcVote({})", round),
             Message::CcVote(qc, _) => {
-                write!(f, "CcVote({})", qc.round)
+                write!(f, "CcVote({})", qc.round())
             },
             Message::TcVote(round, _, _, _) => {
                 write!(f, "TcVote(round {})", round)
@@ -148,10 +148,10 @@ impl<S: LeaderSchedule> MessageVerifier for Verifier<S> {
                     .verify_tagged(
                         sender,
                         &CcVoteSignatureCommonData {
-                            round: qc.round,
-                            block_digest: qc.block_digest.clone(),
+                            round: qc.round(),
+                            block_digest: *qc.block_digest(),
                         },
-                        qc.prefix,
+                        qc.prefix(),
                         signature,
                     )
                     .context("Error verifying the CC vote signature")?;
@@ -404,8 +404,8 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         // Two-chain commit rule:
         // If there exists two adjacent certified blocks B and B' in the chain with consecutive
         // round numbers, i.e., B'.r = B.r + 1, the replica commits B and all its ancestors.
-        let parent_qc = self.blocks[&qc.block_digest].parent_qc();
-        if !parent_qc.is_genesis() && qc.round == parent_qc.round + 1 {
+        let parent_qc = self.blocks[qc.block_digest()].parent_qc();
+        if !parent_qc.is_genesis() && qc.round() == parent_qc.round() + 1 {
             if !self.qcs_to_commit.contains_key(&parent_qc.sub_block_id()) {
                 self.qcs_to_commit.insert(
                     parent_qc.sub_block_id(),
@@ -476,23 +476,23 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             self.qc_high = new_qc.clone();
         }
 
-        // If new_qc.round > r_commit_vote and new_qc.round > r_timeout,
+        // If new_qc.round() > r_commit_vote and new_qc.round() > r_timeout,
         // multicast a commit vote and update r_commit_vote.
         if self.config.enable_commit_votes {
-            if new_qc.round > self.last_commit_vote.round && new_qc.round > self.r_timeout {
+            if new_qc.round() > self.last_commit_vote.round && new_qc.round() > self.r_timeout {
                 let signature = self
                     .signer
                     .sign_tagged(
                         &CcVoteSignatureCommonData {
-                            round: new_qc.round,
-                            block_digest: new_qc.block_digest.clone(),
+                            round: new_qc.round(),
+                            block_digest: *new_qc.block_digest(),
                         },
-                        new_qc.prefix,
+                        new_qc.prefix(),
                     )
                     .unwrap();
 
                 self.log_detail(format!("CC-voting for QC {:?}", new_qc.sub_block_id()));
-                if let Some(block) = self.blocks.get(&new_qc.block_digest) {
+                if let Some(block) = self.blocks.get(&new_qc.block_digest()) {
                     observe_block(block.data.timestamp_usecs, "CCVote");
                 }
                 ctx.multicast(Message::CcVote(new_qc.clone(), signature))
@@ -501,13 +501,13 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         }
 
         if new_qc.is_full() {
-            if let Some(block) = self.blocks.get(&new_qc.block_digest) {
+            if let Some(block) = self.blocks.get(new_qc.block_digest()) {
                 observe_block(block.data.timestamp_usecs, "QCReady");
             }
 
             // If form or receive a full-prefix qc, advance to the next round after that.
             self.advance_r_ready(
-                new_qc.round + 1,
+                new_qc.round() + 1,
                 RoundEntryReason::FullPrefixQC(new_qc.clone()),
                 ctx,
             )
@@ -516,28 +516,28 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
 
         self.known_qcs.insert(new_qc.sub_block_id());
 
-        if let Some(block) = self.blocks.get(&new_qc.block_digest) {
+        if let Some(block) = self.blocks.get(new_qc.block_digest()) {
             self.on_new_qc_with_available_block(new_qc.clone(), block, ctx)
                 .await;
         } else {
-            self.qcs_without_blocks[new_qc.block_digest].push(new_qc.clone());
+            self.qcs_without_blocks[*new_qc.block_digest()].push(new_qc.clone());
         }
 
-        if self.satisfied_blocks.contains(&new_qc.block_digest) {
+        if self.satisfied_blocks.contains(new_qc.block_digest()) {
             self.on_new_satisfied_qc(new_qc);
         } else {
-            if !self.pending_qcs.contains_key(&new_qc.block_digest) {
+            if !self.pending_qcs.contains_key(new_qc.block_digest()) {
                 ctx.set_timer(
                     Duration::ZERO,
                     TimerEvent::FetchBlock(
-                        new_qc.round,
-                        new_qc.block_digest,
+                        new_qc.round(),
+                        *new_qc.block_digest(),
                         new_qc.signer_ids().collect(),
                     ),
                 )
             }
 
-            self.pending_qcs[new_qc.block_digest].push(new_qc);
+            self.pending_qcs[*new_qc.block_digest()].push(new_qc);
         }
     }
 
@@ -557,7 +557,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             // Upon getting a justification to enter a higher round r, send it to the leader
             // of round r, unless already received a proposal or a QC in round that round.
             // NB: consider broadcasting to all the nodes instead.
-            if !self.leader_proposal.contains_key(&round) && self.qc_high.round < round {
+            if !self.leader_proposal.contains_key(&round) && self.qc_high.round() < round {
                 ctx.unicast(
                     Message::AdvanceRound(round, reason),
                     self.config.leader(round),
@@ -588,7 +588,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
     }
 
     async fn commit_qc(&mut self, qc: QC, commit_reason: CommitReason) {
-        let ts = self.blocks[&qc.block_digest].data.timestamp_usecs;
+        let ts = self.blocks[qc.block_digest()].data.timestamp_usecs;
         let payloads = self.commit_qc_impl(qc, commit_reason);
         self.dissemination.notify_commit(payloads, ts).await;
     }
@@ -598,13 +598,15 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             return vec![];
         }
 
-        let parent = self.blocks[&qc.block_digest].parent_qc().clone();
+        let parent = self.blocks[qc.block_digest()].parent_qc().clone();
 
         // Check for safety violations:
-        if qc.round > self.committed_qc.round && parent.round < self.committed_qc.round {
+        if qc.round() > self.committed_qc.round() && parent.round() < self.committed_qc.round() {
             panic!("Safety violation: committed block was rolled back");
         }
-        if parent.round == self.committed_qc.round && parent.prefix < self.committed_qc.prefix {
+        if parent.round() == self.committed_qc.round()
+            && parent.prefix() < self.committed_qc.prefix()
+        {
             panic!("Safety violation: optimistically committed transactions were rolled back");
         }
 
@@ -612,18 +614,18 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         let mut res = self.commit_qc_impl(parent, CommitReason::Indirect);
 
         // Then, commit the transactions of this block.
-        let block = &self.blocks[&qc.block_digest];
+        let block = &self.blocks[qc.block_digest()];
 
-        if qc.round == self.committed_qc.round {
+        if qc.round() == self.committed_qc.round() {
             // Extending the prefix of an already committed block.
 
-            assert!(qc.prefix > self.committed_qc.prefix);
+            assert!(qc.prefix() > self.committed_qc.prefix());
 
             self.log_detail(format!(
                 "Extending the prefix of committed block {}: {} -> {} / {}{} ({:?})",
-                qc.round,
-                self.committed_qc.prefix,
-                qc.prefix,
+                qc.round(),
+                self.committed_qc.prefix(),
+                qc.prefix(),
                 N_SUB_BLOCKS,
                 if qc.is_full() { " (full)" } else { "" },
                 commit_reason,
@@ -632,20 +634,21 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             res.push(
                 block
                     .payload()
-                    .take_sub_blocks(self.committed_qc.prefix..qc.prefix),
+                    .take_sub_blocks(self.committed_qc.prefix()..qc.prefix()),
             );
 
             // Record the metrics
             let now = Instant::now();
-            if self.config.leader(qc.round) == self.node_id {
-                for _ in 0..(qc.prefix - self.committed_qc.prefix) {
+            if self.config.leader(qc.round()) == self.node_id {
+                for _ in 0..(qc.prefix() - self.committed_qc.prefix()) {
                     RAIKOU_BATCH_CONSENSUS_LATENCY.observe(
-                        now.saturating_duration_since(self.block_create_time[&qc.round])
+                        now.saturating_duration_since(self.block_create_time[&qc.round()])
                             .as_secs_f64(),
                     );
-                    self.metrics
-                        .batch_consensus_latency
-                        .push((now, self.to_deltas(now - self.block_create_time[&qc.round])));
+                    self.metrics.batch_consensus_latency.push((
+                        now,
+                        self.to_deltas(now - self.block_create_time[&qc.round()]),
+                    ));
                 }
             }
         } else {
@@ -654,14 +657,14 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             self.log_detail(format!(
                 "Committing block {} proposed by node {} with {} ACs \
                 and prefix {}/{} [{}/{} batches]{} ({:?}).",
-                qc.round,
-                self.config.leader(qc.round),
+                qc.round(),
+                self.config.leader(qc.round()),
                 block.acs().len(),
-                qc.prefix,
+                qc.prefix(),
                 N_SUB_BLOCKS,
                 block
                     .sub_blocks()
-                    .take(qc.prefix)
+                    .take(qc.prefix())
                     .map(|b| b.len())
                     .sum::<usize>(),
                 block.sub_blocks().map(|b| b.len()).sum::<usize>(),
@@ -669,29 +672,30 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                 commit_reason,
             ));
 
-            res.push(block.payload().with_prefix(qc.prefix));
+            res.push(block.payload().with_prefix(qc.prefix()));
 
             RAIKOU_BLOCK_COMMIT_RATE.inc();
 
             // Record the metrics
             let now = Instant::now();
-            if self.config.leader(qc.round) == self.node_id {
+            if self.config.leader(qc.round()) == self.node_id {
                 RAIKOU_BLOCK_CONSENSUS_LATENCY.observe(
-                    now.saturating_duration_since(self.block_create_time[&qc.round])
+                    now.saturating_duration_since(self.block_create_time[&qc.round()])
                         .as_secs_f64(),
                 );
                 observe_block(block.data.timestamp_usecs, "COMMITBLOCK");
                 self.metrics
                     .block_consensus_latency
-                    .push((now, self.to_deltas(now - self.block_create_time[&qc.round])));
-                for _ in 0..(block.acs().len() + qc.prefix) {
+                    .push((now, self.to_deltas(now - self.block_create_time[&qc.round()])));
+                for _ in 0..(block.acs().len() + qc.prefix()) {
                     RAIKOU_BATCH_CONSENSUS_LATENCY.observe(
-                        now.saturating_duration_since(self.block_create_time[&qc.round])
+                        now.saturating_duration_since(self.block_create_time[&qc.round()])
                             .as_secs_f64(),
                     );
-                    self.metrics
-                        .batch_consensus_latency
-                        .push((now, self.to_deltas(now - self.block_create_time[&qc.round])));
+                    self.metrics.batch_consensus_latency.push((
+                        now,
+                        self.to_deltas(now - self.block_create_time[&qc.round()]),
+                    ));
                 }
             }
         }
@@ -705,43 +709,37 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
         let mut uncommitted = HashSet::new();
 
         let mut cur = qc;
-        while cur.round != self.committed_qc.round {
-            // assert!(self.blocks.contains_key(&cur.block_digest),
-            //     "Block {:#x} not found for qc {:?}",
-            //     cur.block_digest,
-            //     cur.sub_block_id(),
-            // );
-
-            if !self.blocks.contains_key(&cur.block_digest) {
+        while cur.round() != self.committed_qc.round() {
+            if !self.blocks.contains_key(cur.block_digest()) {
                 aptos_logger::warn!(
                     "Deduplication failed for QC {:?}. Block from round {} is missing. \
                     This may often happen in an asynchronous network or a \
                     network where the triangle inequality doesn't hold.",
                     cur.sub_block_id(),
-                    cur.round
+                    cur.round()
                 );
                 return uncommitted;
             }
 
-            let block = &self.blocks[&cur.block_digest];
+            let block = &self.blocks[cur.block_digest()];
             uncommitted.extend(block.acs().iter().map(|ac| ac.info().clone()));
             uncommitted.extend(
                 block
                     .sub_blocks()
-                    .take(cur.prefix)
+                    .take(cur.prefix())
                     .flatten()
                     .map(|batch| batch.clone()),
             );
             cur = block.parent_qc();
         }
 
-        if cur.prefix > self.committed_qc.prefix {
-            let block = &self.blocks[&cur.block_digest];
+        if cur.prefix() > self.committed_qc.prefix() {
+            let block = &self.blocks[cur.block_digest()];
             uncommitted.extend(
                 block
                     .sub_blocks()
-                    .take(cur.prefix)
-                    .skip(self.committed_qc.prefix)
+                    .take(cur.prefix())
+                    .skip(self.committed_qc.prefix())
                     .flatten()
                     .map(|batch| batch.clone()),
             );
@@ -895,7 +893,7 @@ where
         // Nodes start the protocol by entering round 1.
         upon start {
             let genesis_qc = QC::genesis();
-            self.satisfied_blocks.insert(genesis_qc.block_digest);
+            self.satisfied_blocks.insert(*genesis_qc.block_digest());
             self.satisfied_qcs.insert(genesis_qc.sub_block_id());
             self.known_qcs.insert(genesis_qc.sub_block_id());
             self.advance_r_ready(1, RoundEntryReason::FullPrefixQC(QC::genesis()), ctx).await;
@@ -923,7 +921,7 @@ where
 
                 let parent_qc = self.qc_high.clone();
 
-                let missing_authors = parent_qc.missing_authors.clone();
+                let missing_authors = parent_qc.missing_authors().clone();
 
                 let payload = self.dissemination.prepare_block(
                     round,
@@ -1112,29 +1110,11 @@ where
                 // 2. it can form a full-prefix QC.
                 if votes.len() >= self.quorum() {
                     let n_full_prefix_votes = votes.values().filter(|&&(vote, _, _)| vote == N_SUB_BLOCKS).count();
-                    let cond_1 = self.qc_high.round < round;
+                    let cond_1 = self.qc_high.round() < round;
                     let cond_2 = self.qc_high.sub_block_id() < (round, N_SUB_BLOCKS).into()
                         && n_full_prefix_votes >= self.config.storage_requirement;
 
                     if cond_1 || cond_2 {
-                        // Take the quorum of the largest-prefix votes.
-                        let prefixes = votes
-                            .iter()
-                            .map(|(&node, &(prefix, _, _))| (node, prefix))
-                            .sorted_by_key(|(_, prefix)| std::cmp::Reverse(*prefix))
-                            .take(self.quorum())
-                            .collect_vec();
-
-                        // `certified_prefix` is the maximum number such that at least
-                        // `storage_requirement` nodes have voted for a prefix of size
-                        // `certified_prefix` or larger.
-                        let certified_prefix = prefixes
-                            .iter()
-                            .skip(self.config.storage_requirement - 1)
-                            .map(|(_, prefix)| *prefix)
-                            .next()
-                            .expect("storage_requirement cannot be bigger than the quorum size");
-
                         let partial_signatures = votes
                             .iter()
                             .map(|(_, (_, signature, _))| signature.clone());
@@ -1147,23 +1127,23 @@ where
                             .map(|(node_id, (prefix, _signature, _))| (*node_id, *prefix))
                             .collect();
 
+                        let missing_authors = self.aggregate_qc_missing_authors(votes.iter().map(|(_, (_, _, missing))| missing));
+
+                        let qc = QC::new(
+                            round,
+                            block_digest,
+                            vote_prefixes,
+                            tagged_multi_signature,
+                            missing_authors,
+                            self.config.storage_requirement,
+                        );
+
                         self.log_detail(format!(
                             "Forming a QC for block {} with prefix {}/{}",
                             round,
-                            certified_prefix,
+                            qc.prefix(),
                             N_SUB_BLOCKS,
                         ));
-
-                        let missing_authors = self.aggregate_qc_missing_authors(votes.iter().map(|(_, (_, _, missing))| missing));
-
-                        let qc = QC {
-                            round,
-                            prefix: certified_prefix,
-                            block_digest,
-                            vote_prefixes,
-                            tagged_multi_signature: Some(tagged_multi_signature),
-                            missing_authors: Some(missing_authors),
-                        };
 
                         self.on_new_qc(qc, ctx).await;
                     }
@@ -1176,7 +1156,7 @@ where
         // Upon having gathered a quorum of commit votes, form a CC,
         // commit the smallest prefix, and execute advance_round.
         upon receive [Message::CcVote(qc, signature)] from node [p] {
-            let round = qc.round;
+            let round = qc.round();
 
             if !self.received_cc_vote[round].contains(&p) {
                 if !self.known_qcs.contains(&qc.sub_block_id()) {
@@ -1192,13 +1172,13 @@ where
                     if *committed_qc > self.committed_qc {
                         self.log_detail(format!(
                             "Forming a CC for block {} with prefix {}/{}",
-                            committed_qc.round,
-                            committed_qc.prefix,
+                            committed_qc.round(),
+                            committed_qc.prefix(),
                             N_SUB_BLOCKS,
                         ));
 
                         let committed_qc_id = committed_qc.sub_block_id();
-                        let committed_block_digest = committed_qc.block_digest.clone();
+                        let committed_block_digest = *committed_qc.block_digest();
 
                         if !self.qcs_to_commit.contains_key(&committed_qc.sub_block_id()) {
                             self.qcs_to_commit.insert(
@@ -1211,7 +1191,7 @@ where
 
                         let vote_prefixes = votes
                             .iter()
-                            .map(|((qc, node_id), _)| (*node_id, qc.prefix))
+                            .map(|((qc, node_id), _)| (*node_id, qc.prefix()))
                             .collect();
 
                         let partial_signatures = votes
@@ -1307,7 +1287,7 @@ where
 
                 // TODO: check that `max_qc` is indeed what's intended here.
                 // TODO: maybe need to check if `max_qc.round == round`?
-                if let Some(block) = self.blocks.get(&max_qc.block_digest) {
+                if let Some(block) = self.blocks.get(max_qc.block_digest()) {
                     observe_block(block.data.timestamp_usecs, "TCAggregate");
                 }
 

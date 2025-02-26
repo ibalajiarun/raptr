@@ -1298,9 +1298,8 @@ where
                         .unwrap()
                         .clone();
 
-                    // TODO: check that `max_qc` is indeed what's intended here.
-                    // TODO: maybe need to check if `max_qc.round == round`?
-                    if let Some(block) = self.blocks.get(max_qc.block_digest()) {
+                    if let Some(digest) = self.leader_proposal.get(&round) {
+                        let block = self.blocks.get(digest).unwrap();
                         observe_block(block.data.timestamp_usecs, "TCAggregate");
                     }
 

@@ -302,7 +302,7 @@ impl QC {
         self.prefix() == N_SUB_BLOCKS
     }
 
-    pub fn sub_block_id(&self) -> SubBlockId {
+    pub fn id(&self) -> SubBlockId {
         (self.round(), self.prefix()).into()
     }
 
@@ -340,26 +340,6 @@ impl QC {
             tags,
             self.tagged_multi_signature().as_ref().unwrap(),
         )
-    }
-}
-
-impl PartialEq for QC {
-    fn eq(&self, other: &Self) -> bool {
-        self.sub_block_id() == other.sub_block_id()
-    }
-}
-
-impl Eq for QC {}
-
-impl PartialOrd for QC {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.sub_block_id().partial_cmp(&other.sub_block_id())
-    }
-}
-
-impl Ord for QC {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.sub_block_id().cmp(&other.sub_block_id())
     }
 }
 
@@ -614,7 +594,7 @@ impl RoundEntryReason {
                     .context("Error verifying the QC")
             },
             RoundEntryReason::CC(cc, qc) => {
-                if !(cc.round == round - 1 && qc.sub_block_id() >= cc.highest_qc_id()) {
+                if !(cc.round == round - 1 && qc.id() >= cc.highest_qc_id()) {
                     return Err(anyhow::anyhow!("Invalid CC entry reason"));
                 }
                 cc.verify(verifier, quorum)
@@ -623,7 +603,7 @@ impl RoundEntryReason {
                     .context("Error verifying the QC")
             },
             RoundEntryReason::TC(tc, qc) => {
-                if !(tc.timeout_round == round - 1 && qc.sub_block_id() >= tc.highest_qc_id()) {
+                if !(tc.timeout_round == round - 1 && qc.id() >= tc.highest_qc_id()) {
                     return Err(anyhow::anyhow!("Invalid TC entry reason"));
                 }
                 tc.verify(verifier, quorum)

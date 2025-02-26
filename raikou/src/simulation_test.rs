@@ -660,7 +660,6 @@ async fn test_raikou(
         end_of_run: Instant::now() + Duration::from_secs_f64(delta) * total_duration_in_delta,
         extra_wait_before_qc_vote: Duration::from_secs_f64(delta * 0.1),
         extra_wait_before_commit_vote: Duration::from_secs_f64(delta * 0.1),
-        enable_round_entry_permission: false,
         enable_commit_votes: true,
         status_interval: Duration::from_secs_f64(delta) * 10,
         round_sync_interval: Duration::from_secs_f64(delta * 15.),

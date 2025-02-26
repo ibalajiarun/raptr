@@ -217,7 +217,6 @@ pub struct Config {
     pub leader_timeout: Duration,
     pub delta: Duration,
     pub enable_commit_votes: bool,
-    pub enable_round_entry_permission: bool,
 
     /// The time  waits after receiving a block before voting for a QC for it
     /// if it doesn't have all the batches yet.
@@ -271,7 +270,6 @@ pub struct RaikouNode<DL> {
     // Protocol state for the pseudocode
     r_ready: Round,                 // The highest round the node is ready to enter.
     entry_reason: RoundEntryReason, // The justification for entering the round r_read.
-    r_allowed: Round,               // The highest round the node is allowed to enter.
     r_cur: Round,                   // The current round the node is in.
     r_timeout: Round,               // The highest round the node has voted to time out.
     last_qc_vote: SubBlockId,
@@ -344,7 +342,6 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
             metrics,
             block_create_time: Default::default(),
             r_ready: 0,
-            r_allowed: 0,
             entry_reason: RoundEntryReason::FullPrefixQC(QC::genesis()),
             r_cur: 0,
             last_qc_vote: (0, 0).into(),
@@ -990,10 +987,7 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
             self.advance_r_ready(1, RoundEntryReason::FullPrefixQC(QC::genesis()), ctx).await;
         };
 
-        upon [
-            self.r_cur < self.r_ready
-            && (self.r_ready == self.r_allowed || !self.config.enable_round_entry_permission)
-        ] {
+        upon [self.r_cur < self.r_ready] {
             let round = self.r_ready;
 
             self.r_cur = round;
@@ -1460,7 +1454,6 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
                 "STATUS:\n\
                 \tr_cur: {}\n\
                 \tr_ready: {}\n\
-                \tr_allowed: {}\n\
                 \tr_timeout: {}\n\
                 \tqc_high: {:?}\n\
                 \tcommitted_qc: {:?}\n\
@@ -1473,7 +1466,6 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
                 \tnum of tc votes: {:?}\n",
                 self.r_cur,
                 self.r_ready,
-                self.r_allowed,
                 self.r_timeout,
                 self.qc_high.id(),
                 self.committed_qc.id(),

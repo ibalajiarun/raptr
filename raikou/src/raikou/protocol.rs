@@ -1029,12 +1029,6 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
                     leader,
                 );
             } else {
-                self.log_detail(format!(
-                    "Processing proposal of block {} from node {}",
-                    round,
-                    leader,
-                ));
-
                 // Unlike in the pseudocode, we do not right away ignore blocks from older rounds,
                 // but store them as we will likely need them later, and we don't want to have
                 // to fetch them.
@@ -1067,6 +1061,12 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
                         self.r_cur,
                     ));
                 } else {
+                    self.log_detail(format!(
+                        "Processing proposal of block {} from node {}",
+                        round,
+                        leader,
+                    ));
+
                     ctx.set_timer(self.config.extra_wait_before_qc_vote, TimerEvent::QcVote(round));
                 }
             }

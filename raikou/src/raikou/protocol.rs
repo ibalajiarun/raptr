@@ -237,11 +237,11 @@ pub struct Config<S> {
 }
 
 impl<S: LeaderSchedule> Config<S> {
-    fn leader(&self, round: Round) -> NodeId {
+    pub fn leader(&self, round: Round) -> NodeId {
         (self.leader_schedule)(round)
     }
 
-    fn quorum(&self) -> usize {
+    pub fn quorum(&self) -> usize {
         // Using more general quorum formula that works not only for n = 3f+1,
         // but for any n >= 3f+1.
         (self.n_nodes + self.f) / 2 + 1
@@ -276,7 +276,6 @@ pub struct RaikouNode<S, DL> {
     r_timeout: Round,               // The highest round the node has voted to time out.
     last_qc_vote: SubBlockId,
     cc_voted: DefaultBTreeMap<Round, bool>, // Whether the node has CC-voted in round r.
-    last_tc_round: Round,
     qc_high: QC,
     committed_qc: QC,
 
@@ -349,7 +348,6 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             r_cur: 0,
             last_qc_vote: (0, 0).into(),
             cc_voted: Default::default(),
-            last_tc_round: 0,
             r_timeout: 0,
             qc_high: QC::genesis(),
             committed_qc: QC::genesis(),
@@ -1268,49 +1266,51 @@ where
         // form the TC and execute advance_round.
         upon receive [Message::TcVote(round, qc, signature, timeout_reason)] from node [p] {
             self.on_new_qc(qc.clone(), ctx).await;
-            self.tc_votes[round].insert(p, (qc, signature, timeout_reason));
 
-            let votes = &self.tc_votes[round];
+            if round >= self.r_cur {
+                self.tc_votes[round].insert(p, (qc, signature, timeout_reason));
 
-            if votes.len() == self.quorum() {
-                self.last_tc_round = round;
-                self.log_detail(format!("Forming a TC for round {}", round));
+                let votes = &self.tc_votes[round];
 
-                let vote_data = votes
-                    .iter()
-                    .map(|(node_id, (qc, _, _))| (*node_id, qc.id()))
-                    .collect();
+                if votes.len() == self.quorum() {
+                    self.log_detail(format!("Forming a TC for round {}", round));
 
-                let signatures = votes.values().map(|(_, signature, _)| signature.clone());
-                let aggregated_signature = self.sig_verifier.aggregate_signatures(signatures).unwrap();
-                let timeout_reason = self.aggregate_timeout_reason(votes);
+                    let signatures = votes.values().map(|(_, signature, _)| signature.clone());
+                    let aggregated_signature = self.sig_verifier.aggregate_signatures(signatures).unwrap();
+                    let timeout_reason = self.aggregate_timeout_reason(votes);
 
-                let tc = TC::new(
-                    round,
-                    vote_data,
-                    aggregated_signature,
-                    timeout_reason
-                );
+                    let vote_data = votes
+                        .iter()
+                        .map(|(node_id, (qc, _, _))| (*node_id, qc.id()))
+                        .collect();
 
-                let max_qc = votes
-                    .values()
-                    .map(|(qc, _, _)| qc)
-                    .max_by_key(|qc| qc.id())
-                    .unwrap()
-                    .clone();
+                    let tc = TC::new(
+                        round,
+                        vote_data,
+                        aggregated_signature,
+                        timeout_reason
+                    );
 
-                // TODO: check that `max_qc` is indeed what's intended here.
-                // TODO: maybe need to check if `max_qc.round == round`?
-                if let Some(block) = self.blocks.get(max_qc.block_digest()) {
-                    observe_block(block.data.timestamp_usecs, "TCAggregate");
+                    let max_qc = votes
+                        .values()
+                        .map(|(qc, _, _)| qc)
+                        .max_by_key(|qc| qc.id())
+                        .unwrap()
+                        .clone();
+
+                    // TODO: check that `max_qc` is indeed what's intended here.
+                    // TODO: maybe need to check if `max_qc.round == round`?
+                    if let Some(block) = self.blocks.get(max_qc.block_digest()) {
+                        observe_block(block.data.timestamp_usecs, "TCAggregate");
+                    }
+
+                    self.advance_r_ready(
+                        round + 1,
+                        RoundEntryReason::TC(tc, max_qc),
+                        ctx
+                    )
+                    .await;
                 }
-
-                self.advance_r_ready(
-                    round + 1,
-                    RoundEntryReason::TC(tc, max_qc),
-                    ctx
-                )
-                .await;
             }
         };
 

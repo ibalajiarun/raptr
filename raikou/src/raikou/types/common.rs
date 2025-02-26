@@ -9,7 +9,7 @@ use crate::{
         types::{BatchInfo, Payload, AC},
     },
 };
-use anyhow::Context;
+use anyhow::{ensure, Context};
 use aptos_bitvec::BitVec;
 use aptos_consensus_types::{proof_of_store::ProofCache, round_timeout::RoundTimeoutReason};
 use aptos_crypto::{bls12381::Signature, hash::CryptoHash, HashValue};
@@ -118,6 +118,11 @@ impl Block {
         if self.round() == 0 {
             return Err(anyhow::anyhow!("Invalid Block round: 0"));
         }
+
+        ensure!(
+            !matches!(self.reason(), RoundEntryReason::ThisRoundQC(_)),
+            "ThisRoundQC cannot be used as entry reason in a block"
+        );
 
         let sig_verifier = &verifier.sig_verifier;
         let quorum = verifier.config.ac_quorum;
@@ -543,6 +548,8 @@ impl TC {
 
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
 pub enum RoundEntryReason {
+    /// When a node receives a QC for round r, it can enter round r.
+    ThisRoundQC(QC),
     /// When a node receives a full-prefix QC for round r, it can enter round r+1.
     FullPrefixQC(QC),
     /// When a node receives a CC for round r, it can enter round r+1.
@@ -554,6 +561,7 @@ pub enum RoundEntryReason {
 impl Display for RoundEntryReason {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
+            RoundEntryReason::ThisRoundQC(_) => write!(f, "ThisRoundQC"),
             RoundEntryReason::FullPrefixQC(_) => write!(f, "FullPrefixQC"),
             RoundEntryReason::CC(_, _) => write!(f, "CC"),
             RoundEntryReason::TC(_, _) => write!(f, "TC"),
@@ -564,6 +572,7 @@ impl Display for RoundEntryReason {
 impl Debug for RoundEntryReason {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
+            RoundEntryReason::ThisRoundQC(qc) => write!(f, "ThisRoundQC({:?})", qc),
             RoundEntryReason::FullPrefixQC(qc) => write!(f, "Full Prefix {:?}", qc),
             RoundEntryReason::CC(cc, qc) => write!(f, "CC({:?}, {:?})", cc, qc),
             RoundEntryReason::TC(tc, qc) => write!(f, "TC({:?}, {:?})", tc, qc),
@@ -574,6 +583,7 @@ impl Debug for RoundEntryReason {
 impl RoundEntryReason {
     pub fn qc(&self) -> &QC {
         match self {
+            RoundEntryReason::ThisRoundQC(qc) => qc,
             RoundEntryReason::FullPrefixQC(qc) => qc,
             RoundEntryReason::CC(_, qc) => qc,
             RoundEntryReason::TC(_, qc) => qc,
@@ -587,6 +597,15 @@ impl RoundEntryReason {
         quorum: usize,
     ) -> anyhow::Result<()> {
         match self {
+            RoundEntryReason::ThisRoundQC(qc) => {
+                ensure!(
+                    qc.round() == round,
+                    "Invalid QC round in ThisRoundQC entry reason"
+                );
+
+                qc.verify(verifier, quorum)
+                    .context("Error verifying the QC")
+            },
             RoundEntryReason::FullPrefixQC(qc) => {
                 if !(qc.round() == round - 1 && qc.is_full()) {
                     return Err(anyhow::anyhow!("Invalid FullPrefixQC entry reason"));

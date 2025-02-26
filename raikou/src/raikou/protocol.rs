@@ -514,6 +514,14 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
                 ctx,
             )
             .await;
+        } else {
+            // If the QC is not full, advance to the round of the new QC if lagging behind.
+            self.advance_r_ready(
+                new_qc.round(),
+                RoundEntryReason::ThisRoundQC(new_qc.clone()),
+                ctx,
+            )
+            .await;
         }
 
         self.known_qcs.insert(new_qc.sub_block_id());

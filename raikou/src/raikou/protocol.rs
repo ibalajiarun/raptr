@@ -309,6 +309,7 @@ pub struct RaikouNode<S, DL> {
         Round,
         DefaultBTreeMap<BlockHash, BTreeMap<NodeId, (Prefix, Signature, BitVec)>>,
     >,
+    full_prefix_votes: DefaultBTreeMap<Round, DefaultBTreeMap<BlockHash, BTreeSet<NodeId>>>,
     received_cc_vote: DefaultBTreeMap<Round, BTreeSet<NodeId>>,
     cc_votes: DefaultBTreeMap<Round, BTreeMap<(Prefix, NodeId), (QC, Signature)>>,
     tc_votes: DefaultBTreeMap<Round, BTreeMap<NodeId, (QC, Signature, RoundTimeoutReason)>>,
@@ -362,6 +363,7 @@ impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
             blocks: Default::default(),
             available_prefix_cache: (0, 0).into(),
             qc_votes: Default::default(),
+            full_prefix_votes: Default::default(),
             received_cc_vote: Default::default(),
             cc_votes: Default::default(),
             tc_votes: Default::default(),
@@ -1098,59 +1100,60 @@ where
             };
         };
 
-        // Upon receiving the block for round r_cur and a quorum of qc-votes for this block,
-        // form a QC and execute on_new_qc if one of the two conditions hold:
-        // 1. When it will be the first QC observed by the node in this round;
-        // 2. When it will be the first full-prefix QC observed by the node in this round.
-
+        // A node only processes QC-votes in round r_cur and higher.
+        // It can form a QC up to 2 time in a round, when it has received a quorum of QC-votes
+        // with the same block digest and either:
+        // 1. the node has not yet formed or received any QC for this round or higher; or
+        // 2. the node can form the full-prefix QC.
+        // Upon forming a QC, execute on_new_qc.
         upon receive [Message::QcVote(round, prefix, block_digest, signature, missing_authors)] from node [p] {
             if round >= self.r_cur {
                 self.qc_votes[round][block_digest.clone()].insert(p, (prefix, signature, missing_authors));
+
+                if prefix == N_SUB_BLOCKS {
+                    self.full_prefix_votes[round][block_digest.clone()].insert(p);
+                }
+
                 let votes = &self.qc_votes[&round][&block_digest];
+                let full_prefix_votes = &self.full_prefix_votes[&round][&block_digest];
 
-                // A node forms a QC when it has received a quorum of votes
-                // with matching block digest and either:
-                // 1. the node has not yet received or formed any QC for this round; or
-                // 2. it can form a full-prefix QC.
-                if votes.len() >= self.quorum() {
-                    let n_full_prefix_votes = votes.values().filter(|&&(vote, _, _)| vote == N_SUB_BLOCKS).count();
-                    let cond_1 = self.qc_high.round() < round;
-                    let cond_2 = self.qc_high.id() < (round, N_SUB_BLOCKS).into()
-                        && n_full_prefix_votes >= self.config.storage_requirement;
+                if votes.len() >= self.quorum() && (
+                    self.qc_high.round() < round ||
+                    full_prefix_votes.len() >= self.config.storage_requirement
+                ) {
+                    let partial_signatures = votes
+                        .iter()
+                        .map(|(_, (_, signature, _))| signature.clone());
 
-                    if cond_1 || cond_2 {
-                        let partial_signatures = votes
-                            .iter()
-                            .map(|(_, (_, signature, _))| signature.clone());
+                    let tagged_multi_signature =
+                        self.sig_verifier.aggregate_signatures(partial_signatures).unwrap();
 
-                        let tagged_multi_signature =
-                            self.sig_verifier.aggregate_signatures(partial_signatures).unwrap();
+                    let vote_prefixes = votes
+                        .iter()
+                        .map(|(node_id, (prefix, _signature, _))| (*node_id, *prefix))
+                        .collect();
 
-                        let vote_prefixes = votes
-                            .iter()
-                            .map(|(node_id, (prefix, _signature, _))| (*node_id, *prefix))
-                            .collect();
+                    let missing_authors = self.aggregate_qc_missing_authors(
+                        votes.iter().map(|(_, (_, _, missing))| missing)
+                    );
 
-                        let missing_authors = self.aggregate_qc_missing_authors(votes.iter().map(|(_, (_, _, missing))| missing));
+                    let qc = QC::new (
+                        round,
+                        block_digest,
+                        vote_prefixes,
+                        tagged_multi_signature,
+                        missing_authors,
+                        self.config.storage_requirement,
+                    );
 
-                        let qc = QC::new(
-                            round,
-                            block_digest,
-                            vote_prefixes,
-                            tagged_multi_signature,
-                            missing_authors,
-                            self.config.storage_requirement,
-                        );
+                    self.log_detail(format!(
+                        "Forming a QC for block {} with prefix {}/{}",
+                        round,
+                        qc.prefix(),
+                        N_SUB_BLOCKS,
+                    ));
 
-                        self.log_detail(format!(
-                            "Forming a QC for block {} with prefix {}/{}",
-                            round,
-                            qc.prefix(),
-                            N_SUB_BLOCKS,
-                        ));
-
-                        self.on_new_qc(qc, ctx).await;
-                    }
+                    self.on_new_qc(qc, ctx).await;
                 }
             }
         };

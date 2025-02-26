@@ -2,8 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    framework::{crypto::SignatureVerifier, NodeId},
-    monitor,
+    framework::NodeId,
     raikou::{
         protocol,
         types::{BatchInfo, Payload, PoA},
@@ -11,17 +10,14 @@ use crate::{
 };
 use anyhow::{ensure, Context};
 use aptos_bitvec::BitVec;
-use aptos_consensus_types::{proof_of_store::ProofCache, round_timeout::RoundTimeoutReason};
+use aptos_consensus_types::round_timeout::RoundTimeoutReason;
 use aptos_crypto::{bls12381::Signature, hash::CryptoHash, HashValue};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
 use itertools::Itertools;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use std::{
-    cmp::Ordering,
-    collections::BTreeSet,
     fmt::{Debug, Display, Formatter},
     sync::Arc,
-    time::Instant,
 };
 
 pub type Txn = aptos_types::transaction::SignedTransaction;
@@ -116,30 +112,31 @@ impl Block {
     }
 
     pub fn verify(&self, verifier: &protocol::Verifier) -> anyhow::Result<()> {
-        if self.round() == 0 {
-            return Err(anyhow::anyhow!("Invalid Block round: 0"));
-        }
-
+        ensure!(self.round() > 0, "Invalid Block round: {}", self.round());
+        ensure!(
+            self.author() == verifier.config.leader(self.round()),
+            "Invalid block author: {}. Expected: {}",
+            self.author(),
+            verifier.config.leader(self.round())
+        );
         ensure!(
             !matches!(self.reason(), RoundEntryReason::ThisRoundQC(_)),
             "ThisRoundQC cannot be used as entry reason in a block"
         );
 
-        let sig_verifier = &verifier.sig_verifier;
-        let quorum = verifier.config.poa_quorum;
-
         self.payload()
-            .verify(verifier)
+            .verify(verifier, self)
             .context("Error verifying payload")?;
         self.reason()
-            .verify(self.round(), sig_verifier, quorum)
+            .verify(self.round(), verifier)
             .context("Error verifying entry reason")?;
 
         let sig_data = BlockSignatureData {
             digest: self.digest.clone(),
         };
 
-        sig_verifier
+        verifier
+            .sig_verifier
             .verify(self.author(), &sig_data, &self.signature)
             .context("Error verifying author signature")?;
 
@@ -258,11 +255,11 @@ impl QC {
         QC {
             data: Arc::new(QcData {
                 round: 0,
-                prefix: N_SUB_BLOCKS,
                 block_digest: HashValue::zero(),
                 vote_prefixes: PrefixSet::empty(),
                 tagged_multi_signature: None,
                 missing_authors: None,
+                prefix: N_SUB_BLOCKS,
             }),
         }
     }
@@ -307,36 +304,50 @@ impl QC {
         (self.round(), self.prefix()).into()
     }
 
-    pub fn verify(&self, sig_verifier: &SignatureVerifier, quorum: usize) -> anyhow::Result<()> {
-        if self.is_genesis() {
-            return if self.vote_prefixes().is_empty()
-                && *self.block_digest() == HashValue::zero()
-                && self.tagged_multi_signature().is_none()
-            {
-                Ok(())
-            } else {
-                Err(anyhow::anyhow!("Invalid genesis QC"))
-            };
+    fn verify_genesis(&self) -> anyhow::Result<()> {
+        ensure!(self.round() == 0);
+        ensure!(self.prefix() == N_SUB_BLOCKS);
+        ensure!(self.block_digest() == &HashValue::zero());
+        ensure!(self.vote_prefixes().is_empty());
+        ensure!(self.tagged_multi_signature().is_none());
+        ensure!(self.missing_authors().is_none());
+
+        Ok(())
+    }
+
+    pub fn verify(&self, verifier: &protocol::Verifier) -> anyhow::Result<()> {
+        if self.round() == 0 {
+            return self.verify_genesis().context("Invalid genesis QC");
         }
 
-        if self.tagged_multi_signature().is_none() {
-            return Err(anyhow::anyhow!("Missing aggregated signature"));
-        }
+        ensure!(
+            self.tagged_multi_signature().is_some(),
+            "Missing aggregated signature in non-genesis QC"
+        );
+
+        let nodes = self.vote_prefixes().node_ids().collect_vec();
+        let tags = self.vote_prefixes().prefixes().collect_vec();
+        ensure!(
+            nodes.len() >= verifier.config.quorum(),
+            "Not enough signers"
+        );
+
+        let prefix = self
+            .vote_prefixes()
+            .prefixes()
+            .sorted()
+            .skip(verifier.config.storage_requirement - 1)
+            .next()
+            .unwrap();
+        ensure!(self.prefix() == prefix, "Invalid prefix in QC");
 
         let message = QcVoteSignatureCommonData {
             round: self.round(),
             block_digest: self.block_digest().clone(),
         };
 
-        let node_ids = self.vote_prefixes().node_ids().collect_vec();
-        let tags = self.vote_prefixes().prefixes().collect_vec();
-
-        if node_ids.len() < quorum {
-            return Err(anyhow::anyhow!("Not enough signers"));
-        }
-
-        sig_verifier.verify_tagged_multi_signature(
-            node_ids,
+        verifier.sig_verifier.verify_tagged_multi_signature(
+            nodes,
             &message,
             tags,
             self.tagged_multi_signature().as_ref().unwrap(),
@@ -353,17 +364,17 @@ pub struct CC {
     tagged_multi_signature: Signature,
 
     #[serde(skip)]
-    min_prefix: Prefix,
+    commit_prefix: Prefix,
     #[serde(skip)]
-    max_prefix: Prefix,
+    extend_prefix: Prefix,
 }
 
 impl Debug for CC {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CC")
             .field("round", &self.round)
-            .field("min_prefix", &self.min_prefix)
-            .field("max_prefix", &self.max_prefix)
+            .field("commit_prefix", &self.commit_prefix)
+            .field("extend_prefix", &self.extend_prefix)
             .finish()
     }
 }
@@ -404,34 +415,31 @@ impl CC {
             round,
             block_digest,
             tagged_multi_signature,
-            min_prefix: vote_prefixes.prefixes().min().unwrap(),
-            max_prefix: vote_prefixes.prefixes().max().unwrap(),
+            commit_prefix: vote_prefixes.prefixes().min().unwrap(),
+            extend_prefix: vote_prefixes.prefixes().max().unwrap(),
             vote_prefixes,
         }
     }
 
-    pub fn lowest_qc_id(&self) -> SubBlockId {
-        (self.round, self.min_prefix).into()
-    }
-
-    pub fn highest_qc_id(&self) -> SubBlockId {
-        (self.round, self.max_prefix).into()
-    }
-
-    pub fn verify(&self, verifier: &SignatureVerifier, quorum: usize) -> anyhow::Result<()> {
+    pub fn verify(&self, verifier: &protocol::Verifier) -> anyhow::Result<()> {
         let message = CcVoteSignatureCommonData {
             round: self.round,
             block_digest: self.block_digest,
         };
 
-        let nodes = self.vote_prefixes.node_ids().collect_vec();
-        let tags = self.vote_prefixes.prefixes().collect_vec();
+        let (nodes, prefixes) = self.vote_prefixes.unzip();
 
-        if nodes.len() < quorum {
-            return Err(anyhow::anyhow!("Not enough signers"));
-        }
+        ensure!(
+            nodes.len() >= verifier.config.quorum(),
+            "Not enough signers"
+        );
 
-        verifier.verify_tagged_multi_signature(nodes, &message, tags, &self.tagged_multi_signature)
+        verifier.sig_verifier.verify_tagged_multi_signature(
+            nodes,
+            &message,
+            prefixes,
+            &self.tagged_multi_signature,
+        )
     }
 }
 
@@ -453,12 +461,6 @@ impl Debug for TC {
             .field("timeout_round", &self.timeout_round)
             .field("max_vote", &self.max_vote)
             .finish()
-    }
-}
-
-impl TC {
-    pub fn reason(&self) -> RoundTimeoutReason {
-        self.round_timeout_reason.clone()
     }
 }
 
@@ -501,11 +503,15 @@ impl TC {
         }
     }
 
-    pub fn highest_qc_id(&self) -> SubBlockId {
+    pub fn extend_id(&self) -> SubBlockId {
         self.max_vote
     }
 
-    pub fn verify(&self, verifier: &SignatureVerifier, quorum: usize) -> anyhow::Result<()> {
+    pub fn reason(&self) -> RoundTimeoutReason {
+        self.round_timeout_reason.clone()
+    }
+
+    pub fn verify(&self, verifier: &protocol::Verifier) -> anyhow::Result<()> {
         let nodes = self
             .vote_data
             .iter()
@@ -515,6 +521,10 @@ impl TC {
         ensure!(
             nodes.windows(2).all(|w| w[0] < w[1]),
             "TC nodes must be sorted and unique"
+        );
+        ensure!(
+            nodes.len() >= verifier.config.quorum(),
+            "Not enough signers"
         );
 
         let sig_data: Vec<_> = self
@@ -526,11 +536,7 @@ impl TC {
             })
             .collect();
 
-        if sig_data.len() < quorum {
-            return Err(anyhow::anyhow!("Not enough signers"));
-        }
-
-        verifier.verify_aggregate_signatures(
+        verifier.sig_verifier.verify_aggregate_signatures(
             self.vote_data.iter().map(|(node_id, _)| *node_id),
             sig_data.iter().collect(),
             &self.aggregated_signature,
@@ -565,7 +571,7 @@ impl Debug for RoundEntryReason {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             RoundEntryReason::ThisRoundQC(qc) => write!(f, "ThisRoundQC({:?})", qc),
-            RoundEntryReason::FullPrefixQC(qc) => write!(f, "Full Prefix {:?}", qc),
+            RoundEntryReason::FullPrefixQC(qc) => write!(f, "FullPrefixQC({:?})", qc),
             RoundEntryReason::CC(cc, qc) => write!(f, "CC({:?}, {:?})", cc, qc),
             RoundEntryReason::TC(tc, qc) => write!(f, "TC({:?}, {:?})", tc, qc),
         }
@@ -582,12 +588,7 @@ impl RoundEntryReason {
         }
     }
 
-    pub fn verify(
-        &self,
-        round: Round,
-        verifier: &SignatureVerifier,
-        quorum: usize,
-    ) -> anyhow::Result<()> {
+    pub fn verify(&self, round: Round, verifier: &protocol::Verifier) -> anyhow::Result<()> {
         match self {
             RoundEntryReason::ThisRoundQC(qc) => {
                 ensure!(
@@ -595,34 +596,47 @@ impl RoundEntryReason {
                     "Invalid QC round in ThisRoundQC entry reason"
                 );
 
-                qc.verify(verifier, quorum)
-                    .context("Error verifying the QC")
+                qc.verify(verifier).context("Error verifying the QC")?;
             },
             RoundEntryReason::FullPrefixQC(qc) => {
-                if !(qc.round() == round - 1 && qc.is_full()) {
-                    return Err(anyhow::anyhow!("Invalid FullPrefixQC entry reason"));
-                }
-                qc.verify(verifier, quorum)
-                    .context("Error verifying the QC")
+                ensure!(
+                    qc.round() == round - 1,
+                    "Invalid QC round in FullPrefixQC entry reason"
+                );
+                ensure!(
+                    qc.is_full(),
+                    "Invalid QC prefix in FullPrefixQC entry reason"
+                );
+
+                qc.verify(verifier).context("Error verifying the QC")?;
             },
             RoundEntryReason::CC(cc, qc) => {
-                if !(cc.round == round - 1 && qc.id() >= cc.highest_qc_id()) {
-                    return Err(anyhow::anyhow!("Invalid CC entry reason"));
-                }
-                cc.verify(verifier, quorum)
-                    .context("Error verifying the CC")?;
-                qc.verify(verifier, quorum)
-                    .context("Error verifying the QC")
+                ensure!(cc.round == round - 1, "Invalid CC round in CC entry reason");
+                ensure!(
+                    qc.round() == round - 1,
+                    "Invalid QC round in CC entry reason"
+                );
+                ensure!(
+                    qc.prefix() >= cc.extend_prefix,
+                    "Invalid QC prefix in CC entry reason"
+                );
+
+                cc.verify(verifier).context("Error verifying the CC")?;
+                qc.verify(verifier).context("Error verifying the QC")?;
             },
             RoundEntryReason::TC(tc, qc) => {
-                if !(tc.timeout_round == round - 1 && qc.id() >= tc.highest_qc_id()) {
-                    return Err(anyhow::anyhow!("Invalid TC entry reason"));
-                }
-                tc.verify(verifier, quorum)
-                    .context("Error verifying the TC")?;
-                qc.verify(verifier, quorum)
-                    .context("Error verifying the QC")
+                ensure!(
+                    tc.timeout_round == round - 1,
+                    "Invalid TC round in TC entry reason"
+                );
+                ensure!(qc.id() >= tc.extend_id(), "QC too low in TC entry reason");
+                ensure!(qc.round() < round, "QC round too high in TC entry reason");
+
+                tc.verify(verifier).context("Error verifying the TC")?;
+                qc.verify(verifier).context("Error verifying the QC")?;
             },
         }
+
+        Ok(())
     }
 }

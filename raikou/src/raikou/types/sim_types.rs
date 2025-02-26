@@ -5,10 +5,10 @@ use crate::{
     framework::{crypto::SignatureVerifier, NodeId},
     raikou::{
         protocol,
-        types::{BatchHash, Prefix, Round, N_SUB_BLOCKS},
+        types::{BatchHash, Block, Prefix, Round, N_SUB_BLOCKS},
     },
 };
-use anyhow::Context;
+use anyhow::{ensure, Context};
 use aptos_bitvec::BitVec;
 use aptos_crypto::bls12381::Signature;
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
@@ -191,7 +191,18 @@ impl Payload {
             .chain(self.sub_blocks().flatten())
     }
 
-    pub fn verify(&self, verifier: &protocol::Verifier) -> anyhow::Result<()> {
+    pub fn verify(&self, verifier: &protocol::Verifier, block: &Block) -> anyhow::Result<()> {
+        ensure!(self.round() == block.round(), "Invalid round");
+        ensure!(self.author() == block.author(), "Invalid author");
+        ensure!(
+            self.include_poas,
+            "Received a partial payload: PoA excluded"
+        );
+        ensure!(
+            self.sub_blocks == (0..N_SUB_BLOCKS),
+            "Received a partial payload: Sub-blocks excluded"
+        );
+
         for poa in self.poas() {
             poa.verify(&verifier.sig_verifier, verifier.config.poa_quorum)
                 .context("Invalid PoA")?;

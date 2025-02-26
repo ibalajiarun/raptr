@@ -2,13 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
-    framework,
     framework::NodeId,
     raikou::{
         protocol,
-        types::common::{Prefix, Round},
+        types::{
+            common::{Prefix, Round},
+            Block, N_SUB_BLOCKS,
+        },
     },
 };
+use anyhow::ensure;
 use aptos_consensus_types::proof_of_store::ProofCache;
 pub use aptos_consensus_types::proof_of_store::{BatchId, BatchInfo};
 pub use aptos_crypto::hash::HashValue;
@@ -111,7 +114,14 @@ impl Payload {
             .chain(self.sub_blocks().flatten())
     }
 
-    pub fn verify(&self, verifier: &protocol::Verifier) -> anyhow::Result<()> {
+    pub fn verify(&self, verifier: &protocol::Verifier, block: &Block) -> anyhow::Result<()> {
+        ensure!(self.round() == block.round(), "Invalid round");
+        ensure!(self.author() == block.author(), "Invalid author");
+        ensure!(
+            self.sub_blocks().len() == N_SUB_BLOCKS,
+            "Received a partial payload: Sub-blocks excluded"
+        );
+
         self.inner.verify(
             verifier.sig_verifier.aptos_verifier(),
             &verifier.proof_cache,

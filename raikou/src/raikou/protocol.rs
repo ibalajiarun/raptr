@@ -22,7 +22,7 @@ use crate::{
         types::*,
     },
 };
-use anyhow::Context;
+use anyhow::{ensure, Context};
 use aptos_bitvec::BitVec;
 use aptos_consensus_types::{
     common::Author, payload::BatchPointer, proof_of_store::ProofCache,
@@ -114,21 +114,15 @@ impl MessageVerifier for Verifier {
     async fn verify(&self, sender: NodeId, message: &Self::Message) -> anyhow::Result<()> {
         match message {
             Message::Propose(block) => monitor!("verify_propose", {
-                if block.author() != sender {
-                    return Err(anyhow::anyhow!("Invalid author in Propose message"));
-                }
+                ensure!(block.author() == sender, "Propose message from non-author");
+
                 block
                     .verify(self)
                     .context("Error verifying the block in Propose message")
             }),
             Message::QcVote(round, prefix, block_digest, signature, _) => {
                 monitor!("verify_qcvote", {
-                    if *prefix > N_SUB_BLOCKS {
-                        return Err(anyhow::anyhow!(
-                            "Invalid prefix in QcVote message: {}",
-                            prefix
-                        ));
-                    }
+                    ensure!(*prefix <= N_SUB_BLOCKS, "Invalid prefix in QcVote message");
 
                     self.sig_verifier.verify_tagged(
                         sender,
@@ -154,15 +148,17 @@ impl MessageVerifier for Verifier {
                     )
                     .context("Error verifying the CC vote signature")?;
 
-                qc.verify(&self.sig_verifier, self.config.quorum())
+                qc.verify(self)
                     .context("Error verifying the QC in CcVote message")
             }),
             Message::AdvanceRound(round, reason) => monitor!("verify_advance", {
                 reason
-                    .verify(*round, &self.sig_verifier, self.config.quorum())
+                    .verify(*round, self)
                     .context("Error verifying the round enter reason in AdvanceRound message")
             }),
             Message::TcVote(round, qc, signature, _) => monitor!("verify_tcvote", {
+                ensure!(qc.round() <= *round, "QC in TcVote message too high");
+
                 let sig_data = &TcVoteSignatureData {
                     timeout_round: *round,
                     qc_high_id: qc.id(),
@@ -172,7 +168,7 @@ impl MessageVerifier for Verifier {
                     .verify(sender, sig_data, signature)
                     .context("Error verifying the TC vote signature")?;
 
-                qc.verify(&self.sig_verifier, self.config.quorum())
+                qc.verify(self)
                     .context("Error verifying the QC in TcVote message")
             }),
             Message::FetchReq(_block_digest) => monitor!("verify_fetchreq", Ok(())),
@@ -1027,9 +1023,10 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
         // execute on_new_qc and advance_round, start a timer for qc-vote,
         // and report missing batches to the leader.
         upon receive [Message::Propose(block)] from [leader] {
-            if leader == self.config.leader(block.round())
-                && !self.leader_proposal.contains_key(&block.round())
-            {
+            // part of the message verification.
+            assert_eq!(self.config.leader(block.round()), leader);
+
+            if !self.leader_proposal.contains_key(&block.round()) {
                 self.log_detail(format!(
                     "Received block {} proposed by node {} with {} ACs and {} optimistically proposed batches",
                     block.round(),

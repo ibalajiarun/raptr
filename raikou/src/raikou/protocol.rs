@@ -1022,26 +1022,12 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
                 block.sub_blocks().map(|b| b.len()).sum::<usize>(),
             ));
 
-            if round < self.r_cur {
-                self.log_detail(format!(
-                    "Ignoring proposal of block {} from node {} because already in round {}",
-                    round,
-                    leader,
-                    self.r_cur,
-                ));
-            } else if round <= self.r_timeout {
-                self.log_detail(format!(
-                    "Ignoring proposal of block {} from node {} because already timed out round {}",
-                    round,
-                    leader,
-                    self.r_timeout,
-                ));
-            } else if self.proposal.contains_key(&round) {
-                self.log_detail(format!(
+            if self.proposal.contains_key(&round) {
+                aptos_logger::warn!(
                     "Received duplicate proposal of block {} from node {}",
                     round,
                     leader,
-                ));
+                );
             } else {
                 self.log_detail(format!(
                     "Processing proposal of block {} from node {}",
@@ -1049,6 +1035,9 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
                     leader,
                 ));
 
+                // Unlike in the pseudocode, we do not right away ignore blocks from older rounds,
+                // but store them as we will likely need them later, and we don't want to have
+                // to fetch them.
                 self.proposal.insert(round, block.digest.clone());
                 self.on_new_qc(block.parent_qc(), ctx).await;
 
@@ -1063,7 +1052,23 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
                     ProposalReceived { leader, round, payload },
                 ).await;
 
-                ctx.set_timer(self.config.extra_wait_before_qc_vote, TimerEvent::QcVote(round));
+                if round <= self.r_timeout {
+                    self.log_detail(format!(
+                        "Ignoring proposal of block {} from node {} because already timed out round {}",
+                        round,
+                        leader,
+                        self.r_timeout,
+                    ));
+                } else if round < self.r_cur {
+                    self.log_detail(format!(
+                        "Ignoring proposal of block {} from node {} because already in round {}",
+                        round,
+                        leader,
+                        self.r_cur,
+                    ));
+                } else {
+                    ctx.set_timer(self.config.extra_wait_before_qc_vote, TimerEvent::QcVote(round));
+                }
             }
         };
 
@@ -1219,7 +1224,7 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
                             observe_block(block.data.timestamp_usecs, "CCReady");
                         }
 
-                        let (max_qc, _) = votes.values().last().unwrap();
+                        let (_, (max_qc, _)) = votes.last_key_value().unwrap();
                         self.try_advance_round(
                             round + 1,
                             RoundEntryReason::CC(cc, max_qc.clone()),
@@ -1265,8 +1270,9 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
         // Upon receiving a valid TC-vote, execute on_new_qc.
         // Upon gathering a quorum of matching TC-votes, form the TC and execute try_advance_round.
         upon receive [Message::TcVote(round, qc, signature, timeout_reason)] from node [p] {
+            self.on_new_qc(&qc, ctx).await;
+
             if round >= self.r_cur {
-                self.on_new_qc(&qc, ctx).await;
                 self.tc_votes[round].insert(p, (qc, signature, timeout_reason));
 
                 let votes = &self.tc_votes[round];

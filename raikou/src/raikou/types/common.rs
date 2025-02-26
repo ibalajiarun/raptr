@@ -18,6 +18,7 @@ use itertools::Itertools;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{
     cmp::Ordering,
+    collections::BTreeSet,
     fmt::{Debug, Display, Formatter},
     sync::Arc,
     time::Instant,
@@ -505,6 +506,17 @@ impl TC {
     }
 
     pub fn verify(&self, verifier: &SignatureVerifier, quorum: usize) -> anyhow::Result<()> {
+        let nodes = self
+            .vote_data
+            .iter()
+            .map(|(node_id, _)| *node_id)
+            .collect_vec();
+
+        ensure!(
+            nodes.windows(2).all(|w| w[0] < w[1]),
+            "TC nodes must be sorted and unique"
+        );
+
         let sig_data: Vec<_> = self
             .vote_data
             .iter()

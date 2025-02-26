@@ -111,7 +111,7 @@ impl Payload {
             .chain(self.sub_blocks().flatten())
     }
 
-    pub fn verify<S>(&self, verifier: &protocol::Verifier<S>) -> anyhow::Result<()> {
+    pub fn verify(&self, verifier: &protocol::Verifier) -> anyhow::Result<()> {
         self.inner.verify(
             verifier.sig_verifier.aptos_verifier(),
             &verifier.proof_cache,

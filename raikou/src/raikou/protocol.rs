@@ -8,7 +8,6 @@ use crate::{
         network::MessageVerifier,
         ContextFor, NodeId, Protocol,
     },
-    leader_schedule::LeaderSchedule,
     metrics::{self, Sender},
     monitor, protocol,
     raikou::{
@@ -89,14 +88,14 @@ impl Debug for Message {
 // All signatures are done in-line in the protocol.
 pub type Certifier = framework::network::NoopCertifier<Message>;
 
-pub struct Verifier<S> {
-    pub config: Config<S>,
+pub struct Verifier {
+    pub config: Config,
     pub sig_verifier: SignatureVerifier,
     pub proof_cache: ProofCache,
 }
 
-impl<S: LeaderSchedule> Verifier<S> {
-    pub fn new<DL>(protocol: &RaikouNode<S, DL>) -> Self {
+impl Verifier {
+    pub fn new<DL>(protocol: &RaikouNode<DL>) -> Self {
         Verifier {
             config: protocol.config.clone(),
             sig_verifier: protocol.sig_verifier.clone(),
@@ -109,7 +108,7 @@ impl<S: LeaderSchedule> Verifier<S> {
     }
 }
 
-impl<S: LeaderSchedule> MessageVerifier for Verifier<S> {
+impl MessageVerifier for Verifier {
     type Message = Message;
 
     async fn verify(&self, sender: NodeId, message: &Self::Message) -> anyhow::Result<()> {
@@ -215,12 +214,11 @@ pub enum QcVoteReason {
 }
 
 #[derive(Clone, Copy)]
-pub struct Config<S> {
+pub struct Config {
     pub n_nodes: usize,
     pub f: usize,
     pub storage_requirement: usize,
     pub leader_timeout: Duration,
-    pub leader_schedule: S,
     pub delta: Duration,
     pub enable_commit_votes: bool,
     pub enable_round_entry_permission: bool,
@@ -242,9 +240,9 @@ pub struct Config<S> {
     pub poa_quorum: usize,
 }
 
-impl<S: LeaderSchedule> Config<S> {
+impl Config {
     pub fn leader(&self, round: Round) -> NodeId {
-        (self.leader_schedule)(round)
+        round as usize % self.n_nodes
     }
 
     pub fn quorum(&self) -> usize {
@@ -263,9 +261,9 @@ pub trait TRaikouFailureTracker: Send + Sync {
     fn push_reason(&self, status: RoundEntryReason);
 }
 
-pub struct RaikouNode<S, DL> {
+pub struct RaikouNode<DL> {
     node_id: NodeId,
-    config: Config<S>,
+    config: Config,
     dissemination: DL,
 
     // Logging and metrics
@@ -326,10 +324,10 @@ pub struct RaikouNode<S, DL> {
     failure_tracker: Option<Arc<dyn TRaikouFailureTracker>>,
 }
 
-impl<S: LeaderSchedule, DL: DisseminationLayer> RaikouNode<S, DL> {
+impl<DL: DisseminationLayer> RaikouNode<DL> {
     pub fn new(
         id: NodeId,
-        config: Config<S>,
+        config: Config,
         dissemination: DL,
         detailed_logging: bool,
         metrics: Metrics,
@@ -953,11 +951,7 @@ pub fn observe_block(timestamp: u64, stage: &'static str) {
     }
 }
 
-impl<S, DL> Protocol for RaikouNode<S, DL>
-where
-    S: LeaderSchedule,
-    DL: DisseminationLayer,
-{
+impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
     type Message = Message;
     type TimerEvent = TimerEvent;
 

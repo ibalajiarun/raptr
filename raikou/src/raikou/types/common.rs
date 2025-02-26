@@ -115,7 +115,7 @@ impl Block {
         self.sub_blocks().nth(index).unwrap()
     }
 
-    pub fn verify<S: Sync>(&self, verifier: &protocol::Verifier<S>) -> anyhow::Result<()> {
+    pub fn verify(&self, verifier: &protocol::Verifier) -> anyhow::Result<()> {
         if self.round() == 0 {
             return Err(anyhow::anyhow!("Invalid Block round: 0"));
         }

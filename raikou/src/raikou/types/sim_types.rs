@@ -191,7 +191,7 @@ impl Payload {
             .chain(self.sub_blocks().flatten())
     }
 
-    pub fn verify<S>(&self, verifier: &protocol::Verifier<S>) -> anyhow::Result<()> {
+    pub fn verify(&self, verifier: &protocol::Verifier) -> anyhow::Result<()> {
         for poa in self.poas() {
             poa.verify(&verifier.sig_verifier, verifier.config.poa_quorum)
                 .context("Invalid PoA")?;

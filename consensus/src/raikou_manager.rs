@@ -15,7 +15,6 @@ use crate::{
     pipeline::buffer_manager::OrderedBlocks,
     quorum_store,
 };
-use ::raikou::leader_schedule::round_robin;
 use anyhow::Context;
 use aptos_bitvec::BitVec;
 use aptos_config::config::ConsensusConfig;
@@ -189,7 +188,6 @@ impl RaikouManager {
             f,
             storage_requirement: f + 1, // f + (f / 2 + 1),
             leader_timeout: Duration::from_secs_f64(delta * 4.5),
-            leader_schedule: round_robin(n_nodes),
             delta: Duration::from_secs_f64(delta),
             end_of_run: Instant::now() + Duration::from_secs_f64(delta) * total_duration_in_delta,
             extra_wait_before_qc_vote: Duration::from_secs_f64(delta * 0.15),

@@ -1107,8 +1107,12 @@ where
         // 2. the node can form the full-prefix QC.
         // Upon forming a QC, execute on_new_qc.
         upon receive [Message::QcVote(round, prefix, block_digest, signature, missing_authors)] from node [p] {
-            if round >= self.r_cur {
-                self.qc_votes[round][block_digest.clone()].insert(p, (prefix, signature, missing_authors));
+            let vote_is_non_decreasing = self.qc_votes[round][block_digest].get(&p)
+                .map(|(old_prefix, _, _)| *old_prefix < prefix)
+                .unwrap_or(true);
+
+            if round >= self.r_cur && vote_is_non_decreasing {
+                self.qc_votes[round][block_digest].insert(p, (prefix, signature, missing_authors));
 
                 if prefix == N_SUB_BLOCKS {
                     self.full_prefix_votes[round][block_digest.clone()].insert(p);

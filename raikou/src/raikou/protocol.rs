@@ -917,32 +917,28 @@ where
 
             self.r_cur = round;
 
-            let timestamp_usecs =  duration_since_epoch().as_micros() as u64;
-
             let leader =  self.config.leader(round);
             self.log_detail(format!("Entering round {} by {:?} and leader {}", round, self.entry_reason, leader));
             ROUND_ENTER_REASON.with_label_values(&[&format!("{}", self.entry_reason)]).inc();
 
             if self.node_id == leader {
-                // Upon entering round r, the leader L_r multicasts a signed block
-                // B = [r, parent_qc, cc, tc, acs, batches], where cc or tc is not ⊥
-                // if the leader enters the round by forming or receiving a CC or TC
-                // for round r-1 respectively.
+                // Upon entering round r, the leader of round r creates and multicasts a block.
+                let reason = self.entry_reason.clone();
 
-                let parent_qc = self.qc_high.clone();
+                let payload = self
+                    .dissemination
+                    .prepare_block(
+                        self.r_cur,
+                        self.uncommitted_batches(reason.qc()),
+                        reason.qc().missing_authors().clone(),
+                    )
+                    .await;
 
-                let missing_authors = parent_qc.missing_authors().clone();
-
-                let payload = self.dissemination.prepare_block(
-                    round,
-                    self.uncommitted_batches(&parent_qc),
-                   missing_authors,
-                ).await;
-
+                let timestamp_usecs = duration_since_epoch().as_micros() as u64;
                 let block_data = BlockData {
                     timestamp_usecs,
                     payload,
-                    reason: self.entry_reason.clone(),
+                    reason,
                 };
 
                 let digest = block_data.hash();

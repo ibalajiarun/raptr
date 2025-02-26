@@ -1168,20 +1168,15 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
 
             if !self.received_cc_vote[round].contains(&p) {
                 self.received_cc_vote[round].insert(p);
+                self.cc_votes[round].insert((qc.prefix(), p), (qc, signature));
 
-                {
-                    let votes = &mut self.cc_votes[round];
-                    votes.insert((qc.prefix(), p), (qc, signature));
-
-                    // Drop the CC vote with the smallest prefix if the quorum is exceeded.
-                    if votes.len() > self.config.quorum() {
-                        votes.pop_first();
-                    }
-                    assert!(votes.len() <= self.config.quorum());
+                // Drop the CC vote with the smallest prefix if the quorum is exceeded.
+                if self.cc_votes[round].len() > self.config.quorum() {
+                    self.cc_votes[round].pop_first();
                 }
-                let votes = &self.cc_votes[round];
 
-                if votes.len() >= self.quorum() {
+                let votes = &self.cc_votes[round];
+                if votes.len() == self.config.quorum() {
                     let (_, (committed_qc, _)) = votes.first_key_value().unwrap();
 
                     // Form a CC each time we can commit something new, possibly several
@@ -1189,7 +1184,7 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
                     if committed_qc.id() > self.committed_qc.id() {
                         self.log_detail(format!(
                             "Forming a CC for block {} with prefix {}/{}",
-                            round,
+                            committed_qc.round(),
                             committed_qc.prefix(),
                             N_SUB_BLOCKS,
                         ));
@@ -1215,7 +1210,7 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
 
                         let cc = CC::new(
                             round,
-                            committed_qc.block_digest().clone(),
+                            *committed_qc.block_digest(),
                             vote_prefixes,
                             tagged_multi_signature,
                         );

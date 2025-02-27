@@ -29,6 +29,7 @@ pub struct Payload {
     round: Round,
     author: NodeId,
     pub inner: aptos_consensus_types::common::Payload,
+    shards: Vec<Payload>, // For signature verification.
 }
 
 impl Debug for Payload {
@@ -51,6 +52,22 @@ impl Payload {
             round,
             author: leader,
             inner,
+            shards: vec![],
+        }
+    }
+
+    pub fn sharded(round: Round, leader: NodeId, shards: Vec<Payload>) -> Self {
+        Self {
+            round,
+            author: leader,
+            inner: aptos_consensus_types::common::Payload::Raikou(
+                aptos_consensus_types::payload::RaikouPayload::combine(
+                    shards
+                        .iter()
+                        .map(|payload| payload.inner.as_raikou_payload()),
+                ),
+            ),
+            shards,
         }
     }
 
@@ -64,6 +81,7 @@ impl Payload {
             round: self.round,
             author: self.author,
             inner: self.inner.as_raikou_payload().with_prefix(prefix).into(),
+            shards: self.shards.clone(),
         }
     }
 
@@ -74,6 +92,7 @@ impl Payload {
             round: self.round,
             author: self.author,
             inner: self.inner.as_raikou_payload().take_sub_blocks(range).into(),
+            shards: self.shards.clone(),
         }
     }
 

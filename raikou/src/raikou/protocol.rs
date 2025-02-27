@@ -39,25 +39,27 @@ use futures_channel::mpsc::UnboundedSender;
 use itertools::Itertools;
 use mini_moka::sync::Cache;
 use nanovec::NanoArrayBit;
-use rand::prelude::SliceRandom;
+use once_cell::sync::Lazy;
+use rand::{prelude::SliceRandom, seq::IteratorRandom, Rng, SeedableRng};
 use serde::{ser::SerializeTuple, Deserialize, Deserializer, Serialize, Serializer};
 use std::{
+    cell::RefCell,
     cmp::{max, max_by, max_by_key, min, Ordering},
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt::{Debug, Display, Formatter},
     num::NonZeroU8,
     ops::{BitOr, Deref},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     task::ready,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use rand::{Rng, SeedableRng};
 use tokio::time::Instant;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Message {
     // Consensus
-    Propose(Block),
+    BlockHeader(Round, u64, RoundEntryReason, Signature),
+    BlockShard(Round, usize, Payload, Signature),
     QcVote(Round, Prefix, BlockHash, Signature, BitVec),
     CcVote(QC, Signature),
     TcVote(Round, QC, Signature, RoundTimeoutReason),
@@ -69,7 +71,8 @@ pub enum Message {
 impl Debug for Message {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Message::Propose(block) => write!(f, "Propose({})", block.round()),
+            Message::BlockHeader(round, _, _, _) => write!(f, "BlockHeader({})", round),
+            Message::BlockShard(round, _, _, _) => write!(f, "BlockShard({})", round),
             Message::QcVote(round, _, _, _, _) => write!(f, "QcVote({})", round),
             Message::CcVote(qc, _) => {
                 write!(f, "CcVote({})", qc.round())
@@ -114,12 +117,13 @@ impl MessageVerifier for Verifier {
 
     async fn verify(&self, sender: NodeId, message: &Self::Message) -> anyhow::Result<()> {
         match message {
-            Message::Propose(block) => monitor!("verify_propose", {
-                ensure!(block.author() == sender, "Propose message from non-author");
-
-                block
-                    .verify(self)
-                    .context("Error verifying the block in Propose message")
+            Message::BlockHeader(round, _, _, signature) => monitor!("verify_block_header", {
+                // TODO
+                Ok(())
+            }),
+            Message::BlockShard(round, _, payload, signature) => monitor!("verify_block_shard", {
+                // TODO
+                Ok(())
             }),
             Message::QcVote(round, prefix, block_digest, signature, _) => {
                 monitor!("verify_qcvote", {
@@ -218,7 +222,7 @@ pub struct Config {
     pub leader_timeout: Duration,
     pub delta: Duration,
     pub enable_commit_votes: bool,
-    pub n_supporters: usize,
+    pub n_builders: usize,
 
     /// The time  waits after receiving a block before voting for a QC for it
     /// if it doesn't have all the batches yet.
@@ -242,21 +246,33 @@ impl Config {
         round as usize % self.n_nodes
     }
 
-    pub fn supporters(&self, round: Round) -> Vec<NodeId> {
-        // Hardcode a seed, then use pseudo-randomness to select self.n_supporters supporters.
-        // Make sure that they are unique and not the leader.
-        // Do this efficiently, in time O(n_supporters).
-        assert!(self.n_supporters + 1 <= self.n_nodes);
-        let mut rng = rand::rngs::StdRng::seed_from_u64(round as u64);
-        let mut supporters = Vec::with_capacity(self.n_supporters);
-        for i in 0..self.n_supporters {
-            let mut id = rng.gen_range(0, self.n_nodes);
-            while id == self.leader(round) || supporters.contains(&id) {
-                id = rng.gen_range(0, self.n_nodes);
-            }
-            supporters.push(id);
+    pub fn builders(&self, round: Round) -> Vec<NodeId> {
+        thread_local! {
+            static BUILDERS_CACHE: RefCell<HashMap<Round, Vec<NodeId>>> = RefCell::new(HashMap::new());
         }
-        supporters
+
+        // Try to retrieve from the thread-local cache.
+        if let Some(cached) = BUILDERS_CACHE.with(|cache| cache.borrow().get(&round).cloned()) {
+            return cached;
+        }
+
+        // If not cached, compute the builders from a deterministically seeded RNG.
+        let mut rng = rand::rngs::StdRng::seed_from_u64(round as u64);
+
+        let leader = self.leader(round);
+        let mut builders = (0..self.n_nodes).choose_multiple(&mut rng, self.n_builders);
+
+        // Ensure the leader is always included.
+        if !builders.contains(&leader) {
+            builders[rng.gen_range(0, self.n_builders)] = leader;
+        }
+
+        // Cache the computed result in the thread-local cache.
+        BUILDERS_CACHE.with(|cache| {
+            cache.borrow_mut().insert(round, builders.clone());
+        });
+
+        builders
     }
 
     pub fn quorum(&self) -> usize {
@@ -319,6 +335,8 @@ pub struct RaikouNode<DL> {
     // QCs that are committed via direct commit votes, for which we do not yet have their full causal history available.
     qcs_to_commit: BTreeMap<SubBlockId, (QC, CommitReason)>,
 
+    block_header: BTreeMap<Round, (u64, RoundEntryReason, Signature)>,
+    block_shards: DefaultBTreeMap<Round, BTreeMap<usize, (Payload, Signature)>>,
     leader_proposal: BTreeMap<Round, BlockHash>,
     blocks: BTreeMap<BlockHash, Block>,
     available_prefix_cache: SubBlockId,
@@ -375,6 +393,8 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
             qcs_without_blocks: Default::default(),
             satisfied_qcs: Default::default(),
             qcs_to_commit: Default::default(),
+            block_header: Default::default(),
+            block_shards: Default::default(),
             leader_proposal: Default::default(),
             blocks: Default::default(),
             available_prefix_cache: (0, 0).into(),
@@ -984,6 +1004,84 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
 
         agg_missing_authors
     }
+
+    async fn check_if_block_is_complete(&mut self, round: Round, ctx: &mut impl ContextFor<Self>) {
+        if self.block_header.contains_key(&round)
+            && self.block_shards[round].len() == self.config.n_builders
+        {
+            let (ts, reason, header_sig) = self.block_header.remove(&round).unwrap();
+
+            let (payloads, mut sigs): (Vec<_>, Vec<_>) =
+                self.block_shards[round].values().cloned().unzip();
+            sigs.push(header_sig);
+
+            let signature = self.sig_verifier.aggregate_signatures(sigs).unwrap();
+
+            let block_data = BlockData {
+                timestamp_usecs: ts,
+                payload: Payload::sharded(round, self.config.leader(round), payloads),
+                reason,
+            };
+
+            let block = Block::new(block_data, signature);
+            self.handle_propose(block, ctx).await;
+        }
+    }
+
+    async fn handle_propose(&mut self, block: Block, ctx: &mut impl ContextFor<Self>) {
+        let leader = self.config.leader(block.round());
+
+        if !self.leader_proposal.contains_key(&block.round()) {
+            self.log_detail(format!(
+                "Reconstructing block {} with leader {} with {} ACs and {} optimistically proposed batches",
+                block.round(),
+                leader,
+                block.poas().len(),
+                block.sub_blocks().map(|b| b.len()).sum::<usize>(),
+            ));
+
+            self.leader_proposal
+                .insert(block.round(), block.digest.clone());
+            self.on_new_block(&block, ctx, false).await;
+
+            let round = block.round();
+            let BlockData {
+                payload, reason, ..
+            } = block.data;
+            self.advance_r_ready(round, reason, ctx).await;
+
+            ctx.notify(self.dissemination.module_id(), ProposalReceived {
+                leader,
+                round,
+                payload,
+            })
+            .await;
+
+            if round < self.r_cur {
+                self.log_detail(format!(
+                    "Ignoring proposal of block {} by node {} because already in round {}",
+                    round, leader, self.r_cur,
+                ));
+            } else if round <= self.r_timeout {
+                self.log_detail(format!(
+                    "Ignoring proposal of block {} by node {} because already timed out round {}",
+                    round, leader, self.r_timeout,
+                ));
+            } else {
+                self.log_detail(format!(
+                    "Processing proposal of block {} by node {}",
+                    round, leader,
+                ));
+
+                if self.config.enable_partial_qc_votes {
+                    ctx.set_timer(
+                        self.config.extra_wait_before_qc_vote,
+                        TimerEvent::QcVote(round),
+                    );
+                }
+            }
+        }
+    }
 }
 
 pub fn duration_since_epoch() -> Duration {
@@ -1024,154 +1122,97 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
             self.r_cur = round;
 
             let leader =  self.config.leader(round);
-            let supporters = self.config.supporters(round);
+            let builders = self.config.builders(round);
             self.log_detail(format!(
-                "Entering round {} by {:?} with leader {} and supporters {:?}",
+                "Entering round {} by {:?} with leader {} and builders {:?}",
                 round,
                 self.entry_reason,
                 leader,
-                supporters
+                builders
             ));
             ROUND_ENTER_REASON.with_label_values(&[&format!("{}", self.entry_reason)]).inc();
+
+            if let Some(shard_idx) = builders.iter().position(|&x| x == self.node_id) {
+                let payload = self
+                    .dissemination
+                    .prepare_block(
+                        self.r_cur,
+                        // The deduplication here is best-effort.
+                        self.uncommitted_batches(self.entry_reason.qc()),
+                        self.entry_reason.qc().missing_authors().clone(),
+                    )
+                    .await;
+
+                let signature = self.signer.sign(&BlockShardSignatureData {
+                    round,
+                    payload: payload.clone(),
+                })
+                .unwrap();
+
+                ctx.multicast(Message::BlockShard(
+                    round,
+                    shard_idx,
+                    payload,
+                    signature,
+                ))
+                .await;
+            }
 
             if self.node_id == leader {
                 // Upon entering round r, the leader of round r creates and multicasts a block.
                 let reason = self.entry_reason.clone();
-
-                let payload = self
-                    .dissemination
-                    .prepare_block(
-                        self.r_cur,
-                        self.uncommitted_batches(reason.qc()),
-                        reason.qc().missing_authors().clone(),
-                    )
-                    .await;
-
                 let timestamp_usecs = duration_since_epoch().as_micros() as u64;
-                let block_data = BlockData {
-                    timestamp_usecs,
-                    payload,
-                    reason,
-                    false,
-                };
-
-                let digest = block_data.hash();
-                let signature = self.signer.sign(&BlockSignatureData { digest }).unwrap();
-
-                let block = Block::new(block_data, signature);
-
-                self.log_detail(format!(
-                    "Proposing block {} with {} ACs and {} sub-blocks",
+                let signature = self.signer.sign(&BlockHeaderSignatureData {
                     round,
-                    block.poas().len(),
-                    N_SUB_BLOCKS,
-                ));
-
-                observe_block(block.data.timestamp_usecs, "Propose");
-
-                self.block_create_time.insert(round, Instant::now());
-                ctx.multicast(Message::Propose(block)).await;
-            }
-
-            if supporters.contains(&self.node_id) {
-                assert_ne!(self.node_id, leader);
-
-                // Upon entering round r, the leader of round r creates and multicasts a block.
-                let reason = self.entry_reason.clone();
-
-                let payload = self
-                    .dissemination
-                    .prepare_block(
-                        self.r_cur,
-                        self.uncommitted_batches(reason.qc()),
-                        reason.qc().missing_authors().clone(),
-                    )
-                    .await;
-
-                let timestamp_usecs = duration_since_epoch().as_micros() as u64;
-                let block_data = BlockData {
                     timestamp_usecs,
-                    payload,
-                    reason,
-                    true,
-                };
+                    reason: reason.clone(),
+                })
+                .unwrap();
 
-                let digest = block_data.hash();
-                let signature = self.signer.sign(&BlockSignatureData { digest }).unwrap();
-
-                let block = Block::new(block_data, signature);
-
-                self.log_detail(format!(
-                    "Proposing block {} with {} ACs and {} sub-blocks",
+                ctx.multicast(Message::BlockHeader(
                     round,
-                    block.poas().len(),
-                    N_SUB_BLOCKS,
-                ));
+                    timestamp_usecs,
+                    reason.clone(),
+                    signature,
+                ))
+                .await;
 
-                observe_block(block.data.timestamp_usecs, "Propose");
-
+                observe_block(timestamp_usecs, "Propose");
                 self.block_create_time.insert(round, Instant::now());
-                ctx.multicast(Message::Propose(block)).await;
+                // ctx.multicast(Message::Propose(block)).await;
             }
 
             // Upon entering round r, the node starts a timer for leader timeout.
             ctx.set_timer(self.config.leader_timeout, TimerEvent::Timeout(round));
         };
 
-        // Upon receiving a valid block B = [r, parent_qc, cc, tc, acs, batches] from L_r
-        // for the first time, if r >= r_cur and r > r_timeout, store the block,
-        // execute on_new_qc and advance_round, start a timer for qc-vote,
-        // and report missing batches to the leader.
-        upon receive [Message::Propose(block)] from [leader] {
-            // part of the message verification.
-            assert_eq!(self.config.leader(block.round()), leader);
-
-            if !self.leader_proposal.contains_key(&block.round()) {
+        upon receive [Message::BlockHeader(round, ts, reason, sig)] from [leader] {
+            if !self.block_header.contains_key(&round) {
                 self.log_detail(format!(
-                    "Received block {} proposed by node {} with {} ACs and {} optimistically proposed batches",
-                    block.round(),
+                    "Received block header {} proposed by node {} with reason {:?}",
+                    round,
                     leader,
-                    block.poas().len(),
-                    block.sub_blocks().map(|b| b.len()).sum::<usize>(),
+                    reason
                 ));
 
-                self.leader_proposal.insert(block.round(), block.digest.clone());
-                self.on_new_block(&block, ctx, false).await;
+                self.block_header.insert(round, (ts, reason, sig));
+                self.check_if_block_is_complete(round, ctx).await;
+            }
+        };
 
-                let round = block.round();
-                let BlockData { payload, reason, .. } = block.data;
-                self.advance_r_ready(round, reason, ctx).await;
+        upon receive [Message::BlockShard(round, shard_idx, payload, sig)] from [builder] {
+            if !self.block_shards[round].contains_key(&shard_idx) {
+                self.log_detail(format!(
+                    "Received shard {} for block {} from node {} with {} PoAs and {} batches",
+                    shard_idx,
+                    round,
+                    builder,
+                    payload.poas().len(),
+                    payload.sub_blocks().map(|b| b.len()).sum::<usize>(),
+                ));
 
-                ctx.notify(
-                    self.dissemination.module_id(),
-                    ProposalReceived { leader, round, payload },
-                ).await;
-
-                if round < self.r_cur {
-                    self.log_detail(format!(
-                        "Ignoring proposal of block {} by node {} because already in round {}",
-                        round,
-                        leader,
-                        self.r_cur,
-                    ));
-                } else if round <= self.r_timeout {
-                    self.log_detail(format!(
-                        "Ignoring proposal of block {} by node {} because already timed out round {}",
-                        round,
-                        leader,
-                        self.r_timeout,
-                    ));
-                } else {
-                    self.log_detail(format!(
-                        "Processing proposal of block {} by node {}",
-                        round,
-                        leader,
-                    ));
-
-                    if self.config.enable_partial_qc_votes {
-                        ctx.set_timer(self.config.extra_wait_before_qc_vote, TimerEvent::QcVote(round));
-                    }
-                }
+                self.block_shards[round].insert(shard_idx, (payload, sig));
+                self.check_if_block_is_complete(round, ctx).await;
             }
         };
 

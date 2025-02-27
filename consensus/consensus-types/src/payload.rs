@@ -451,6 +451,38 @@ impl RaikouPayload {
         }
     }
 
+    pub fn combine<'a>(shards: impl IntoIterator<Item = &'a RaikouPayload>) -> Self {
+        let mut sub_blocks = vec![vec![]; N_SUB_BLOCKS];
+        let mut proofs = vec![];
+
+        for shard in shards {
+            proofs.extend(shard.proofs().batch_summary.iter().cloned());
+
+            for (i, sub_block) in shard.sub_blocks().iter().enumerate() {
+                sub_blocks[i].extend(sub_block.clone());
+            }
+        }
+
+        proofs.sort_by_key(|proof| proof.info().digest);
+        proofs.dedup_by_key(|proof| proof.info().digest);
+
+        let mut sub_blocks_res = SubBlocks::default();
+        for (i, sub_block) in sub_blocks.iter_mut().enumerate() {
+            sub_block.sort_by_key(|info| info.digest);
+            sub_block.dedup_by_key(|info| info.digest);
+            sub_blocks_res[i] = BatchPointer::new(sub_block.clone());
+        }
+
+        Self {
+            data: Arc::new(RaikouPayloadData::new(
+                sub_blocks_res,
+                ProofBatches::new(proofs),
+            )),
+            include_proofs: true,
+            sub_blocks: 0..N_SUB_BLOCKS,
+        }
+    }
+
     pub fn new_empty() -> Self {
         RaikouPayload {
             data: Arc::new(RaikouPayloadData::new_empty()),

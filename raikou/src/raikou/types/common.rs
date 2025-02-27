@@ -66,6 +66,19 @@ pub struct BlockData {
 }
 
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
+pub struct BlockShardSignatureData {
+    pub round: Round,
+    pub payload: Payload,
+}
+
+#[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
+pub struct BlockHeaderSignatureData {
+    pub round: Round,
+    pub timestamp_usecs: u64,
+    pub reason: RoundEntryReason,
+}
+
+#[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
 pub struct BlockSignatureData {
     pub digest: BlockHash,
 }
@@ -131,14 +144,15 @@ impl Block {
             .verify(self.round(), verifier)
             .context("Error verifying entry reason")?;
 
-        let sig_data = BlockSignatureData {
-            digest: self.digest.clone(),
-        };
-
-        verifier
-            .sig_verifier
-            .verify(self.author(), &sig_data, &self.signature)
-            .context("Error verifying author signature")?;
+        // TODO: verify the aggregate signature
+        // let sig_data = BlockSignatureData {
+        //     digest: self.digest.clone(),
+        // };
+        //
+        // verifier
+        //     .sig_verifier
+        //     .verify(self.author(), &sig_data, &self.signature)
+        //     .context("Error verifying author signature")?;
 
         Ok(())
     }

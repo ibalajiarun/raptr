@@ -654,6 +654,7 @@ async fn test_raikou(
     let config = raikou::Config {
         n_nodes,
         f,
+        n_builders: 4,
         storage_requirement: f + 1, // f + (f / 2 + 1),
         leader_timeout: Duration::from_secs_f64(delta * 4.5),
         delta: Duration::from_secs_f64(delta),
@@ -792,7 +793,7 @@ async fn test_raikou(
                     delta: Duration::from_secs_f64(delta),
                     batch_interval: Duration::from_secs_f64(batch_interval_secs),
                     enable_optimistic_dissemination,
-                    enable_penalty_tracker: true,
+                    enable_penalty_tracker: false,
                     penalty_tracker_report_delay: Duration::from_secs_f64(delta * 5.),
                     batch_fetch_multiplicity: std::cmp::min(2, n_nodes),
                     batch_fetch_interval: Duration::from_secs_f64(delta) * 2,

@@ -90,7 +90,7 @@ impl PoA {
     }
 }
 
-#[derive(Clone, Hash, Serialize, Deserialize)]
+#[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
 pub struct Payload {
     round: Round,
     author: NodeId,
@@ -128,6 +128,27 @@ impl Payload {
             include_poas: true,
             sub_blocks: 0..N_SUB_BLOCKS,
         }
+    }
+
+    pub fn sharded(round: Round, author: NodeId, shards: Vec<Payload>) -> Self {
+        let mut poas = vec![];
+        let mut sub_blocks: [Vec<_>; N_SUB_BLOCKS] = Default::default();
+
+        for shard in shards {
+            poas.extend(shard.poas().iter().cloned());
+            for (i, sub_block) in shard.sub_blocks().enumerate() {
+                sub_blocks[i].extend(sub_block.iter().cloned());
+            }
+        }
+
+        poas.sort_by_key(|poa| poa.info.digest);
+        poas.dedup_by_key(|poa| poa.info.digest);
+        sub_blocks.iter_mut().for_each(|sub_block| {
+            sub_block.sort_by_key(|info| info.digest);
+            sub_block.dedup_by_key(|info| info.digest);
+        });
+
+        Self::new(round, author, poas, sub_blocks)
     }
 
     pub fn with_prefix(&self, prefix: Prefix) -> Self {

@@ -6,6 +6,14 @@ use crate::NetworkLoadTest;
 use anyhow::anyhow;
 use aptos_forge::{NetworkContextSynchronizer, NetworkTest, NodeExt, Result, Test};
 use aptos_logger::{debug, info};
+use aptos_rest_client::aptos_api_types::AccountSignature::Ed25519Signature;
+use aptos_sdk::{
+    crypto::{
+        ed25519::{Ed25519PrivateKey, Ed25519PublicKey},
+        SigningKey, Uniform,
+    },
+    transaction_builder::aptos_stdlib::aptos_coin_transfer,
+};
 use aptos_types::{
     chain_id::ChainId,
     transaction::{
@@ -132,6 +140,9 @@ async fn load_test() {
     tokio::spawn(async move {
         let mut seq_num = 0;
         let sender = PeerId::random();
+        let private_key = Ed25519PrivateKey::generate_for_testing();
+        let public_key: Ed25519PublicKey = (&private_key).into();
+        let sig = private_key.sign_arbitrary_message(&[]);
         loop {
             let txn = SignedTransaction::new_single_sender(
                 RawTransaction::new(
@@ -143,7 +154,7 @@ async fn load_test() {
                     Duration::from_secs(60).as_secs(),
                     ChainId::test(),
                 ),
-                AccountAuthenticator::NoAccountAuthenticator,
+                AccountAuthenticator::ed25519(public_key.clone(), sig.clone()),
             );
             txn_tx.send(txn).await.ok();
             seq_num = seq_num + 1;

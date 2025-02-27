@@ -137,7 +137,7 @@ async fn load_test() {
                 RawTransaction::new(
                     sender,
                     seq_num,
-                    TransactionPayload::Script(Script::new(Vec::new(), Vec::new(), Vec::new())),
+                    aptos_coin_transfer(sender, 100),
                     0,
                     0,
                     Duration::from_secs(60).as_secs(),

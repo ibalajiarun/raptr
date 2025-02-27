@@ -654,7 +654,7 @@ async fn test_raikou(
     let config = raikou::Config {
         n_nodes,
         f,
-        n_builders: 4,
+        n_builders: 8,
         storage_requirement: f + 1, // f + (f / 2 + 1),
         leader_timeout: Duration::from_secs_f64(delta * 4.5),
         delta: Duration::from_secs_f64(delta),

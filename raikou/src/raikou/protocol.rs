@@ -51,6 +51,7 @@ use std::{
     task::ready,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use rand::{Rng, SeedableRng};
 use tokio::time::Instant;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -217,6 +218,7 @@ pub struct Config {
     pub leader_timeout: Duration,
     pub delta: Duration,
     pub enable_commit_votes: bool,
+    pub n_supporters: usize,
 
     /// The time  waits after receiving a block before voting for a QC for it
     /// if it doesn't have all the batches yet.
@@ -238,6 +240,23 @@ pub struct Config {
 impl Config {
     pub fn leader(&self, round: Round) -> NodeId {
         round as usize % self.n_nodes
+    }
+
+    pub fn supporters(&self, round: Round) -> Vec<NodeId> {
+        // Hardcode a seed, then use pseudo-randomness to select self.n_supporters supporters.
+        // Make sure that they are unique and not the leader.
+        // Do this efficiently, in time O(n_supporters).
+        assert!(self.n_supporters + 1 <= self.n_nodes);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(round as u64);
+        let mut supporters = Vec::with_capacity(self.n_supporters);
+        for i in 0..self.n_supporters {
+            let mut id = rng.gen_range(0, self.n_nodes);
+            while id == self.leader(round) || supporters.contains(&id) {
+                id = rng.gen_range(0, self.n_nodes);
+            }
+            supporters.push(id);
+        }
+        supporters
     }
 
     pub fn quorum(&self) -> usize {
@@ -1005,7 +1024,14 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
             self.r_cur = round;
 
             let leader =  self.config.leader(round);
-            self.log_detail(format!("Entering round {} by {:?} and leader {}", round, self.entry_reason, leader));
+            let supporters = self.config.supporters(round);
+            self.log_detail(format!(
+                "Entering round {} by {:?} with leader {} and supporters {:?}",
+                round,
+                self.entry_reason,
+                leader,
+                supporters
+            ));
             ROUND_ENTER_REASON.with_label_values(&[&format!("{}", self.entry_reason)]).inc();
 
             if self.node_id == leader {
@@ -1026,6 +1052,48 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
                     timestamp_usecs,
                     payload,
                     reason,
+                    false,
+                };
+
+                let digest = block_data.hash();
+                let signature = self.signer.sign(&BlockSignatureData { digest }).unwrap();
+
+                let block = Block::new(block_data, signature);
+
+                self.log_detail(format!(
+                    "Proposing block {} with {} ACs and {} sub-blocks",
+                    round,
+                    block.poas().len(),
+                    N_SUB_BLOCKS,
+                ));
+
+                observe_block(block.data.timestamp_usecs, "Propose");
+
+                self.block_create_time.insert(round, Instant::now());
+                ctx.multicast(Message::Propose(block)).await;
+            }
+
+            if supporters.contains(&self.node_id) {
+                assert_ne!(self.node_id, leader);
+
+                // Upon entering round r, the leader of round r creates and multicasts a block.
+                let reason = self.entry_reason.clone();
+
+                let payload = self
+                    .dissemination
+                    .prepare_block(
+                        self.r_cur,
+                        self.uncommitted_batches(reason.qc()),
+                        reason.qc().missing_authors().clone(),
+                    )
+                    .await;
+
+                let timestamp_usecs = duration_since_epoch().as_micros() as u64;
+                let block_data = BlockData {
+                    timestamp_usecs,
+                    payload,
+                    reason,
+                    true,
                 };
 
                 let digest = block_data.hash();

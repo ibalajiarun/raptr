@@ -30,7 +30,13 @@ pub trait TPayloadManager: Send + Sync {
 
     /// Prefetch the data for a payload. This is used to ensure that the data for a payload is
     /// available when block is executed.
-    fn prefetch_payload_data(&self, payload: &Payload, author: Author, timestamp: u64);
+    fn prefetch_payload_data(
+        &self,
+        payload: &Payload,
+        author: Author,
+        timestamp: u64,
+        block_voters: Option<BitVec>,
+    );
 
     /// Check if the transactions corresponding are available. This is specific to payload
     /// manager implementations. For optimistic quorum store, we only check if optimistic

@@ -551,6 +551,7 @@ impl RaikouManager {
                                 &payload.inner,
                                 block_author.unwrap(),
                                 0,
+                                None
                             )
                         );
                     });
@@ -561,12 +562,18 @@ impl RaikouManager {
                         .ok()
                         .unwrap();
                     let dissemination::NewQCWithPayload { payload, qc } = *event;
-                    // let block_author = index_to_address[&payload.author()];
-                    // TODO: add fetching here
-                    // monitor!(
-                    //     "raikouman_newqc_fetch",
-                    //     payload_manager.prefetch_payload_data(&payload.inner, block_author, 0)
-                    // )
+                    let block_author = index_to_address[&payload.author()];
+                    let block_voters: BitVec = qc.signer_ids().map(|id| id as u8).collect();
+                    // TODO: recheck fetching
+                    monitor!(
+                        "raikouman_newqc_fetch",
+                        payload_manager.prefetch_payload_data(
+                            &payload.inner,
+                            block_author,
+                            0,
+                            Some(block_voters)
+                        )
+                    )
                 } else if match_event_type::<dissemination::Kill>(&event) {
                     break;
                 } else {

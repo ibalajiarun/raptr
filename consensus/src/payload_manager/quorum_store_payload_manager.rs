@@ -174,7 +174,13 @@ impl TPayloadManager for QuorumStorePayloadManager {
         self.commit_notifier.notify(block_timestamp, batches);
     }
 
-    fn prefetch_payload_data(&self, payload: &Payload, author: Author, timestamp: u64) {
+    fn prefetch_payload_data(
+        &self,
+        payload: &Payload,
+        author: Author,
+        timestamp: u64,
+        block_voters: Option<BitVec>,
+    ) {
         // This is deprecated.
         // TODO(ibalajiarun): Remove this after migrating to OptQuorumStore type
         let request_txns_and_update_status =
@@ -228,6 +234,46 @@ impl TPayloadManager for QuorumStorePayloadManager {
             *fut_lock = Some(txn_fut);
         }
 
+        fn prefetch_helper_raikou<T: TDataInfo>(
+            data_pointer: &BatchPointer<T>,
+            batch_reader: Arc<dyn BatchReader>,
+            author: Option<Author>,
+            timestamp: u64,
+            ordered_authors: &[PeerId],
+            additional_authors: Option<BitVec>,
+        ) {
+            let mut fut_lock = data_pointer.data_fut.lock();
+            if fut_lock.is_some() {
+                return;
+            }
+            let batches_and_responders = data_pointer
+                .batch_summary
+                .iter()
+                .map(|data_info| {
+                    let mut signers = data_info.signers(ordered_authors);
+                    if let Some(author) = author {
+                        signers.push(author);
+                    }
+                    if let Some(additional_authors) = &additional_authors {
+                        for idx in additional_authors.iter_ones() {
+                            let signer = ordered_authors[idx];
+                            signers.push(signer);
+                        }
+                    }
+                    (data_info.info().clone(), signers)
+                })
+                .collect();
+            let fut = QuorumStorePayloadManager::request_transactions(
+                batches_and_responders,
+                timestamp,
+                batch_reader,
+            );
+            let txn_fut = QuorumStorePayloadManager::wait_transactions(fut)
+                .boxed()
+                .shared();
+            *fut_lock = Some(txn_fut);
+        }
+
         match payload {
             Payload::InQuorumStore(proof_with_status) => {
                 request_txns_and_update_status(proof_with_status, self.batch_reader.clone());
@@ -262,13 +308,13 @@ impl TPayloadManager for QuorumStorePayloadManager {
             },
             Payload::Raikou(raikou_payload) => {
                 for sub_block in raikou_payload.sub_blocks() {
-                    prefetch_helper(
+                    prefetch_helper_raikou(
                         sub_block,
                         self.batch_reader.clone(),
-                        // TODO(ibalajiarun): fix author
-                        None,
+                        Some(author),
                         timestamp,
                         &self.ordered_authors,
+                        block_voters.clone(),
                     );
                 }
                 prefetch_helper(

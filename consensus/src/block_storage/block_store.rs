@@ -375,6 +375,7 @@ impl BlockStore {
                 payload,
                 block.author().expect("Payload block must have author"),
                 block.timestamp_usecs(),
+                None,
             );
         }
 

@@ -530,6 +530,7 @@ impl DagStore {
             node.payload(),
             *node.author(),
             node.metadata().timestamp(),
+            None,
         );
 
         self.dag.write().add_validated_node(node)

@@ -1804,6 +1804,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
                             payload,
                             p.proposer(),
                             p.proposal().timestamp_usecs(),
+                            None,
                         );
                     }
                     pending_blocks.lock().insert_block(p.proposal().clone());

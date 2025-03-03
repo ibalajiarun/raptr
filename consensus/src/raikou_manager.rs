@@ -1074,24 +1074,27 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
                     Vec::new(),
                 );
 
-                // TODO(ibalaiarun) fix authors
-                let txns_result = monitor!(
-                    "raikouman_dl_nc_gt",
-                    payload_manager
-                        .get_transactions(&block, voters.clone())
-                        .await
-                );
-                match  txns_result {
-                    Ok((txns, _)) => {
-                        assert_eq!(txns.len(), num_txns);
-                        let txns = txns.into_par_iter().with_min_len(20).map(Transaction::UserTransaction).collect();
-                        state_sync_notifier
-                            .notify_new_commit(txns, Vec::new())
-                            .await
-                            .unwrap();
-                    },
-                    Err(_e) => unreachable!("Failed to get transactions for block {:?} even after waiting for the payload", block),
-                }
+                let payload_manager = payload_manager.clone();
+                let state_sync_notifier = state_sync_notifier.clone();
+                let voters = voters.clone();
+                tokio::spawn(async move {
+                    // TODO(ibalaiarun) fix authors
+                    let txns_result = monitor!(
+                        "raikouman_dl_nc_gt",
+                        payload_manager.get_transactions(&block, voters).await
+                    );
+                    match  txns_result {
+                        Ok((txns, _)) => {
+                            assert_eq!(txns.len(), num_txns);
+                            let txns = txns.into_par_iter().with_min_len(20).map(Transaction::UserTransaction).collect();
+                            state_sync_notifier
+                                .notify_new_commit(txns, Vec::new())
+                                .await
+                                .unwrap();
+                        },
+                        Err(_e) => unreachable!("Failed to get transactions for block {:?} even after waiting for the payload", block),
+                    }
+                });
             }
         });
     }

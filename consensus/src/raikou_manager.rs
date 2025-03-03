@@ -1027,6 +1027,7 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
         &self,
         payloads: Vec<raikou_types::Payload>,
         block_timestamp_usecs: u64,
+        voters: Option<BitVec>,
     ) {
         let payload_manager = self.payload_manager.clone();
         let state_sync_notifier = self.state_sync_notifier.clone();
@@ -1076,7 +1077,9 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
                 // TODO(ibalaiarun) fix authors
                 let txns_result = monitor!(
                     "raikouman_dl_nc_gt",
-                    payload_manager.get_transactions(&block, None).await
+                    payload_manager
+                        .get_transactions(&block, voters.clone())
+                        .await
                 );
                 match  txns_result {
                     Ok((txns, _)) => {

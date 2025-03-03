@@ -89,6 +89,7 @@ pub trait DisseminationLayer: Send + Sync + 'static {
         &self,
         payloads: Vec<Payload>,
         block_timestamp: u64,
+        voters: Option<BitVec>,
     ) -> impl Future<Output = ()> + Send;
 
     fn check_payload(&self, payload: &Payload) -> Result<(), BitVec> {

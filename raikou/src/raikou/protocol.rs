@@ -656,6 +656,7 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
         let ts = self.blocks[qc.block_digest()].data.timestamp_usecs;
         let is_first_commit = self.first_committed_block_timestamp.is_none();
 
+        let voters: BitVec = qc.signer_ids().map(|id| id as u8).collect();
         let payloads = self.commit_qc_impl(qc, commit_reason);
 
         if is_first_commit {
@@ -668,7 +669,9 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
             }
         }
 
-        self.dissemination.notify_commit(payloads, ts).await;
+        self.dissemination
+            .notify_commit(payloads, ts, Some(voters))
+            .await;
     }
 
     fn commit_qc_impl(&mut self, qc: QC, commit_reason: CommitReason) -> Vec<Payload> {

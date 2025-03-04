@@ -53,7 +53,10 @@ impl NetworkTest for PerformanceBenchmark {
     }
 }
 
-pub struct ConsensusOnlyBenchmark;
+pub struct ConsensusOnlyBenchmark {
+    pub test_time: Duration,
+    pub concurrency: usize,
+}
 
 impl Test for ConsensusOnlyBenchmark {
     fn name(&self) -> &'static str {
@@ -94,12 +97,12 @@ impl NetworkTest for ConsensusOnlyBenchmark {
         //     .hint(balter::Hint::Concurrency(20000))
         //     .await;
 
-        let concurrency = 81_000;
-        let test_time = Duration::from_secs(600);
+        let concurrency = self.concurrency;
+        let test_time = self.test_time;
         let mut futures = Vec::new();
         for i in 0..concurrency {
             if i % 100 == 0 {
-                tokio::time::sleep(Duration::from_millis(350)).await;
+                tokio::time::sleep(Duration::from_millis(300)).await;
             }
             futures.push(tokio::spawn(async move {
                 tokio::time::timeout(test_time, batch_load_test()).await

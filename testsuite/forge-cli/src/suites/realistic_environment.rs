@@ -310,7 +310,11 @@ pub(crate) fn realistic_env_max_load_test(
         }))
         .add_network_test(wrap_with_realistic_env(
             num_validators,
-            ConsensusOnlyBenchmark,
+            ConsensusOnlyBenchmark {
+                test_time: duration,
+                // Repurpose num_fullnodes to set concurrency
+                concurrency: num_fullnodes,
+            },
         ))
 }
 

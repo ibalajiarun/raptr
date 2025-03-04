@@ -24,12 +24,16 @@ use aptos_testcases::{
     three_region_simulation_test::ThreeRegionSameCloudSimulationTest,
     CompositeNetworkTest,
 };
-use std::{num::NonZeroUsize, sync::Arc};
+use std::{num::NonZeroUsize, sync::Arc, time::Duration};
 
 /// Attempts to match the test name to a multi-region test
-pub(crate) fn get_multi_region_test(test_name: &str) -> Option<ForgeConfig> {
+pub(crate) fn get_multi_region_test(
+    test_name: &str,
+    duration: Duration,
+    num_fullnodes: usize,
+) -> Option<ForgeConfig> {
     let test = match test_name {
-        "multiregion_benchmark_test" => multiregion_benchmark_test(),
+        "multiregion_benchmark_test" => multiregion_benchmark_test(duration, num_fullnodes),
         "three_region_simulation" => three_region_simulation(),
         "three_region_simulation_with_different_node_speed" => {
             three_region_simulation_with_different_node_speed()
@@ -42,10 +46,14 @@ pub(crate) fn get_multi_region_test(test_name: &str) -> Option<ForgeConfig> {
 /// This test runs a network test in a real multi-region setup. It configures
 /// genesis and node helm values to enable certain configurations needed to run in
 /// the multiregion forge cluster.
-pub(crate) fn multiregion_benchmark_test() -> ForgeConfig {
+pub(crate) fn multiregion_benchmark_test(duration: Duration, num_fullnodes: usize) -> ForgeConfig {
     ForgeConfig::default()
         .with_initial_validator_count(NonZeroUsize::new(10).unwrap())
-        .add_network_test(ConsensusOnlyBenchmark)
+        .add_network_test(ConsensusOnlyBenchmark {
+            test_time: duration,
+            // Repurpose num_fullnodes to set concurrency
+            concurrency: num_fullnodes,
+        })
         .with_validator_override_node_config_fn(Arc::new(|config, base| {
             base.validator_network2 = Some(NetworkConfig::default());
             base.validator_network3 = Some(NetworkConfig::default());

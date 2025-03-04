@@ -61,6 +61,7 @@ use raikou::{
     metrics::{self, display_metric_to},
     raikou::{
         dissemination::{self, DisseminationLayer},
+        duration_since_epoch,
         types::{self as raikou_types, Prefix, N_SUB_BLOCKS},
         RaikouNode,
     },
@@ -1046,6 +1047,12 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
                     .observe(payload.as_raikou_payload().num_txns() as f64);
                 for batch in payload.as_raikou_payload().get_all_batch_infos() {
                     if batch.author == self_peer {
+                        let batch_create_ts = Duration::from_micros(batch.expiration)
+                            .saturating_sub(Duration::from_secs(60));
+                        raikou::raikou::observe_block(
+                            batch_create_ts.as_micros() as u64,
+                            "BATCHCOMMIT",
+                        );
                         raikou::raikou::observe_block(block_timestamp_usecs, "ORIGINCOMMIT");
                     }
                 }

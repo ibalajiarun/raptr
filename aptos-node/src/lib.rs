@@ -1094,7 +1094,7 @@ pub fn consensus_only_setup_environment_and_start_node(
         _dkg_network_interfaces,
         _jwk_consensus_network_interfaces,
         _mempool_network_interfaces,
-        _peer_monitoring_service_network_interfaces,
+        peer_monitoring_service_network_interfaces,
         _storage_service_network_interfaces,
     ) = network::setup_networks_and_get_interfaces(
         &node_config,
@@ -1106,11 +1106,11 @@ pub fn consensus_only_setup_environment_and_start_node(
     );
 
     // Start the peer monitoring service
-    // let peer_monitoring_service_runtime = services::start_peer_monitoring_service(
-    //     &node_config,
-    //     peer_monitoring_service_network_interfaces,
-    //     db_rw.reader.clone(),
-    // );
+    let peer_monitoring_service_runtime = services::start_peer_monitoring_service(
+        &node_config,
+        peer_monitoring_service_network_interfaces,
+        db_rw.reader.clone(),
+    );
 
     // Start state sync and get the notification endpoints for mempool and consensus
     // let (aptos_data_client, state_sync_runtimes, mempool_listener, consensus_notifier) =
@@ -1265,7 +1265,7 @@ pub fn consensus_only_setup_environment_and_start_node(
         _jwk_consensus_runtime: None,
         _mempool_runtime: Some(mempool_runtime),
         _network_runtimes: network_runtimes,
-        _peer_monitoring_service_runtime: None,
+        _peer_monitoring_service_runtime: Some(peer_monitoring_service_runtime),
         _state_sync_runtimes: None,
         _telemetry_runtime: telemetry_runtime,
         _indexer_db_runtime: None,

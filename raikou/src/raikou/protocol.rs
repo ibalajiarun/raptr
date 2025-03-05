@@ -568,6 +568,7 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
             let block_digest = self.leader_proposal[&round].clone();
 
             // Metrics and logs.
+            QC_VOTING_PREFIX_HISTOGRAM.observe(prefix as f64);
             self.log_detail(format!(
                 "QC-voting for block {} proposed by node {} with prefix {}/{} (reason: {:?})",
                 round,
@@ -579,7 +580,12 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
 
             let block_timestamp = self.blocks[&block_digest].data.timestamp_usecs;
             match reason {
-                QcVoteReason::FullBlock => observe_block(block_timestamp, "FullBlockQCVote"),
+                QcVoteReason::FullBlock => {
+                    if self.last_qc_vote.round == round {
+                        PREFIX_VOTED_PREVIOUSLY_COUNTER.inc();
+                    }
+                    observe_block(block_timestamp, "FullBlockQCVote");
+                },
                 QcVoteReason::Timer => observe_block(block_timestamp, "TimerQCVote"),
             }
 

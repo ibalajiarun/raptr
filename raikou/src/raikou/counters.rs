@@ -58,10 +58,25 @@ pub static QC_VOTING_PREFIX_HISTOGRAM: Lazy<Histogram> = Lazy::new(|| {
     .unwrap()
 });
 
+pub static QC_PREFIX_HISTOGRAM: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!("raikou_qc_prefix", "Raikou QC Prefix", vec![
+        0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0
+    ])
+    .unwrap()
+});
+
 pub static PREFIX_VOTED_PREVIOUSLY_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
     register_int_counter!(
         "raikou_prefix_voted_previously_count",
         "Raikou Voting Prefix Previous Count",
+    )
+    .unwrap()
+});
+
+pub static QC_TIMER_VOTE_FULLBLOCK_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
+    register_int_counter!(
+        "raikou_qc_timer_vote_fullblock_count",
+        "Raikou QC Timer Vote Full Block Count",
     )
     .unwrap()
 });

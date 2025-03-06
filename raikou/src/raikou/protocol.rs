@@ -12,7 +12,8 @@ use crate::{
     monitor, protocol,
     raikou::{
         counters::{
-            BLOCK_TRACING, PREFIX_VOTED_PREVIOUSLY_COUNTER, QC_VOTING_PREFIX_HISTOGRAM,
+            BLOCK_TRACING, PREFIX_VOTED_PREVIOUSLY_COUNTER, QC_PREFIX_HISTOGRAM,
+            QC_TIMER_VOTE_FULLBLOCK_COUNTER, QC_VOTING_PREFIX_HISTOGRAM,
             RAIKOU_BATCH_CONSENSUS_LATENCY, RAIKOU_BLOCK_COMMIT_RATE,
             RAIKOU_BLOCK_CONSENSUS_LATENCY, ROUND_ENTER_REASON,
         },
@@ -586,7 +587,12 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
                     }
                     observe_block(block_timestamp, "FullBlockQCVote");
                 },
-                QcVoteReason::Timer => observe_block(block_timestamp, "TimerQCVote"),
+                QcVoteReason::Timer => {
+                    if prefix == N_SUB_BLOCKS {
+                        QC_TIMER_VOTE_FULLBLOCK_COUNTER.inc();
+                    }
+                    observe_block(block_timestamp, "TimerQCVote")
+                },
             }
 
             // Sign and multicast the vote.
@@ -1182,6 +1188,7 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
                         self.config.storage_requirement,
                     );
 
+                    QC_PREFIX_HISTOGRAM.observe(prefix as f64);
                     self.log_detail(format!(
                         "Forming a QC for block {} with prefix {}/{}",
                         round,

@@ -198,6 +198,9 @@ async fn batch_load_test() {
     tokio::spawn(async move {
         let mut seq_num = 0;
         let sender = PeerId::random();
+        let private_key = Ed25519PrivateKey::generate_for_testing();
+        let public_key: Ed25519PublicKey = (&private_key).into();
+        let sig = private_key.sign_arbitrary_message(&[]);
         loop {
             let mut batch = Vec::new();
             for i in 0..batch_size {
@@ -205,13 +208,13 @@ async fn batch_load_test() {
                     RawTransaction::new(
                         sender,
                         seq_num,
-                        TransactionPayload::Script(Script::new(Vec::new(), Vec::new(), Vec::new())),
+                        aptos_coin_transfer(sender, 100),
                         0,
                         0,
                         Duration::from_secs(60).as_secs(),
                         ChainId::test(),
                     ),
-                    AccountAuthenticator::NoAccountAuthenticator,
+                    AccountAuthenticator::ed25519(public_key.clone(), sig.clone()),
                 );
                 batch.push(txn);
                 seq_num = seq_num + 1;

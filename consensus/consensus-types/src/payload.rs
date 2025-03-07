@@ -404,16 +404,16 @@ impl CompressedPrefixSet {
         self.iter().map(|(_, prefix)| prefix)
     }
 
-    /// Returns the k-th maximum prefix and its associated node ID, where k is 1-indexed.
+    /// Returns the k-th maximum prefix, where k is 1-indexed.
     /// For example, k=1 returns the maximum prefix, k=2 returns the second maximum, etc.
     /// Panics if k=0 is supplied.
-    pub fn kth_max(&self, k: usize) -> Option<(usize, Prefix)> {
+    pub fn kth_max_prefix(&self, k: usize) -> Option<Prefix> {
         assert!(k > 0, "k must be greater than 0");
 
-        let mut pairs: Vec<_> = self.iter().collect();
-        pairs.sort_by_key(|&(_, prefix)| std::cmp::Reverse(prefix));
+        let mut prefixes: Vec<_> = self.iter().map(|(_, prefix)| prefix).collect();
+        prefixes.sort_by_key(|&prefix| std::cmp::Reverse(prefix));
 
-        pairs.get(k - 1).copied()
+        prefixes.get(k - 1).copied()
     }
 
     pub fn unzip(&self) -> (Vec<usize>, Vec<Prefix>) {

@@ -5,7 +5,7 @@
 use crate::NetworkLoadTest;
 use anyhow::anyhow;
 use aptos_forge::{NetworkContextSynchronizer, NetworkTest, NodeExt, Result, Test};
-use aptos_logger::{debug, info};
+use aptos_logger::{debug, error, info, sample, sample::SampleRate};
 use aptos_rest_client::aptos_api_types::AccountSignature::Ed25519Signature;
 use aptos_sdk::{
     crypto::{
@@ -24,16 +24,17 @@ use aptos_types::{
 };
 use async_trait::async_trait;
 use balter::{prelude::ConfigurableScenario, scenario, transaction};
-use futures::stream::FuturesUnordered;
+use futures::{stream::FuturesUnordered, StreamExt};
 use rand::{thread_rng, RngCore};
 use reqwest::{StatusCode, Url};
 use std::{
     cell::OnceCell,
+    ops::Add,
     sync::{
         atomic::{AtomicU64, Ordering},
         OnceLock,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 pub struct PerformanceBenchmark;
@@ -72,7 +73,7 @@ impl NetworkTest for ConsensusOnlyBenchmark {
         let ctx = ctx.ctx.lock().await;
 
         // Get all URLs
-        let clients = ctx
+        let clients: Vec<_> = ctx
             .swarm
             .read()
             .await
@@ -81,14 +82,14 @@ impl NetworkTest for ConsensusOnlyBenchmark {
             .collect();
 
         // Create Balter
-        BALTER_CONTEXT
-            .set(BalterContext {
-                clients,
-                idx: AtomicU64::new(0),
-                batch_size: MAX_BATCH_SIZE,
-            })
-            .map_err(|_| anyhow!("couldn't set context"))
-            .unwrap();
+        // BALTER_CONTEXT
+        //     .set(BalterContext {
+        //         clients,
+        //         idx: AtomicU64::new(0),
+        //         batch_size: MAX_BATCH_SIZE,
+        //     })
+        //     .map_err(|_| anyhow!("couldn't set context"))
+        //     .unwrap();
 
         // let result = batch_load_test()
         //     .tps(10000)
@@ -97,15 +98,38 @@ impl NetworkTest for ConsensusOnlyBenchmark {
         //     .hint(balter::Hint::Concurrency(20000))
         //     .await;
 
-        let concurrency = self.concurrency;
-        let test_time = self.test_time;
+        // let concurrency = self.concurrency;
+        // let test_time = self.test_time;
+        // let mut futures = Vec::new();
+        // for i in 0..concurrency {
+        //     if i % 100 == 0 {
+        //         tokio::time::sleep(Duration::from_millis(300)).await;
+        //     }
+        //     if i == 10000 {
+        //         tokio::time::sleep(Duration::from_secs(30)).await;
+        //     }
+        //     futures.push(tokio::spawn(async move {
+        //         tokio::time::timeout(test_time, batch_load_test()).await
+        //     }));
+        // }
+        // let _result = futures::future::join_all(futures).await;
+
         let mut futures = Vec::new();
-        for i in 0..concurrency {
-            if i % 100 == 0 {
-                tokio::time::sleep(Duration::from_millis(300)).await;
-            }
+        let tps_per_client = (self.concurrency / clients.len()).max(1);
+        let test_time = self.test_time;
+        let global_wait_until = Instant::now().add(Duration::from_secs(5));
+        println!(
+            "num_clients {}, tps_per_client {}, test_time {:?}, global_wait_till {:?}",
+            clients.len(),
+            tps_per_client,
+            test_time,
+            global_wait_until
+        );
+        for (id, client) in clients.into_iter().enumerate() {
+            let id = id as u8;
+            let req_client = UniformPerValidatorRateClient::new(id, client, tps_per_client as u64);
             futures.push(tokio::spawn(async move {
-                tokio::time::timeout(test_time, batch_load_test()).await
+                tokio::time::timeout(test_time, req_client.run(global_wait_until)).await
             }));
         }
         let _result = futures::future::join_all(futures).await;
@@ -236,7 +260,7 @@ async fn batch_transaction(
     let res = client
         .post(client.build_path("submit_txn_batch").unwrap())
         .body(txn_payload)
-        .timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(5))
         .send()
         .await?;
 
@@ -245,4 +269,122 @@ async fn batch_transaction(
     }
 
     Ok(())
+}
+
+pub struct UniformPerValidatorRateClient {
+    client_id: u8,
+    client: aptos_rest_client::Client,
+    requests_per_second: u64,
+}
+
+impl UniformPerValidatorRateClient {
+    pub fn new(client_id: u8, client: aptos_rest_client::Client, requests_per_second: u64) -> Self {
+        Self {
+            client_id,
+            client,
+            requests_per_second,
+        }
+    }
+
+    pub async fn run(self, wait_until: Instant) -> Result<()> {
+        // Calculate the delay between requests in milliseconds
+        let delay_us = 1_000_000 / self.requests_per_second;
+        let total_slots = self.requests_per_second;
+        let mut handles = Vec::new();
+
+        println!("Uniform performance test");
+        println!("delay_us {}, total_slots {}", delay_us, total_slots);
+
+        // Create tasks for each "slot" in a second
+        for slot in 0..total_slots {
+            let client = self.client.clone();
+            let client_id = self.client_id;
+
+            let handle = tokio::spawn(async move {
+                let (txn_tx, mut txn_rx) = tokio::sync::mpsc::channel(100);
+                tokio::spawn(async move {
+                    let mut seq_num = 0;
+                    let sender = PeerId::random();
+                    let private_key = Ed25519PrivateKey::generate_for_testing();
+                    let public_key: Ed25519PublicKey = (&private_key).into();
+                    let sig = private_key.sign_arbitrary_message(&[]);
+                    loop {
+                        let mut batch = Vec::with_capacity(MAX_BATCH_SIZE);
+                        for i in 0..MAX_BATCH_SIZE {
+                            let txn = SignedTransaction::new_single_sender(
+                                RawTransaction::new(
+                                    sender,
+                                    seq_num,
+                                    aptos_coin_transfer(sender, 100),
+                                    0,
+                                    0,
+                                    Duration::from_secs(60).as_secs(),
+                                    ChainId::test(),
+                                ),
+                                AccountAuthenticator::ed25519(public_key.clone(), sig.clone()),
+                            );
+                            batch.push(txn);
+                            seq_num = seq_num + 1;
+                        }
+                        let txn_payload = bcs::to_bytes(&batch).unwrap();
+                        txn_tx.send(txn_payload).await.ok();
+                    }
+                });
+
+                let initial_delay = Duration::from_micros(slot * delay_us);
+                let wait_until = wait_until.add(initial_delay).into();
+                tokio::time::sleep_until(wait_until).await;
+
+                let mut interval = tokio::time::interval(Duration::from_secs(1));
+                let mut futures = FuturesUnordered::new();
+                loop {
+                    let start = Instant::now();
+
+                    tokio::select! {
+                         _ = interval.tick() => {
+                            let Some(txn_payload) = txn_rx.recv().await else {
+                                return;
+                            };
+                            let fut = batch_transaction(&client, txn_payload);
+                            futures.push(fut);
+                        },
+                        Some(result) = futures.next() => {
+                            match result {
+                                Ok(_) => {},
+                                Err(e) => {
+                                    sample!(
+                                        SampleRate::Duration(Duration::from_secs(1)),
+                                        error!("Slot {}: Request failed {}", slot, e)
+                                    );
+                                },
+                            }
+                        },
+                    }
+
+                    // Log if we're falling behind
+                    let elapsed = start.elapsed();
+                    if elapsed > Duration::from_millis(1001) {
+                        sample!(
+                            SampleRate::Duration(Duration::from_secs(1)),
+                            println!(
+                                "Warning: Client {} Slot {} is falling behind, took {}ms",
+                                client_id,
+                                slot,
+                                elapsed.as_millis()
+                            )
+                        );
+                    }
+                }
+            });
+
+            handles.push(handle);
+        }
+
+        // Wait for all tasks to complete (they won't unless there's an error)
+        for handle in handles {
+            handle.await?;
+        }
+
+        Ok(())
+    }
 }

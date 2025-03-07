@@ -188,10 +188,10 @@ impl RaikouManager {
             n_nodes,
             f,
             storage_requirement: f + 1, // f + (f / 2 + 1),
-            leader_timeout: Duration::from_secs_f64(delta * 4.5),
+            leader_timeout: Duration::from_secs_f64(delta * 5.0),
             delta: Duration::from_secs_f64(delta),
             end_of_run: Instant::now() + Duration::from_secs_f64(delta) * total_duration_in_delta,
-            extra_wait_before_qc_vote: Duration::from_secs_f64(delta * 0.15),
+            extra_wait_before_qc_vote: Duration::from_secs_f64(delta * 0.2),
             enable_partial_qc_votes: true,
             enable_commit_votes: true,
             status_interval: Duration::from_secs_f64(delta) * 10,
@@ -976,7 +976,7 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
         // }
         let optqs_params = Some(OptQSPayloadPullParams {
             exclude_authors: HashSet::new(),
-            minimum_batch_age_usecs: Duration::from_millis(30).as_micros() as u64,
+            minimum_batch_age_usecs: Duration::from_millis(50).as_micros() as u64,
         });
         let (_, payload) = self
             .payload_client

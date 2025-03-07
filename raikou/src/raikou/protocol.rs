@@ -1192,6 +1192,15 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
                         N_SUB_BLOCKS,
                     ));
 
+                    if full_prefix_votes.len() >= self.config.storage_requirement {
+                        assert!(
+                            qc.is_full(),
+                            "Invalid QC prefix: should be full, but {}/{}",
+                            qc.prefix(),
+                            N_SUB_BLOCKS
+                        );
+                    }
+
                     self.on_new_qc(qc, ctx).await;
                 }
             }

@@ -21,6 +21,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         lld \
         pkg-config
 
+RUN rustup install 1.78.0
+
 ### Build Rust code ###
 FROM rust-base as builder-base
 

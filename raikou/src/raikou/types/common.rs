@@ -232,12 +232,7 @@ impl QC {
     ) -> Self {
         // `prefix` is the maximum number such that at least `storage_requirement` nodes
         // have voted for a prefix of size `prefix` or larger.
-        let prefix = vote_prefixes
-            .prefixes()
-            .sorted()
-            .skip(storage_requirement - 1)
-            .next()
-            .unwrap();
+        let prefix = vote_prefixes.kth_max_prefix(storage_requirement).unwrap();
 
         QC {
             data: Arc::new(QcData {
@@ -334,10 +329,7 @@ impl QC {
 
         let prefix = self
             .vote_prefixes()
-            .prefixes()
-            .sorted()
-            .skip(verifier.config.storage_requirement - 1)
-            .next()
+            .kth_max_prefix(verifier.config.storage_requirement)
             .unwrap();
         ensure!(self.prefix() == prefix, "Invalid prefix in QC");
 

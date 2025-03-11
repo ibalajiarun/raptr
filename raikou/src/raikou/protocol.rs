@@ -568,14 +568,26 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
 
             let block_digest = self.leader_proposal[&round].clone();
 
+            if reason == QcVoteReason::Timer {
+                QC_VOTING_PREFIX_HISTOGRAM.observe(prefix as f64);
+            }
+
+            let prev_prefix = if self.last_qc_vote.round == round {
+                PREFIX_VOTED_PREVIOUSLY_COUNTER.inc();
+                Some(self.last_qc_vote.prefix)
+            } else {
+                None
+            };
+
             // Metrics and logs.
             QC_VOTING_PREFIX_HISTOGRAM.observe(prefix as f64);
             self.log_detail(format!(
-                "QC-voting for block {} proposed by node {} with prefix {}/{} (reason: {:?})",
+                "QC-voting for block {} proposed by node {} with prefix {}/{}, prev prefix {:?} (reason: {:?})",
                 round,
                 self.config.leader(round),
                 prefix,
                 N_SUB_BLOCKS,
+                prev_prefix,
                 reason,
             ));
 
@@ -1196,6 +1208,15 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
                         N_SUB_BLOCKS,
                     ));
 
+                    if full_prefix_votes.len() >= self.config.storage_requirement {
+                        assert!(
+                            qc.is_full(),
+                            "Invalid QC prefix: should be full, but {}/{}",
+                            qc.prefix(),
+                            N_SUB_BLOCKS
+                        );
+                    }
+
                     self.on_new_qc(qc, ctx).await;
                 }
             }
@@ -1491,7 +1512,7 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
                 self.qcs_to_commit.first_key_value().map(|(k, _)| k),
                 self.qcs_to_commit.last_key_value().map(|(k, _)| k),
                 self.satisfied_qcs.last(),
-                self.qc_votes[self.r_cur].len(),
+                self.qc_votes[self.r_cur].values().map(|v| v.len()).collect_vec(),
                 self.cc_votes[self.r_cur].len(),
                 self.tc_votes[self.r_cur].len(),
             ));

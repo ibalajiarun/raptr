@@ -24,7 +24,7 @@ use futures::{
         oneshot,
     },
     future::Pending,
-    select, StreamExt,
+    select, SinkExt, StreamExt,
 };
 use itertools::zip_eq;
 use once_cell::sync::Lazy;
@@ -112,9 +112,97 @@ pub static RAIKOU_MEMPOOL_SIZE_HISTOGRAM: Lazy<Histogram> = Lazy::new(|| {
     register_histogram!("raikou_mempool_size_histogram", "raikou mempool size").unwrap()
 });
 
+pub struct BatchGenerator {
+    // Track both mempool sizes and how much we pulled
+    recent_states: VecDeque<(usize, usize)>, // (mempool_size, last_pull_size)
+    window_size: usize,
+    expected_batch_count: usize,
+}
+
+impl BatchGenerator {
+    pub fn new() -> Self {
+        let expected_batch_count = 5;
+        let window_size = 5;
+
+        Self {
+            recent_states: VecDeque::with_capacity(window_size),
+            window_size,
+            expected_batch_count,
+        }
+    }
+
+    pub fn calculate_next_batch_size(
+        &mut self,
+        max_batch_size: usize,
+        current_mempool_size: usize,
+    ) -> usize {
+        // Handle empty mempool case
+        if current_mempool_size == 0 {
+            self.recent_states.push_back((0, 0));
+            if self.recent_states.len() > self.window_size {
+                self.recent_states.pop_front();
+            }
+            return 0;
+        }
+
+        if self.recent_states.is_empty() {
+            // Simple division for first pull
+            let batch_size = current_mempool_size / self.expected_batch_count;
+            let batch_size = batch_size.max(1); // Ensure at least 1 transaction
+            self.recent_states
+                .push_back((current_mempool_size, batch_size));
+            return batch_size;
+        }
+
+        // Case 3: Normal operation with history
+        // Calculate net transaction flow for each interval
+        let mut net_flow = 0i64;
+        let mut prev_size = current_mempool_size;
+
+        // Iterate through history in reverse (newest to oldest)
+        for &(size, pulled) in self.recent_states.iter().rev() {
+            // Calculate change in this interval:
+            // current_size = prev_size + new_txns - pulled
+            // therefore: new_txns = current_size - prev_size + pulled
+            let interval_change = (prev_size as i64)
+                .saturating_sub(size as i64)
+                .saturating_add(pulled as i64);
+
+            net_flow = net_flow + interval_change;
+            prev_size = size;
+        }
+
+        // Calculate average flow per interval
+        let intervals = self.recent_states.len() as f64;
+        let avg_flow = (net_flow as f64 / intervals).max(0.0);
+
+        // Scale based on how full our history window is
+        let scaling_factor = intervals / self.window_size as f64;
+        let expected_incoming_txns = (avg_flow * scaling_factor).round() as usize;
+
+        // Calculate final batch size safely
+        let total_to_process = current_mempool_size + expected_incoming_txns;
+
+        let batch_size = total_to_process
+            .checked_div(self.expected_batch_count)
+            .unwrap_or(1);
+        let batch_size = batch_size.clamp(100.min(current_mempool_size), max_batch_size);
+
+        // Update our history
+        self.recent_states
+            .push_back((current_mempool_size, batch_size));
+        if self.recent_states.len() > self.window_size {
+            self.recent_states.pop_front();
+        }
+
+        batch_size
+    }
+}
+
 pub struct SimpleMempool {
-    pub transaction_store: Arc<Mutex<TransactionStore>>,
+    pub transaction_store: TransactionStore,
     pub pending_tracker: PendingTracker,
+    pub generator: BatchGenerator,
 }
 
 impl SimpleMempool {
@@ -122,10 +210,14 @@ impl SimpleMempool {
         let QuorumStoreRequest::GetBatchRequest(max_txns, max_bytes, _, _, sender) = req else {
             unreachable!();
         };
-        let mut store = self.transaction_store.lock();
+        let mut store = &mut self.transaction_store;
 
         info!("pulling: store len: {}", store.len());
 
+        // let to_pull = self
+        //     .generator
+        //     .calculate_next_batch_size(max_txns as usize, store.len());
+        // let to_pull = to_pull.min(store.len());
         let to_pull = min(store.len(), max_txns as usize);
         let pulled = store.drain(..to_pull);
         let mut pulled_txns = Vec::with_capacity(to_pull);
@@ -150,7 +242,6 @@ impl SimpleMempool {
         RAIKOU_MEMPOOL_SIZE.set(store.len() as f64);
         RAIKOU_MEMPOOL_SIZE_HISTOGRAM.observe(store.len() as f64);
 
-        drop(store);
         sender
             .send(Ok(QuorumStoreResponse::GetBatchResponse(pulled_txns)))
             .unwrap();
@@ -172,15 +263,24 @@ impl SimpleMempool {
             .unwrap();
     }
 
+    fn handle_txn_request(&mut self, req: (SignedTransaction, oneshot::Sender<()>, Instant)) {
+        self.transaction_store.push_back(req);
+    }
+
     async fn run(
         mut self,
         mut consensus_rx: Receiver<QuorumStoreRequest>,
         mut commit_notif_rx: ConsensusNotificationListener,
+        mut api_rx: Receiver<(SignedTransaction, oneshot::Sender<()>, Instant)>,
     ) {
         loop {
             tokio::select! {
+                biased;
                 Some(req) = consensus_rx.next() => {
                     self.handle_quorum_store_request(req);
+                },
+                Some(req) = api_rx.next() => {
+                    self.handle_txn_request(req);
                 },
                 Some(cmd) = commit_notif_rx.next() => {
                     self.handle_notification_command(cmd, &mut commit_notif_rx);
@@ -202,23 +302,33 @@ pub fn create_mempool_runtime(
 
     let runtime = aptos_runtimes::spawn_named_runtime("mempool".into(), None);
 
-    let store = Arc::new(Mutex::new(TransactionStore::with_capacity(100_000)));
+    let store = TransactionStore::with_capacity(200_000);
     let mempool = SimpleMempool {
-        transaction_store: store.clone(),
+        transaction_store: store,
         pending_tracker: PendingTracker {
             tracker: HashMap::new(),
         },
+        generator: BatchGenerator::new(),
     };
 
-    runtime.spawn(mempool.run(consensus_to_mempool_receiver, consensus_listener));
-    runtime.spawn(start_mempool_api(health_check, store, config.api.address));
+    let (api_mempool_tx, api_mempool_rx) = futures::channel::mpsc::channel(5_000);
+    runtime.spawn(mempool.run(
+        consensus_to_mempool_receiver,
+        consensus_listener,
+        api_mempool_rx,
+    ));
+    runtime.spawn(start_mempool_api(
+        health_check,
+        api_mempool_tx,
+        config.api.address,
+    ));
 
     (runtime, consensus_to_mempool_sender, consensus_notifier)
 }
 
 #[derive(Clone)]
 pub struct SimpleMempoolApiContext {
-    store: Arc<Mutex<TransactionStore>>,
+    mempool_tx: Sender<(SignedTransaction, oneshot::Sender<()>, Instant)>,
     health_check: Arc<AtomicBool>,
 }
 
@@ -232,12 +342,12 @@ impl SimpleMempoolApiContext {
 
 async fn start_mempool_api(
     health_check: Arc<AtomicBool>,
-    store: Arc<Mutex<TransactionStore>>,
+    mempool_tx: Sender<(SignedTransaction, oneshot::Sender<()>, Instant)>,
     api_address: SocketAddr,
 ) {
     let context = SimpleMempoolApiContext {
         health_check,
-        store,
+        mempool_tx,
     };
     let ctx_filter = context.filter().clone();
 
@@ -277,7 +387,8 @@ pub async fn handle_txn(
     let txn: SignedTransaction = bcs::from_bytes(&request).unwrap();
     let (tx, rx) = oneshot::channel();
 
-    context.store.lock().push_back((txn, tx, Instant::now()));
+    let mut mempool_tx = context.mempool_tx.clone();
+    mempool_tx.send((txn, tx, Instant::now())).await.ok();
 
     if let Err(_) = rx.await {
         debug!("api: response channel dropped unexpectedly");
@@ -287,7 +398,7 @@ pub async fn handle_txn(
         ));
     }
 
-    debug!("api: txn successfully committed");
+    // debug!("api: txn successfully committed");
     Ok(reply::with_status(
         reply::reply(),
         warp::hyper::StatusCode::CREATED,
@@ -319,26 +430,24 @@ pub async fn handle_txn_batch(
 
     let now = Instant::now();
     let mut rxs = Vec::new();
-    {
-        let mut locked_store = context.store.lock();
-        for txn in txn_batch {
-            let (tx, rx) = oneshot::channel();
-            locked_store.push_back((txn, tx, now));
-            rxs.push(rx);
-        }
+    let mut mempool_tx = context.mempool_tx.clone();
+    for txn in txn_batch {
+        let (tx, rx) = oneshot::channel();
+        mempool_tx.send((txn, tx, Instant::now())).await.ok();
+        rxs.push(rx);
     }
 
-    for rx in rxs {
-        if let Err(_) = rx.await {
-            debug!("api: response channel dropped unexpectedly");
-            return Ok(reply::with_status(
-                reply::reply(),
-                warp::hyper::StatusCode::BAD_REQUEST,
-            ));
-        }
-    }
+    // for rx in rxs {
+    //     if let Err(_) = rx.await {
+    //         debug!("api: response channel dropped unexpectedly");
+    //         return Ok(reply::with_status(
+    //             reply::reply(),
+    //             warp::hyper::StatusCode::BAD_REQUEST,
+    //         ));
+    //     }
+    // }
 
-    debug!("api: batch txn successfully committed");
+    // debug!("api: batch txn successfully committed");
     Ok(reply::with_status(
         reply::reply(),
         warp::hyper::StatusCode::CREATED,

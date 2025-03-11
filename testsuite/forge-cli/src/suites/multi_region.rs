@@ -14,6 +14,7 @@ use aptos_config::{
 };
 use aptos_forge::{
     success_criteria::SuccessCriteria, EmitJobMode, EmitJobRequest, ForgeConfig, NetworkTest,
+    NodeResourceOverride,
 };
 use aptos_testcases::{
     modifiers::{ExecutionDelayConfig, ExecutionDelayTest},
@@ -75,7 +76,17 @@ pub(crate) fn multiregion_benchmark_test(duration: Duration, num_fullnodes: usiz
             net3config.discovery_method = DiscoveryMethod::Onchain;
             net3config.network_id = NetworkId::Validator;
             config.validator_network3 = Some(net3config);
+
+            config.consensus.quorum_store.sender_max_batch_txns = 300;
+            config.consensus.quorum_store.sender_max_total_txns = 300;
+            config.consensus.quorum_store.memory_quota = 300_000_000;
+            config.consensus.quorum_store.db_quota = 400_000_000;
         }))
+        .with_validator_resource_override(NodeResourceOverride {
+            cpu_cores: Some(62),
+            memory_gib: Some(240),
+            storage_gib: Some(1000),
+        })
         .with_genesis_helm_config_fn(Arc::new(|helm_values| {
             // Have single epoch change in land blocking
             helm_values["chain"]["epoch_duration_secs"] = 3600.into();

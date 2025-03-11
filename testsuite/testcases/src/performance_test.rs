@@ -32,7 +32,7 @@ use std::{
     ops::Add,
     sync::{
         atomic::{AtomicU64, Ordering},
-        OnceLock,
+        Arc, OnceLock,
     },
     time::{Duration, Instant},
 };
@@ -117,7 +117,7 @@ impl NetworkTest for ConsensusOnlyBenchmark {
         let mut futures = Vec::new();
         let tps_per_client = (self.concurrency / clients.len()).max(1);
         let test_time = self.test_time;
-        let global_wait_until = Instant::now().add(Duration::from_secs(5));
+        let global_wait_until = Instant::now().add(Duration::from_secs(60));
         println!(
             "num_clients {}, tps_per_client {}, test_time {:?}, global_wait_till {:?}",
             clients.len(),
@@ -260,7 +260,7 @@ async fn batch_transaction(
     let res = client
         .post(client.build_path("submit_txn_batch").unwrap())
         .body(txn_payload)
-        .timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(30))
         .send()
         .await?;
 
@@ -291,14 +291,35 @@ impl UniformPerValidatorRateClient {
         let delay_us = 1_000_000 / self.requests_per_second;
         let total_slots = self.requests_per_second;
         let mut handles = Vec::new();
+        let slow_requests = Arc::new(AtomicU64::new(0));
 
-        println!("Uniform performance test");
+        println!("Uniform performance test: Client {}", self.client_id);
         println!("delay_us {}, total_slots {}", delay_us, total_slots);
+
+        let slow_reqs_clone = slow_requests.clone();
+        let id = self.client_id;
+        tokio::spawn(async move {
+            let mut timer = tokio::time::interval(Duration::from_secs(10));
+            loop {
+                _ = timer.tick().await;
+                println!(
+                    "Uniform performance test: Client {}, Slow Reqs: {}",
+                    id,
+                    slow_reqs_clone.load(Ordering::Relaxed)
+                );
+            }
+        });
+
+        // Client latency multiplier
+        let wait_until = wait_until + Duration::from_secs(1) * self.client_id as u32;
 
         // Create tasks for each "slot" in a second
         for slot in 0..total_slots {
             let client = self.client.clone();
             let client_id = self.client_id;
+            let wait_until_multiplier = slot % 10;
+            let wait_until = wait_until + (Duration::from_secs(20) * wait_until_multiplier as u32);
+            let slow_requests = slow_requests.clone();
 
             let handle = tokio::spawn(async move {
                 let (txn_tx, mut txn_rx) = tokio::sync::mpsc::channel(100);
@@ -336,11 +357,15 @@ impl UniformPerValidatorRateClient {
                 tokio::time::sleep_until(wait_until).await;
 
                 let mut interval = tokio::time::interval(Duration::from_secs(1));
+                let mut reporting_interval = tokio::time::interval(Duration::from_secs(60));
                 let mut futures = FuturesUnordered::new();
+                let mut failed_count = 0;
+                let mut success_count = 0;
                 loop {
                     let start = Instant::now();
 
                     tokio::select! {
+                        biased;
                          _ = interval.tick() => {
                             let Some(txn_payload) = txn_rx.recv().await else {
                                 return;
@@ -350,8 +375,11 @@ impl UniformPerValidatorRateClient {
                         },
                         Some(result) = futures.next() => {
                             match result {
-                                Ok(_) => {},
+                                Ok(_) => {
+                                    success_count += 1;
+                                },
                                 Err(e) => {
+                                failed_count += 1;
                                     sample!(
                                         SampleRate::Duration(Duration::from_secs(1)),
                                         error!("Slot {}: Request failed {}", slot, e)
@@ -359,13 +387,17 @@ impl UniformPerValidatorRateClient {
                                 },
                             }
                         },
+                        _ = reporting_interval.tick() => {
+                            // println!("Client {} Slot {}: Success {}, Failed: {}", client_id, slot, success_count, failed_count);
+                        }
                     }
 
                     // Log if we're falling behind
                     let elapsed = start.elapsed();
-                    if elapsed > Duration::from_millis(1001) {
+                    if elapsed > Duration::from_millis(1005) {
+                        slow_requests.fetch_add(1, Ordering::Relaxed);
                         sample!(
-                            SampleRate::Duration(Duration::from_secs(1)),
+                            SampleRate::Duration(Duration::from_secs(10)),
                             println!(
                                 "Warning: Client {} Slot {} is falling behind, took {}ms",
                                 client_id,

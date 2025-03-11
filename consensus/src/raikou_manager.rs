@@ -974,10 +974,13 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
         //         }
         //     }
         // }
-        let optqs_params = Some(OptQSPayloadPullParams {
-            exclude_authors: HashSet::new(),
-            minimum_batch_age_usecs: Duration::from_millis(50).as_micros() as u64,
-        });
+
+        // let optqs_params = Some(OptQSPayloadPullParams {
+        //     exclude_authors: HashSet::new(),
+        //     minimum_batch_age_usecs: Duration::from_millis(30).as_micros() as u64,
+        // });
+
+        let optqs_params = self.optqs_payload_param_provider.get_params();
         let (_, payload) = self
             .payload_client
             .pull_payload(
@@ -994,7 +997,7 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
                         self.config.max_sending_inline_bytes,
                     ),
                     user_txn_filter: PayloadFilter::InQuorumStore(exclude),
-                    pending_ordering: false,
+                    pending_ordering: true,
                     pending_uncommitted_blocks: 0,
                     recent_max_fill_fraction: 0.0,
                     block_timestamp: aptos_infallible::duration_since_epoch(),

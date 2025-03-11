@@ -77,6 +77,7 @@ pub struct BatchProofQueue {
     remaining_local_proofs: u64,
 
     batch_expiry_gap_when_init_usecs: u64,
+    max_batches_per_pull: usize,
 }
 
 impl BatchProofQueue {
@@ -84,6 +85,7 @@ impl BatchProofQueue {
         my_peer_id: PeerId,
         batch_store: Arc<BatchStore>,
         batch_expiry_gap_when_init_usecs: u64,
+        max_batches_per_pull: usize,
     ) -> Self {
         Self {
             my_peer_id,
@@ -98,6 +100,7 @@ impl BatchProofQueue {
             remaining_local_txns: 0,
             remaining_local_proofs: 0,
             batch_expiry_gap_when_init_usecs,
+            max_batches_per_pull,
         }
     }
 
@@ -670,6 +673,7 @@ impl BatchProofQueue {
                         };
                         if cur_all_txns + batch.size() > max_txns
                             || unique_txns > max_txns_after_filtering
+                            || result.len() > self.max_batches_per_pull
                         {
                             // Exceeded the limit for requested bytes or number of transactions.
                             full = true;
@@ -696,6 +700,7 @@ impl BatchProofQueue {
                         if cur_all_txns == max_txns
                             || cur_unique_txns == max_txns_after_filtering
                             || cur_unique_txns >= soft_max_txns_after_filtering
+                            || result.len() > self.max_batches_per_pull
                         {
                             full = true;
                             return false;

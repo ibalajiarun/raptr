@@ -499,7 +499,7 @@ impl BatchGenerator {
                 }),
                 Some(cmd) = cmd_rx.recv() => monitor!("batch_generator_handle_command", {
                     match cmd {
-                        BatchGeneratorCommand::CommitNotification(block_timestamp, batches) => {
+                        BatchGeneratorCommand::CommitNotification(block_timestamp, batches) => monitor!("qs_bgc_commit", {
                             trace!(
                                 "QS: got clean request from execution, block timestamp {}",
                                 block_timestamp
@@ -535,8 +535,8 @@ impl BatchGenerator {
                                     );
                                 }
                             }
-                        },
-                        BatchGeneratorCommand::ProofExpiration(batch_ids) => {
+                        }),
+                        BatchGeneratorCommand::ProofExpiration(batch_ids) => monitor!("qs_bgc_proofexp", {
                             for batch_id in batch_ids {
                                 counters::BATCH_IN_PROGRESS_TIMEOUT.inc();
                                 debug!(
@@ -546,9 +546,9 @@ impl BatchGenerator {
                                 // Not able to gather the proof, allow transactions to be polled again.
                                 self.remove_batch_in_progress(self.my_peer_id, batch_id);
                             }
-                        },
+                        }),
                         BatchGeneratorCommand::RemoteBatch(batch) => {
-                            self.handle_remote_batch(batch.author(), batch.batch_id(), batch.into_transactions());
+                            monitor!("qs_bgc_remote", self.handle_remote_batch(batch.author(), batch.batch_id(), batch.into_transactions()));
                         },
                         BatchGeneratorCommand::Shutdown(ack_tx) => {
                             ack_tx

@@ -24,10 +24,14 @@ pub const POS_EXPIRED_LABEL: &str = "expired";
 pub const POS_DUPLICATE_LABEL: &str = "duplicate";
 
 static TRANSACTION_COUNT_BUCKETS: Lazy<Vec<f64>> = Lazy::new(|| {
-    exponential_buckets(
-        /*start=*/ 1.5, /*factor=*/ 1.5, /*count=*/ 25,
-    )
-    .unwrap()
+    [
+        exponential_buckets(
+            /*start=*/ 1.5, /*factor=*/ 1.5, /*count=*/ 25,
+        )
+        .unwrap(),
+        [30000.0, 35000.0, 40000.0].to_vec(),
+    ]
+    .concat()
 });
 
 static PROOF_COUNT_BUCKETS: Lazy<Vec<f64>> = Lazy::new(|| {

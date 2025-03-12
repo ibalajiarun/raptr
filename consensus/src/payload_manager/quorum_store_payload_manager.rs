@@ -110,7 +110,7 @@ impl QuorumStorePayloadManager {
             Shared<Pin<Box<dyn Future<Output = ExecutorResult<Vec<SignedTransaction>>> + Send>>>,
         >,
     ) -> ExecutorResult<Vec<SignedTransaction>> {
-        let mut all_txns = Vec::with_capacity(30_000);
+        let mut all_txns = Vec::with_capacity(50_000);
         for result in futures::future::join_all(futs).await {
             all_txns.append(&mut result?);
         }

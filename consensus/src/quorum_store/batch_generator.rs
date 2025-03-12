@@ -131,9 +131,9 @@ impl BatchGenerator {
             return;
         }
 
-        // if author != self.my_peer_id {
-        //     return;
-        // }
+        if author != self.my_peer_id {
+            return;
+        }
 
         let txns_in_progress: Vec<_> = txns
             .par_iter()

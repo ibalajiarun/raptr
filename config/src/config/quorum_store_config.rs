@@ -138,7 +138,7 @@ impl Default for QuorumStoreConfig {
             batch_buckets: DEFAULT_BUCKETS.to_vec(),
             allow_batches_without_pos_in_proposal: false,
             enable_opt_quorum_store: true,
-            opt_qs_minimum_batch_age_usecs: Duration::from_millis(60).as_micros() as u64,
+            opt_qs_minimum_batch_age_usecs: Duration::from_millis(30).as_micros() as u64,
             max_batches_per_pull: 200,
         }
     }

@@ -131,6 +131,10 @@ impl BatchGenerator {
             return;
         }
 
+        // if author != self.my_peer_id {
+        //     return;
+        // }
+
         let txns_in_progress: Vec<_> = txns
             .par_iter()
             .with_min_len(optimal_min_len(txns.len(), 32))

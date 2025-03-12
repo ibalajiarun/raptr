@@ -342,7 +342,8 @@ impl UniformPerValidatorRateClient {
                                     Duration::from_secs(60).as_secs(),
                                     ChainId::test(),
                                 ),
-                                AccountAuthenticator::ed25519(public_key.clone(), sig.clone()),
+                                // AccountAuthenticator::ed25519(public_key.clone(), sig.clone()),
+                                AccountAuthenticator::NoAccountAuthenticator,
                             );
                             batch.push(txn);
                             seq_num = seq_num + 1;
@@ -419,4 +420,29 @@ impl UniformPerValidatorRateClient {
 
         Ok(())
     }
+}
+
+#[test]
+fn test_txn_size() {
+    let sender = PeerId::random();
+    let seq_num = 1;
+    let private_key = Ed25519PrivateKey::generate_for_testing();
+    let public_key: Ed25519PublicKey = (&private_key).into();
+    let sig = private_key.sign_arbitrary_message(&[]);
+    let txn = SignedTransaction::new_single_sender(
+        RawTransaction::new(
+            sender,
+            seq_num,
+            // aptos_coin_transfer(sender, 100),
+            TransactionPayload::Script(Script::new(vec![], vec![], vec![])),
+            0,
+            0,
+            Duration::from_secs(60).as_secs(),
+            ChainId::test(),
+        ),
+        // AccountAuthenticator::ed25519(public_key.clone(), sig.clone()),
+        AccountAuthenticator::NoAccountAuthenticator,
+    );
+    let txn_bytes = bcs::to_bytes(&txn).unwrap();
+    println!("{:?}", txn_bytes.len());
 }

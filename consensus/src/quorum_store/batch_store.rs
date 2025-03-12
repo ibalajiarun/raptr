@@ -141,9 +141,9 @@ impl BatchStore {
         let batch_store = Self {
             epoch: OnceCell::with_value(epoch),
             last_certified_time: AtomicU64::new(last_certified_time),
-            db_cache: DashMap::new(),
-            peer_quota: DashMap::new(),
-            expirations: Mutex::new(TimeExpirations::new()),
+            db_cache: DashMap::with_capacity(50_000),
+            peer_quota: DashMap::with_capacity(50_000),
+            expirations: Mutex::new(TimeExpirations::with_capacity(50_000)),
             db,
             memory_quota,
             db_quota,
@@ -459,6 +459,10 @@ impl BatchStore {
         }
     }
 
+    pub(crate) fn check_batch(&self, digest: &HashValue) -> Option<PeerId> {
+        self.db_cache.get(digest).map(|batch| batch.author)
+    }
+
     /// This calls lets the caller subscribe to a batch being added to the batch store.
     /// This can be useful in cases where there are multiple flows to add a batch (like
     /// direct from author batch / batch requester fetch) to the batch store and either
@@ -592,10 +596,7 @@ impl<T: QuorumStoreSender + Clone + Send + Sync + 'static> BatchReaderImpl<T> {
 
 impl<T: QuorumStoreSender + Clone + Send + Sync + 'static> BatchReader for BatchReaderImpl<T> {
     fn exists(&self, digest: &HashValue) -> Option<PeerId> {
-        self.batch_store
-            .get_batch_from_local(digest)
-            .map(|v| v.author())
-            .ok()
+        self.batch_store.check_batch(digest)
     }
 
     fn get_batch(

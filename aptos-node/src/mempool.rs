@@ -233,10 +233,13 @@ impl SimpleMempool {
                 info!("pulled_txns empty");
             );
         } else {
-            info!(
-                "pulled txns: {}; store len: {}",
-                pulled_txns.len(),
-                store.len()
+            sample!(
+                SampleRate::Duration(Duration::from_secs(10)),
+                info!(
+                    "pulled txns: {}; store len: {}",
+                    pulled_txns.len(),
+                    store.len()
+                )
             );
         }
         RAIKOU_MEMPOOL_SIZE.set(store.len() as f64);

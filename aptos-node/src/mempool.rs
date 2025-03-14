@@ -309,7 +309,7 @@ pub fn create_mempool_runtime(
     let mempool = SimpleMempool {
         transaction_store: store,
         pending_tracker: PendingTracker {
-            tracker: HashMap::new(),
+            tracker: HashMap::with_capacity(100_000),
         },
         generator: BatchGenerator::new(),
     };

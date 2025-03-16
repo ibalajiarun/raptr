@@ -58,6 +58,8 @@ spec:
           value: "1"
         - name: KUBECONFIG
           value: {KUBECONFIG}
+        - name: FORGE_OVERRIDE_CONFIG_MAP
+          value: "{FORGE_OVERRIDE_CONFIG_MAP}"
       # - name: RUST_LOG
       #   value: debug
       volumeMounts:

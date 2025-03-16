@@ -52,7 +52,7 @@ pub struct K8sSwarm {
     validators: HashMap<PeerId, K8sNode>,
     fullnodes: HashMap<PeerId, K8sNode>,
     root_account: Arc<LocalAccount>,
-    kube_client: K8sClient,
+    pub kube_client: K8sClient,
     versions: Arc<HashMap<Version, String>>,
     pub chain_id: ChainId,
     pub kube_namespace: String,

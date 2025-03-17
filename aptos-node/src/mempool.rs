@@ -1,7 +1,9 @@
 // Copyright (c) Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::consensus;
 use aptos_config::config::NodeConfig;
+use aptos_consensus::monitor;
 use aptos_consensus_notifications::{
     ConsensusNotification, ConsensusNotificationListener, ConsensusNotifier,
 };
@@ -277,18 +279,18 @@ impl SimpleMempool {
         mut api_rx: Receiver<(SignedTransaction, oneshot::Sender<()>, Instant)>,
     ) {
         loop {
-            tokio::select! {
+            monitor!("mempool_runloop", tokio::select! {
                 biased;
                 Some(req) = consensus_rx.next() => {
-                    self.handle_quorum_store_request(req);
+                    monitor!("mempool_qsr", self.handle_quorum_store_request(req));
                 },
                 Some(req) = api_rx.next() => {
-                    self.handle_txn_request(req);
+                    monitor!("mempool_apirx", self.handle_txn_request(req));
                 },
                 Some(cmd) = commit_notif_rx.next() => {
-                    self.handle_notification_command(cmd, &mut commit_notif_rx);
+                    monitor!("mempool_notif", self.handle_notification_command(cmd, &mut commit_notif_rx));
                 },
-            };
+            })
         }
     }
 }

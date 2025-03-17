@@ -83,7 +83,7 @@ pub(crate) fn multiregion_benchmark_test(duration: Duration, num_fullnodes: usiz
             config.consensus.quorum_store.db_quota = 400_000_000;
 
             config.consensus.quorum_store.opt_qs_minimum_batch_age_usecs =
-                Duration::from_millis(130).as_micros() as u64;
+                Duration::from_millis(30).as_micros() as u64;
         }))
         .with_validator_resource_override(NodeResourceOverride {
             cpu_cores: Some(62),

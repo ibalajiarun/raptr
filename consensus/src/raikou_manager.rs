@@ -764,12 +764,8 @@ where
     M: raikou::framework::network::NetworkMessage + Serialize + for<'de> Deserialize<'de>,
     C: MessageCertifier<Message = M>,
 {
-    async fn send(&self, mut msg: M, targets: Vec<NodeId>) {
+    async fn send_impl(&self, mut msg: M, targets: Option<Vec<Author>>) {
         let epoch = self.epoch;
-        let remote_peer_ids = targets
-            .into_iter()
-            .map(|i| *self.index_to_address.get(&i).unwrap())
-            .collect();
 
         let aptos_network_sender = self.network_sender.clone();
         let certifier = self.certifier.clone();
@@ -785,8 +781,26 @@ where
 
             let msg: ConsensusMsg = ConsensusMsg::RaikouMessage(raikou_msg);
 
-            aptos_network_sender.send(msg, remote_peer_ids).await;
+            if let Some(targets) = targets {
+                aptos_network_sender.send(msg, targets).await;
+            } else {
+                aptos_network_sender.broadcast(msg).await;
+            }
         });
+    }
+
+    async fn send(&self, mut msg: M, targets: Vec<NodeId>) {
+        let remote_peer_ids: Option<Vec<Author>> = Some(
+            targets
+                .into_iter()
+                .map(|i| *self.index_to_address.get(&i).unwrap())
+                .collect(),
+        );
+        self.send_impl(msg, remote_peer_ids).await;
+    }
+
+    async fn multicast(&self, msg: M) {
+        self.send_impl(msg, None).await;
     }
 
     fn n_nodes(&self) -> usize {
@@ -816,6 +830,10 @@ where
 
     async fn send(&self, data: Self::Message, targets: Vec<NodeId>) {
         self.inner.send(data, targets).await;
+    }
+
+    async fn multicast(&self, data: Self::Message) {
+        self.inner.multicast(data).await;
     }
 
     fn n_nodes(&self) -> usize {
@@ -914,6 +932,10 @@ where
 
     async fn send(&self, msg: Self::Message, targets: Vec<NodeId>) {
         self.sender.send(msg, targets).await;
+    }
+
+    async fn multicast(&self, data: Self::Message) {
+        self.sender.multicast(data).await;
     }
 
     fn n_nodes(&self) -> usize {

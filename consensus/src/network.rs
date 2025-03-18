@@ -335,7 +335,7 @@ impl NetworkSender {
     /// The future is fulfilled as soon as the message is put into the mpsc channel to network
     /// internal (to provide back pressure), it does not indicate the message is delivered or sent
     /// out.
-    async fn broadcast(&self, msg: ConsensusMsg) {
+    pub async fn broadcast(&self, msg: ConsensusMsg) {
         fail_point!("consensus::send::any", |_| ());
         // Directly send the message to ourself without going through network.
         let self_msg = Event::Message(self.author, msg.clone());

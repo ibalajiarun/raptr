@@ -973,7 +973,7 @@ pub fn consensus_only_setup_environment_and_start_node(
                             addr.into_iter()
                                 .map(|part| {
                                     if let Protocol::Tcp(port) = part {
-                                        Protocol::Tcp(12000)
+                                        Protocol::Tcp(port + 1)
                                     } else {
                                         part
                                     }
@@ -1016,7 +1016,7 @@ pub fn consensus_only_setup_environment_and_start_node(
                             addr.into_iter()
                                 .map(|part| {
                                     if let Protocol::Tcp(port) = part {
-                                        Protocol::Tcp(12001)
+                                        Protocol::Tcp(port + 3)
                                     } else {
                                         part
                                     }

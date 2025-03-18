@@ -237,14 +237,22 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn leader(&self, round: Round) -> NodeId {
-        round as usize % self.n_nodes
-    }
+    // pub fn leader(&self, round: Round) -> NodeId {
+    //     round as usize % self.n_nodes
+    // }
 
     pub fn quorum(&self) -> usize {
         // Using more general quorum formula that works not only for n = 3f+1,
         // but for any n >= 3f+1.
         (self.n_nodes + self.f) / 2 + 1
+    }
+
+    pub fn leader_from_qc(&self, qc: &QC) -> NodeId {
+        let digest = qc.block_digest().to_vec();
+        let mut temp = [0u8; 8];
+        temp.copy_from_slice(&digest[..8]);
+        // return hash[0..4]
+        usize::from_le_bytes(temp) % self.n_nodes
     }
 }
 
@@ -584,7 +592,7 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
             self.log_detail(format!(
                 "QC-voting for block {} proposed by node {} with prefix {}/{}, prev prefix {:?} (reason: {:?})",
                 round,
-                self.config.leader(round),
+                self.config.leader_from_qc(self.blocks[&block_digest].parent_qc()),
                 prefix,
                 N_SUB_BLOCKS,
                 prev_prefix,
@@ -649,7 +657,7 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
             if !self.leader_proposal.contains_key(&round) && self.qc_high.round() < round {
                 ctx.unicast(
                     Message::AdvanceRound(round, reason),
-                    self.config.leader(round),
+                    self.config.leader_from_qc(&self.qc_high),
                 )
                 .await;
             }
@@ -751,7 +759,7 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
 
             // Record the metrics
             let now = Instant::now();
-            if self.config.leader(qc.round()) == self.node_id {
+            if self.config.leader_from_qc(block.parent_qc()) == self.node_id {
                 for _ in 0..(qc.prefix() - self.committed_qc.prefix()) {
                     RAIKOU_BATCH_CONSENSUS_LATENCY.observe(
                         now.saturating_duration_since(self.block_create_time[&qc.round()])
@@ -770,7 +778,7 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
                 "Committing block {} proposed by node {} with {} ACs \
                 and prefix {}/{} [{}/{} batches]{} ({:?}).",
                 qc.round(),
-                self.config.leader(qc.round()),
+                self.config.leader_from_qc(block.parent_qc()),
                 block.poas().len(),
                 qc.prefix(),
                 N_SUB_BLOCKS,
@@ -790,7 +798,7 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
 
             // Record the metrics
             let now = Instant::now();
-            if self.config.leader(qc.round()) == self.node_id {
+            if self.config.leader_from_qc(block.parent_qc()) == self.node_id {
                 RAIKOU_BLOCK_CONSENSUS_LATENCY.observe(
                     now.saturating_duration_since(self.block_create_time[&qc.round()])
                         .as_secs_f64(),
@@ -1019,7 +1027,8 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
 
             self.r_cur = round;
 
-            let leader =  self.config.leader(round);
+            let qc = self.entry_reason.qc();
+            let leader =  self.config.leader_from_qc(qc);
             self.log_detail(format!("Entering round {} by {:?} and leader {}", round, self.entry_reason, leader));
             ROUND_ENTER_REASON.with_label_values(&[&format!("{}", self.entry_reason)]).inc();
 
@@ -1071,7 +1080,7 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
         // and report missing batches to the leader.
         upon receive [Message::Propose(block)] from [leader] {
             // part of the message verification.
-            assert_eq!(self.config.leader(block.round()), leader);
+            assert_eq!(self.config.leader_from_qc(block.parent_qc()), leader);
 
             if !self.leader_proposal.contains_key(&block.round()) {
                 self.log_detail(format!(

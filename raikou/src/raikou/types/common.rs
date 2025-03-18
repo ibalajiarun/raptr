@@ -114,10 +114,10 @@ impl Block {
     pub fn verify(&self, verifier: &protocol::Verifier) -> anyhow::Result<()> {
         ensure!(self.round() > 0, "Invalid Block round: {}", self.round());
         ensure!(
-            self.author() == verifier.config.leader_from_qc(self.parent_qc()),
+            self.author() == verifier.config.leader(self.round()),
             "Invalid block author: {}. Expected: {}",
             self.author(),
-            verifier.config.leader_from_qc(self.parent_qc())
+            verifier.config.leader(self.round())
         );
         ensure!(
             !matches!(self.reason(), RoundEntryReason::ThisRoundQC(_)),

@@ -1407,6 +1407,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             validator_set,
             signer,
             self.state_sync_notifier.clone(),
+            self.proof_cache.clone(),
         ));
     }
 

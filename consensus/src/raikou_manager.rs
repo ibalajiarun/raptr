@@ -25,7 +25,7 @@ use aptos_consensus_types::{
     common::{Author, Payload, PayloadFilter},
     payload::{InlineBatches, OptQuorumStorePayload, RaikouPayload},
     payload_pull_params::{OptQSPayloadPullParams, PayloadPullParameters},
-    proof_of_store::BatchInfo,
+    proof_of_store::{BatchInfo, ProofCache},
     quorum_cert::QuorumCert,
     utils::PayloadTxnsSize,
 };
@@ -129,6 +129,7 @@ impl RaikouManager {
         validator_set: ValidatorSet,
         validator_signer: Arc<ValidatorSigner>,
         state_sync_notifier: Arc<dyn ConsensusNotificationSender>,
+        proof_cache: ProofCache,
     ) {
         let n_nodes = epoch_state.verifier.len();
         let f = (n_nodes - 1) / 3;
@@ -319,6 +320,7 @@ impl RaikouManager {
             Arc::new(raikou::raikou::protocol::Certifier::new()),
             Arc::new(raikou::raikou::protocol::Verifier::new(
                 raikou_node.lock().await.deref(),
+                proof_cache,
             )),
         )
         .await;

@@ -96,15 +96,11 @@ pub struct Verifier {
 }
 
 impl Verifier {
-    pub fn new<DL>(protocol: &RaikouNode<DL>) -> Self {
+    pub fn new<DL>(protocol: &RaikouNode<DL>, proof_cache: ProofCache) -> Self {
         Verifier {
             config: protocol.config.clone(),
             sig_verifier: protocol.sig_verifier.clone(),
-            proof_cache: Cache::builder()
-                .max_capacity(10_000)
-                .initial_capacity(1_000)
-                .time_to_live(Duration::from_secs(20))
-                .build(),
+            proof_cache,
         }
     }
 }
@@ -1023,6 +1019,7 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
             self.log_detail(format!("Entering round {} by {:?} and leader {}", round, self.entry_reason, leader));
             ROUND_ENTER_REASON.with_label_values(&[&format!("{}", self.entry_reason)]).inc();
 
+                let timestamp_usecs = duration_since_epoch().as_micros() as u64;
             if self.node_id == leader {
                 // Upon entering round r, the leader of round r creates and multicasts a block.
                 let reason = self.entry_reason.clone();
@@ -1036,7 +1033,6 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
                     )
                     .await;
 
-                let timestamp_usecs = duration_since_epoch().as_micros() as u64;
                 let block_data = BlockData {
                     timestamp_usecs,
                     payload,

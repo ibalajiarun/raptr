@@ -313,42 +313,43 @@ impl RaikouManager {
             Some(failures_tracker),
         )));
 
-        let network_service = RaikouNetworkService::new(
-            epoch_state.clone(),
-            messages_rx,
-            network_sender.clone(),
+        // let network_service = RaikouNetworkService::new(
+        //     epoch_state.clone(),
+        //     messages_rx,
+        //     network_sender.clone(),
+        //     Arc::new(raikou::raikou::protocol::Certifier::new()),
+        //     Arc::new(raikou::raikou::protocol::Verifier::new(
+        //         raikou_node.lock().await.deref(),
+        //         proof_cache,
+        //     )),
+        // )
+        // .await;
+
+        let network_service = TcpNetworkService::new(
+            node_id,
+            format!("0.0.0.0:{}", CONS_BASE_PORT + node_id as u16)
+                .parse()
+                .unwrap(),
+            raikou::framework::tcp_network::Config {
+                peers: ip_addresses
+                    .iter()
+                    .enumerate()
+                    .map(|(peer_id, addr)| {
+                        format!("{}:{}", addr, CONS_BASE_PORT + peer_id as u16)
+                            .parse()
+                            .unwrap()
+                    })
+                    .collect(),
+                streams_per_peer: 4,
+            },
             Arc::new(raikou::raikou::protocol::Certifier::new()),
             Arc::new(raikou::raikou::protocol::Verifier::new(
                 raikou_node.lock().await.deref(),
                 proof_cache,
             )),
+            1 * 1024 * 1024, // 32MB max block size
         )
         .await;
-
-        // let network_service = TcpNetworkService::new(
-        //     node_id,
-        //     format!("0.0.0.0:{}", CONS_BASE_PORT + node_id as u16)
-        //         .parse()
-        //         .unwrap(),
-        //     raikou::framework::tcp_network::Config {
-        //         peers: ip_addresses
-        //             .iter()
-        //             .enumerate()
-        //             .map(|(peer_id, addr)| {
-        //                 format!("{}:{}", addr, CONS_BASE_PORT + peer_id as u16)
-        //                     .parse()
-        //                     .unwrap()
-        //             })
-        //             .collect(),
-        //         streams_per_peer: 4,
-        //     },
-        //     Arc::new(raikou::raikou::protocol::Certifier::new()),
-        //     Arc::new(raikou::raikou::protocol::Verifier::new(
-        //         raikou_node.lock().await.deref(),
-        //     )),
-        //     32 * 1024 * 1024, // 32MB max block size
-        // )
-        // .await;
 
         let print_metrics = async {
             // Notify the protocol to stop.

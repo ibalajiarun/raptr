@@ -19,7 +19,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpSocket, TcpStream},
     sync::{Mutex, OwnedMutexGuard},
 };
 
@@ -179,7 +179,7 @@ where
         let (self_send, recv) = aptos_channel::new(QueueStyle::LIFO, 16, None);
 
         // Start the receiver task
-        let listener = Self::create_listener(addr).await;
+        let listener = Self::create_listener(addr, max_message_size).await;
         tokio::spawn(Self::listen_loop(
             listener,
             self_send.clone(),
@@ -195,7 +195,7 @@ where
 
             if peer_id != node_id {
                 for _ in 0..config.streams_per_peer {
-                    let mut stream = Self::create_stream(peer_addr).await;
+                    let mut stream = Self::create_stream(peer_addr, max_message_size).await;
                     stream.write_all(&node_id.to_be_bytes()).await.unwrap();
                     peer_streams.push(Arc::new(Mutex::new(stream)));
                 }
@@ -222,9 +222,20 @@ where
         }
     }
 
-    async fn create_listener(addr: SocketAddr) -> TcpListener {
+    async fn create_listener(addr: SocketAddr, max_message_size: usize) -> TcpListener {
         loop {
-            match TcpListener::bind(addr).await {
+            let socket = tokio::net::TcpSocket::new_v4().unwrap();
+            socket.set_nodelay(true).unwrap();
+            socket.set_keepalive(true).unwrap();
+            socket
+                .set_recv_buffer_size(max_message_size as u32)
+                .unwrap();
+            socket
+                .set_send_buffer_size(max_message_size as u32)
+                .unwrap();
+            socket.bind(addr).unwrap();
+
+            match socket.listen(1024) {
                 Ok(listener) => {
                     return listener;
                 },
@@ -241,11 +252,22 @@ where
         }
     }
 
-    async fn create_stream(peer_addr: &SocketAddr) -> TcpStream {
+    async fn create_stream(peer_addr: &SocketAddr, max_message_size: usize) -> TcpStream {
         loop {
-            match TcpStream::connect(peer_addr).await {
+            let socket = TcpSocket::new_v4().unwrap();
+            socket.set_nodelay(true).unwrap();
+            socket.set_keepalive(true).unwrap();
+            socket
+                .set_recv_buffer_size(max_message_size as u32)
+                .unwrap();
+            socket
+                .set_send_buffer_size(max_message_size as u32)
+                .unwrap();
+
+            match socket.connect(*peer_addr).await {
                 Ok(stream) => {
                     aptos_logger::info!("TCPNET: Connected to peer {}", peer_addr);
+                    stream.set_nodelay(true).unwrap();
                     return stream;
                 },
                 Err(err) => {

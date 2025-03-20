@@ -19,6 +19,7 @@ pub mod native;
 
 #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
 pub mod penalty_tracker;
+mod bundler;
 
 /// Event sent by the consensus module to the dissemination layer to notify of a new block.
 #[derive(Debug)]

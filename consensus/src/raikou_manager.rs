@@ -51,8 +51,11 @@ use futures_channel::{mpsc::UnboundedSender, oneshot};
 use itertools::Itertools;
 use raikou::{
     framework::{
+        crypto::{SignatureVerifier, Signer},
         injection::{delay_injection, drop_injection},
-        module_network::{match_event_type, ModuleId, ModuleNetwork, ModuleNetworkService},
+        module_network::{
+            match_event_type, ModuleId, ModuleNetwork, ModuleNetworkSender, ModuleNetworkService,
+        },
         network::{MessageCertifier, MessageVerifier, NetworkService},
         tcp_network::TcpNetworkService,
         timer::LocalTimerService,
@@ -60,9 +63,9 @@ use raikou::{
     },
     metrics::{self, display_metric_to},
     raikou::{
-        dissemination::{self, DisseminationLayer},
+        dissemination::{self, bundler, DisseminationLayer},
         duration_since_epoch,
-        types::{self as raikou_types, Prefix, N_SUB_BLOCKS},
+        types::{self as raikou_types, Prefix, Round, N_SUB_BLOCKS},
         RaikouNode,
     },
 };
@@ -203,8 +206,10 @@ impl RaikouManager {
         };
 
         let mut module_network = ModuleNetwork::new();
+        let bundler_module_network = module_network.register().await;
         let diss_module_network = module_network.register().await;
         let cons_module_network = module_network.register().await;
+        let bundler_module_id = bundler_module_network.module_id();
         let diss_module_id = diss_module_network.module_id();
         let cons_module_id = cons_module_network.module_id();
 
@@ -290,8 +295,24 @@ impl RaikouManager {
             payload_manager,
             diss_module_network,
             state_sync_notifier,
-            index_to_address,
+            index_to_address.clone(),
             opt_qs_payload_param_provider,
+        )
+        .await;
+
+        Self::spawn_bundler(
+            node_id,
+            bundler_module_network,
+            epoch_state.clone(),
+            n_nodes,
+            index_to_address.clone(),
+            todo!(), // bundler_network_sender,
+            todo!(), // bundler_messages_rx,
+            cons_module_id,
+            delta,
+            signer.clone(),
+            sig_verifier.clone(),
+            dissemination.clone(),
         )
         .await;
 
@@ -299,6 +320,7 @@ impl RaikouManager {
             node_id,
             config,
             dissemination,
+            bundler_module_id,
             true,
             raikou::raikou::Metrics {
                 // propose_time: propose_time_sender,
@@ -316,7 +338,7 @@ impl RaikouManager {
         let network_service = RaikouNetworkService::new(
             epoch_state.clone(),
             messages_rx,
-            network_sender.clone(),
+            network_sender,
             Arc::new(raikou::raikou::protocol::Certifier::new()),
             Arc::new(raikou::raikou::protocol::Verifier::new(
                 raikou_node.lock().await.deref(),
@@ -471,6 +493,61 @@ impl RaikouManager {
         }
     }
 
+    async fn spawn_bundler(
+        node_id: NodeId,
+        bundler_module_network: ModuleNetworkService,
+        epoch_state: Arc<EpochState>,
+        n_nodes: usize,
+        index_to_address: HashMap<usize, Author>,
+        bundler_network_sender: Arc<NetworkSender>,
+        bundler_messages_rx: aptos_channels::aptos_channel::Receiver<
+            PeerId,
+            (Author, RaikouNetworkMessage),
+        >,
+        cons_module_id: ModuleId,
+        delta: f64,
+        signer: Signer,
+        sig_verifier: SignatureVerifier,
+        dissemination: Arc<impl DisseminationLayer>,
+    ) {
+        let bundler_network_service = RaikouNetworkService::new(
+            epoch_state.clone(),
+            bundler_messages_rx,
+            bundler_network_sender,
+            Arc::new(bundler::Certifier::new()),
+            Arc::new(bundler::Verifier::new()),
+        )
+        .await;
+
+        let bundler = bundler::Bundler::new(
+            node_id,
+            bundler::Config {
+                module_id: bundler_module_network.module_id(),
+                n_nodes,
+                delta: Duration::from_secs_f64(delta),
+                bundle_window: 10,
+                bundle_store_window: 40,
+                bundle_interval: Duration::from_millis(50),
+                status_interval: Duration::from_secs_f64(delta) * 10,
+                push_bundle_when_proposing: false,
+            },
+            cons_module_id,
+            true,
+            // metrics,
+            signer,
+            sig_verifier,
+            dissemination,
+        );
+
+        tokio::spawn(Protocol::run(
+            bundler.protocol(),
+            node_id,
+            bundler_network_service,
+            bundler_module_network,
+            LocalTimerService::new(),
+        ));
+    }
+
     #[cfg(any(not(feature = "sim-types"), feature = "force-aptos-types"))]
     async fn spawn_qs_dissemination_layer(
         node_id: NodeId,
@@ -481,7 +558,7 @@ impl RaikouManager {
         state_sync_notifier: Arc<dyn ConsensusNotificationSender>,
         index_to_address: HashMap<usize, Author>,
         optqs_payload_param_provider: Arc<dyn TOptQSPullParamsProvider>,
-    ) -> impl DisseminationLayer {
+    ) -> Arc<impl DisseminationLayer> {
         let round_initial_timeout =
             Duration::from_millis(consensus_config.round_initial_timeout_ms);
 
@@ -577,6 +654,8 @@ impl RaikouManager {
                             Some(block_voters)
                         )
                     )
+                } else if match_event_type::<dissemination::SetLoggingBaseTimestamp>(&event) {
+                    // No-op.
                 } else if match_event_type::<dissemination::Kill>(&event) {
                     break;
                 } else {
@@ -585,7 +664,7 @@ impl RaikouManager {
             }
         });
 
-        dissemination
+        Arc::new(dissemination)
     }
 
     #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
@@ -983,10 +1062,11 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
         self.module_id
     }
 
-    async fn prepare_block(
+    async fn prepare_payload(
         &self,
-        round: raikou_types::Round,
-        exclude: HashSet<raikou_types::BatchInfo>,
+        round: Option<raikou_types::Round>,
+        exclude_everywhere: HashSet<raikou_types::BatchInfo>,
+        exclude_optimistic: HashSet<raikou_types::BatchInfo>,
         exclude_authors: Option<BitVec>,
     ) -> raikou_types::Payload {
         // let mut optqs_params = self.optqs_payload_param_provider.get_params();
@@ -1020,7 +1100,7 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
                         self.config.max_sending_inline_txns,
                         self.config.max_sending_inline_bytes,
                     ),
-                    user_txn_filter: PayloadFilter::InQuorumStore(exclude),
+                    user_txn_filter: PayloadFilter::Raptr(exclude_everywhere, exclude_optimistic),
                     pending_ordering: true,
                     pending_uncommitted_blocks: 0,
                     recent_max_fill_fraction: 0.0,
@@ -1136,9 +1216,5 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
     fn check_payload(&self, payload: &raikou::raikou::types::Payload) -> Result<(), BitVec> {
         self.payload_manager
             .check_payload_availability(&payload.inner)
-    }
-
-    async fn set_first_committed_block_timestamp(&self, timestamp: SystemTime) {
-        // No-op.
     }
 }

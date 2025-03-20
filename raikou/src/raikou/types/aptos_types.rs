@@ -12,8 +12,8 @@ use crate::{
     },
 };
 use anyhow::ensure;
-use aptos_consensus_types::proof_of_store::ProofCache;
 pub use aptos_consensus_types::proof_of_store::{BatchId, BatchInfo};
+use aptos_consensus_types::{payload::RaikouPayload, proof_of_store::ProofCache};
 pub use aptos_crypto::hash::HashValue;
 use aptos_crypto::hash::{CryptoHash, CryptoHasher};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
@@ -26,7 +26,7 @@ pub type PoA = aptos_consensus_types::proof_of_store::ProofOfStore;
 
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
 pub struct Payload {
-    round: Round,
+    round: Option<Round>,
     author: NodeId,
     pub inner: aptos_consensus_types::common::Payload,
 }
@@ -43,7 +43,7 @@ impl Debug for Payload {
 impl Payload {
     /// Creates a new block payload.
     pub fn new(
-        round: Round,
+        round: Option<Round>,
         leader: NodeId,
         inner: aptos_consensus_types::common::Payload,
     ) -> Self {
@@ -79,7 +79,7 @@ impl Payload {
 
     pub fn empty(round: Round, leader: NodeId) -> Self {
         Self::new(
-            round,
+            Some(round),
             leader,
             aptos_consensus_types::common::Payload::Raikou(
                 aptos_consensus_types::payload::RaikouPayload::new_empty(),
@@ -88,7 +88,7 @@ impl Payload {
     }
 
     pub fn round(&self) -> Round {
-        self.round
+        self.round.unwrap()
     }
 
     pub fn leader(&self) -> NodeId {
@@ -128,4 +128,21 @@ impl Payload {
             true,
         )
     }
+}
+
+pub fn merge_payloads(
+    round: Round,
+    author: NodeId,
+    payloads: impl IntoIterator<Item = Payload>,
+) -> Payload {
+    let inners = payloads
+        .into_iter()
+        .map(|p| p.inner.as_raikou_payload().clone())
+        .collect_vec();
+    let merged_inner = RaikouPayload::merge(&inners);
+    Payload::new(
+        Some(round),
+        author,
+        aptos_consensus_types::common::Payload::Raikou(merged_inner),
+    )
 }

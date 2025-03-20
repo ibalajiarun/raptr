@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
+    derive_module_event,
     framework::{
         module_network::{ModuleEventTrait, ModuleId},
         NodeId,
@@ -17,9 +18,15 @@ use tokio::time::Instant;
 #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
 pub mod native;
 
+pub mod bundler;
 #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
 pub mod penalty_tracker;
-mod bundler;
+
+derive_module_event!(ProposalReceived);
+derive_module_event!(NewQCWithPayload);
+derive_module_event!(Kill);
+derive_module_event!(FullBlockAvailable);
+derive_module_event!(SetLoggingBaseTimestamp);
 
 /// Event sent by the consensus module to the dissemination layer to notify of a new block.
 #[derive(Debug)]
@@ -29,33 +36,15 @@ pub struct ProposalReceived {
     pub payload: Payload,
 }
 
-impl ModuleEventTrait for ProposalReceived {
-    fn as_any(self: Box<Self>) -> Box<dyn Any> {
-        self
-    }
-}
-
 #[derive(Debug)]
 pub struct NewQCWithPayload {
     pub payload: Payload,
     pub qc: QC,
 }
 
-impl ModuleEventTrait for NewQCWithPayload {
-    fn as_any(self: Box<Self>) -> Box<dyn Any> {
-        self
-    }
-}
-
 /// Event sent by the consensus module to the dissemination layer to notify that it should stop.
 #[derive(Debug)]
 pub struct Kill();
-
-impl ModuleEventTrait for Kill {
-    fn as_any(self: Box<Self>) -> Box<dyn Any> {
-        self
-    }
-}
 
 /// Event sent by the dissemination layer to the consensus module in response to `ProposalReceived`
 /// to notify that all data from the proposed block is available.
@@ -64,19 +53,18 @@ pub struct FullBlockAvailable {
     pub round: Round,
 }
 
-impl ModuleEventTrait for FullBlockAvailable {
-    fn as_any(self: Box<Self>) -> Box<dyn Any> {
-        self
-    }
-}
+/// Sets a common timestamp for logging.
+#[derive(Debug)]
+pub struct SetLoggingBaseTimestamp(pub SystemTime);
 
 pub trait DisseminationLayer: Send + Sync + 'static {
     fn module_id(&self) -> ModuleId;
 
-    fn prepare_block(
+    fn prepare_payload(
         &self,
-        round: Round,
-        exclude: HashSet<BatchInfo>,
+        round: Option<Round>,
+        exclude_everywhere: HashSet<BatchInfo>,
+        exclude_optimistic: HashSet<BatchInfo>,
         exclude_authors: Option<BitVec>,
     ) -> impl Future<Output = Payload> + Send;
 
@@ -96,11 +84,6 @@ pub trait DisseminationLayer: Send + Sync + 'static {
     fn check_payload(&self, payload: &Payload) -> Result<(), BitVec> {
         Ok(())
     }
-
-    fn set_first_committed_block_timestamp(
-        &self,
-        timestamp: SystemTime,
-    ) -> impl Future<Output = ()> + Send;
 }
 
 pub struct Metrics {

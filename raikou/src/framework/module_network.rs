@@ -37,6 +37,18 @@ pub trait ModuleEventTrait: Any + Debug + Send + 'static {
     fn as_any(self: Box<Self>) -> Box<dyn Any>;
 }
 
+// TODO: make it an actual derive.
+#[macro_export]
+macro_rules! derive_module_event {
+    ($name:ident) => {
+        impl ModuleEventTrait for $name {
+            fn as_any(self: Box<Self>) -> Box<dyn Any> {
+                self
+            }
+        }
+    };
+}
+
 /// Fool-proof way to match event types.
 pub fn match_event_type<E: ModuleEventTrait>(event: &ModuleEvent) -> bool {
     event.event_type_id() == TypeId::of::<E>()

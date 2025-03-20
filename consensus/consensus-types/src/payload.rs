@@ -1,7 +1,10 @@
 // Copyright (c) Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::proof_of_store::{BatchInfo, ProofOfStore};
+use crate::{
+    common::Payload,
+    proof_of_store::{BatchInfo, ProofOfStore},
+};
 use anyhow::ensure;
 use aptos_executor_types::ExecutorResult;
 use aptos_infallible::Mutex;
@@ -11,6 +14,7 @@ use futures::{
     future::{BoxFuture, Shared},
     FutureExt,
 };
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use std::{
     fmt::Debug,
@@ -300,6 +304,31 @@ pub const N_SUB_BLOCKS: usize = 8;
 
 pub type SubBlocks = [BatchPointer<BatchInfo>; N_SUB_BLOCKS];
 
+pub fn split_into_sub_blocks(mut opt_batches: Vec<BatchInfo>) -> SubBlocks {
+    let mut sub_blocks = SubBlocks::default();
+
+    fn div_ceil(dividend: usize, divisor: usize) -> usize {
+        if dividend % divisor == 0 {
+            dividend / divisor
+        } else {
+            dividend / divisor + 1
+        }
+    }
+
+    let num_chunks = sub_blocks.len();
+    let mut chunks_remaining = num_chunks;
+    while chunks_remaining > 0 {
+        let chunk_size = div_ceil(opt_batches.len(), chunks_remaining);
+        let remaining = opt_batches.split_off(chunk_size);
+        sub_blocks[num_chunks - chunks_remaining] = opt_batches.into();
+        opt_batches = remaining;
+
+        chunks_remaining -= 1;
+    }
+
+    sub_blocks
+}
+
 pub type Prefix = usize;
 
 pub type PrefixSet = CompressedPrefixSet;
@@ -461,6 +490,31 @@ impl RaikouPayload {
             include_proofs: true,
             sub_blocks: sub_blocks_range,
         }
+    }
+
+    pub fn merge(payloads: &Vec<Self>) -> Self {
+        let proofs = payloads
+            .iter()
+            .flat_map(|payload| payload.proofs().iter())
+            .cloned()
+            .collect_vec()
+            .into();
+
+        let n_opt_batches = payloads
+            .iter()
+            .map(|payload| payload.num_sub_block_batches())
+            .sum::<usize>();
+
+        let mut opt_batches = Vec::with_capacity(n_opt_batches);
+        for payload in payloads {
+            for sub_block in payload.sub_blocks() {
+                opt_batches.extend(sub_block.iter().cloned());
+            }
+        }
+
+        let sub_blocks = split_into_sub_blocks(opt_batches);
+
+        Self::new(proofs, sub_blocks)
     }
 
     pub fn new_empty() -> Self {

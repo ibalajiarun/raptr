@@ -37,10 +37,6 @@ pub type BlockHash = HashValue;
 // Must not exceed 14 due to the implementation of `PrefixSet`.
 pub const N_SUB_BLOCKS: Prefix = aptos_consensus_types::payload::N_SUB_BLOCKS;
 
-pub struct BlockHeader {
-    pub signature: Signature,
-}
-
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(from = "BlockSerialization")]
 pub struct Block {
@@ -48,6 +44,18 @@ pub struct Block {
     pub signature: Signature,
     #[serde(skip)]
     pub digest: BlockHash,
+}
+
+impl Debug for Block {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Block")
+            .field("round", &self.round())
+            .field("author", &self.author())
+            .field("parent_qc", &self.parent_qc())
+            .field("payload", &self.payload())
+            .field("reason", &self.reason())
+            .finish()
+    }
 }
 
 #[derive(Deserialize)]

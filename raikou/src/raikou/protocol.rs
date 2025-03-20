@@ -5,6 +5,7 @@ use crate::{
     framework::{
         self,
         crypto::{SignatureVerifier, Signer},
+        module_network::ModuleId,
         network::MessageVerifier,
         ContextFor, NodeId, Protocol,
     },
@@ -18,7 +19,12 @@ use crate::{
             RAIKOU_BLOCK_CONSENSUS_LATENCY, ROUND_ENTER_REASON,
         },
         dissemination::{
-            self, DisseminationLayer, FullBlockAvailable, Kill, NewQCWithPayload, ProposalReceived,
+            self,
+            bundler::{
+                BlockCreated, BlockHeader, BlockReconstructed, CreateBlock, ReconstructBlock,
+            },
+            DisseminationLayer, FullBlockAvailable, Kill, NewQCWithPayload, ProposalReceived,
+            SetLoggingBaseTimestamp,
         },
         types::*,
     },
@@ -57,7 +63,7 @@ use tokio::time::Instant;
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Message {
     // Consensus
-    Propose(Block),
+    Propose(BlockHeader),
     QcVote(Round, Prefix, BlockHash, Signature, BitVec),
     CcVote(QC, Signature),
     TcVote(Round, QC, Signature, RoundTimeoutReason),
@@ -69,7 +75,7 @@ pub enum Message {
 impl Debug for Message {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Message::Propose(block) => write!(f, "Propose({})", block.round()),
+            Message::Propose(block_header) => write!(f, "Propose({})", block_header.round),
             Message::QcVote(round, _, _, _, _) => write!(f, "QcVote({})", round),
             Message::CcVote(qc, _) => {
                 write!(f, "CcVote({})", qc.round())
@@ -110,12 +116,15 @@ impl MessageVerifier for Verifier {
 
     async fn verify(&self, sender: NodeId, message: &Self::Message) -> anyhow::Result<()> {
         match message {
-            Message::Propose(block) => monitor!("verify_propose", {
-                ensure!(block.author() == sender, "Propose message from non-author");
+            Message::Propose(block_header) => monitor!("verify_propose", {
+                // TODO
 
-                block
-                    .verify(self)
-                    .context("Error verifying the block in Propose message")
+                // ensure!(block.author() == sender, "Propose message from non-author");
+                //
+                // block
+                //     .verify(self)
+                //     .context("Error verifying the block in Propose message")
+                Ok(())
             }),
             Message::QcVote(round, prefix, block_digest, signature, _) => {
                 monitor!("verify_qcvote", {
@@ -256,10 +265,11 @@ pub trait TRaikouFailureTracker: Send + Sync {
 pub struct RaikouNode<DL> {
     node_id: NodeId,
     config: Config,
-    dissemination: DL,
+    dissemination: Arc<DL>,
+    bundler_module_id: ModuleId,
 
     // Logging and metrics
-    first_committed_block_timestamp: Option<SystemTime>,
+    logging_base_timestamp: Option<SystemTime>,
     detailed_logging: bool,
     metrics: Metrics,
     block_create_time: BTreeMap<Round, Instant>,
@@ -319,7 +329,8 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
     pub fn new(
         id: NodeId,
         config: Config,
-        dissemination: DL,
+        dissemination: Arc<DL>,
+        bundler_module_id: ModuleId,
         detailed_logging: bool,
         metrics: Metrics,
         signer: Signer,
@@ -334,7 +345,8 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
             node_id: id,
             config: config.clone(),
             dissemination,
-            first_committed_block_timestamp: None,
+            bundler_module_id,
+            logging_base_timestamp: None,
             detailed_logging,
             metrics,
             block_create_time: Default::default(),
@@ -672,19 +684,25 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
         (prefix, missing_authors)
     }
 
-    async fn commit_qc(&mut self, qc: QC, commit_reason: CommitReason) {
+    async fn commit_qc(
+        &mut self,
+        qc: QC,
+        commit_reason: CommitReason,
+        ctx: &mut impl ContextFor<Self>,
+    ) {
         let ts = self.blocks[qc.block_digest()].data.timestamp_usecs;
-        let is_first_commit = self.first_committed_block_timestamp.is_none();
+        let is_first_commit = self.logging_base_timestamp.is_none();
 
         let voters: BitVec = qc.signer_ids().map(|id| id as u8).collect();
         let payloads = self.commit_qc_impl(qc, commit_reason);
 
         if is_first_commit {
-            if let Some(ts) = self.first_committed_block_timestamp {
+            if let Some(ts) = self.logging_base_timestamp {
                 // Notify the dissemination layer about the first committed block timestamp.
                 // Used as the common base timestamp by all nodes for logging.
-                self.dissemination
-                    .set_first_committed_block_timestamp(ts)
+                ctx.notify(self.dissemination.module_id(), SetLoggingBaseTimestamp(ts))
+                    .await;
+                ctx.notify(self.bundler_module_id, SetLoggingBaseTimestamp(ts))
                     .await;
             }
         }
@@ -704,7 +722,7 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
 
         if parent.is_genesis() {
             self.log_detail(format!("First committed block: {}", qc.round()));
-            self.first_committed_block_timestamp =
+            self.logging_base_timestamp =
                 Some(UNIX_EPOCH + Duration::from_micros(block.data.timestamp_usecs));
         }
 
@@ -869,7 +887,7 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
         Some(
             self.to_deltas(
                 SystemTime::now()
-                    .duration_since(self.first_committed_block_timestamp?)
+                    .duration_since(self.logging_base_timestamp?)
                     .ok()?,
             ),
         )
@@ -1019,103 +1037,99 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
             self.log_detail(format!("Entering round {} by {:?} and leader {}", round, self.entry_reason, leader));
             ROUND_ENTER_REASON.with_label_values(&[&format!("{}", self.entry_reason)]).inc();
 
-                let timestamp_usecs = duration_since_epoch().as_micros() as u64;
+            let timestamp_usecs = duration_since_epoch().as_micros() as u64;
             if self.node_id == leader {
                 // Upon entering round r, the leader of round r creates and multicasts a block.
                 let reason = self.entry_reason.clone();
 
-                let payload = self
-                    .dissemination
-                    .prepare_block(
-                        self.r_cur,
-                        self.uncommitted_batches(reason.qc()),
-                        reason.qc().missing_authors().clone(),
-                    )
-                    .await;
-
-                let block_data = BlockData {
-                    timestamp_usecs,
-                    payload,
-                    reason,
-                };
-
-                let digest = block_data.hash();
-                let signature = self.signer.sign(&BlockSignatureData { digest }).unwrap();
-
-                let block = Block::new(block_data, signature);
-
-                self.log_detail(format!(
-                    "Proposing block {} with {} ACs and {} sub-blocks",
-                    round,
-                    block.poas().len(),
-                    N_SUB_BLOCKS,
-                ));
-
-                observe_block(block.data.timestamp_usecs, "Propose");
-
-                self.block_create_time.insert(round, Instant::now());
-                ctx.multicast(Message::Propose(block)).await;
+                ctx.notify(
+                    self.bundler_module_id,
+                    CreateBlock { round, timestamp_usecs, reason },
+                )
+                .await;
             }
 
             // Upon entering round r, the node starts a timer for leader timeout.
             ctx.set_timer(self.config.leader_timeout, TimerEvent::Timeout(round));
         };
 
+        upon event of type [BlockCreated] from [_bundler_module] {
+            upon [BlockCreated { header } ] {
+                observe_block(header.timestamp_usecs, "Propose");
+
+                self.block_create_time.insert(header.round, Instant::now());
+                ctx.multicast(Message::Propose(header)).await;
+            };
+        };
+
         // Upon receiving a valid block B = [r, parent_qc, cc, tc, acs, batches] from L_r
         // for the first time, if r >= r_cur and r > r_timeout, store the block,
         // execute on_new_qc and advance_round, start a timer for qc-vote,
         // and report missing batches to the leader.
-        upon receive [Message::Propose(block)] from [leader] {
+        upon receive [Message::Propose(block_header)] from [leader] {
             // part of the message verification.
-            assert_eq!(self.config.leader(block.round()), leader);
+            assert_eq!(self.config.leader(block_header.round), leader);
 
-            if !self.leader_proposal.contains_key(&block.round()) {
-                self.log_detail(format!(
-                    "Received block {} proposed by node {} with {} ACs and {} optimistically proposed batches",
-                    block.round(),
-                    leader,
-                    block.poas().len(),
-                    block.sub_blocks().map(|b| b.len()).sum::<usize>(),
-                ));
+            // TODO: add a check for repeated proposals.
+            ctx.notify(
+                self.bundler_module_id,
+                ReconstructBlock { block_header },
+            )
+            .await;
+        };
 
-                self.leader_proposal.insert(block.round(), block.digest.clone());
-                self.on_new_block(&block, ctx, false).await;
+        upon event of type [BlockReconstructed] from [_bundler] {
+            upon [BlockReconstructed { block } ] {
+                let leader = block.author();
 
-                let round = block.round();
-                let BlockData { payload, reason, .. } = block.data;
-                self.advance_r_ready(round, reason, ctx).await;
-
-                ctx.notify(
-                    self.dissemination.module_id(),
-                    ProposalReceived { leader, round, payload },
-                ).await;
-
-                if round < self.r_cur {
+                if !self.leader_proposal.contains_key(&block.round()) {
                     self.log_detail(format!(
-                        "Ignoring proposal of block {} by node {} because already in round {}",
-                        round,
+                        "Received block {} proposed by node {} with {} ACs and {} optimistically proposed batches",
+                        block.round(),
                         leader,
-                        self.r_cur,
-                    ));
-                } else if round <= self.r_timeout {
-                    self.log_detail(format!(
-                        "Ignoring proposal of block {} by node {} because already timed out round {}",
-                        round,
-                        leader,
-                        self.r_timeout,
-                    ));
-                } else {
-                    self.log_detail(format!(
-                        "Processing proposal of block {} by node {}",
-                        round,
-                        leader,
+                        block.poas().len(),
+                        block.sub_blocks().map(|b| b.len()).sum::<usize>(),
                     ));
 
-                    if self.config.enable_partial_qc_votes {
-                        ctx.set_timer(self.config.extra_wait_before_qc_vote, TimerEvent::QcVote(round));
+                    self.leader_proposal.insert(block.round(), block.digest.clone());
+                    self.on_new_block(&block, ctx, false).await;
+
+                    let round = block.round();
+                    let BlockData { payload, reason, .. } = block.data;
+                    self.advance_r_ready(round, reason, ctx).await;
+
+                    ctx.notify(
+                        self.dissemination.module_id(),
+                        ProposalReceived { leader, round, payload },
+                    ).await;
+
+                    if round < self.r_cur {
+                        self.log_detail(format!(
+                            "Ignoring proposal of block {} by node {} because already in round {}",
+                            round,
+                            leader,
+                            self.r_cur,
+                        ));
+                    } else if round <= self.r_timeout {
+                        self.log_detail(format!(
+                            "Ignoring proposal of block {} by node {} because already timed out round {}",
+                            round,
+                            leader,
+                            self.r_timeout,
+                        ));
+                    } else {
+                        self.log_detail(format!(
+                            "Processing proposal of block {} by node {}",
+                            round,
+                            leader,
+                        ));
+
+                        if self.config.enable_partial_qc_votes {
+                            ctx.set_timer(self.config.extra_wait_before_qc_vote, TimerEvent::QcVote(round));
+                        }
                     }
                 }
-            }
+            };
         };
 
         // A node issues a qc-vote in its current round r_cur up to 2 times:
@@ -1297,7 +1311,7 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
             && self.satisfied_qcs.contains(self.qcs_to_commit.keys().next().unwrap())
         ] {
             let (_, (qc, commit_reason)) = self.qcs_to_commit.pop_first().unwrap();
-            self.commit_qc(qc, commit_reason).await;
+            self.commit_qc(qc, commit_reason, ctx).await;
         };
 
         // When the timeout expires, multicast a signed timeout message

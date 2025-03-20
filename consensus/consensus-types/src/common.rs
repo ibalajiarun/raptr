@@ -656,6 +656,7 @@ impl BatchPayload {
 pub enum PayloadFilter {
     DirectMempool(Vec<TransactionSummary>),
     InQuorumStore(HashSet<BatchInfo>),
+    Raptr(HashSet<BatchInfo>, HashSet<BatchInfo>),
     Empty,
 }
 
@@ -749,6 +750,21 @@ impl fmt::Display for PayloadFilter {
                     write!(proofs_str, "{} ", proof.digest())?;
                 }
                 write!(f, "{}", proofs_str)
+            },
+            PayloadFilter::Raptr(excluded_everywhere, exclude_optimistic) => {
+                // let mut proofs_str = "".to_string();
+                // for proof in excluded_everywhere.iter() {
+                //     write!(proofs_str, "{} ", proof.digest())?;
+                // }
+                // write!(f, "{}", proofs_str)
+                // Not implemented
+                write!(
+                    f,
+                    "Raptr filter with {} batches excluded everywhere and {} \
+                   batches excluded from optimistic proposal",
+                    excluded_everywhere.len(),
+                    exclude_optimistic.len(),
+                )
             },
             PayloadFilter::Empty => {
                 write!(f, "Empty filter")

@@ -8,7 +8,10 @@ use crate::{
 };
 use aptos_consensus_types::{
     common::{Payload, PayloadFilter, ProofWithData, TxnSummaryWithExpiration},
-    payload::{OptQuorumStorePayload, PayloadExecutionLimit, RaikouPayload, SubBlocks},
+    payload::{
+        split_into_sub_blocks, OptQuorumStorePayload, PayloadExecutionLimit, RaikouPayload,
+        SubBlocks,
+    },
     proof_of_store::{BatchInfo, ProofOfStore, ProofOfStoreMsg},
     request_response::{GetPayloadCommand, GetPayloadResponse},
     utils::PayloadTxnsSize,
@@ -105,17 +108,21 @@ impl ProofManager {
     pub(crate) fn handle_proposal_request(&mut self, msg: GetPayloadCommand) {
         let GetPayloadCommand::GetPayloadRequest(request) = msg;
 
-        let excluded_batches: HashSet<_> = match request.filter {
-            PayloadFilter::Empty => HashSet::new(),
-            PayloadFilter::DirectMempool(_) => {
-                unreachable!()
-            },
-            PayloadFilter::InQuorumStore(batches) => batches,
+        // let excluded_batches: HashSet<_> = match request.filter {
+        //     PayloadFilter::Empty => HashSet::new(),
+        //     PayloadFilter::DirectMempool(_) => {
+        //         unreachable!()
+        //     },
+        //     PayloadFilter::InQuorumStore(batches) => batches,
+        // };
+
+        let PayloadFilter::Raptr(exclude_everywhere, exclude_optimistic) = request.filter else {
+            panic!("Expected PayloadFilter::Raptr, got {:?}", request.filter);
         };
 
         let (proof_block, txns_with_proof_size, cur_unique_txns, proof_queue_fully_utilized) =
             self.batch_proof_queue.pull_proofs(
-                &excluded_batches,
+                &exclude_everywhere,
                 request.max_txns,
                 request.max_txns_after_filtering,
                 request.soft_max_txns_after_filtering,
@@ -135,9 +142,10 @@ impl ProofManager {
                 let max_opt_batch_txns_after_filtering = request.max_txns_after_filtering - cur_unique_txns;
                 let (opt_batches, opt_payload_size, _) =
                     self.batch_proof_queue.pull_batches(
-                        &excluded_batches
+                        &exclude_everywhere
                             .iter()
                             .cloned()
+                            .chain(exclude_optimistic.iter().cloned())
                             .chain(proof_block.iter().map(|proof| proof.info().clone()))
                             .collect(),
                         &params.exclude_authors,
@@ -168,7 +176,7 @@ impl ProofManager {
                 ));
                 let (inline_batches, inline_payload_size, _) =
                     self.batch_proof_queue.pull_batches_with_transactions(
-                        &excluded_batches
+                        &exclude_everywhere
                             .iter()
                             .cloned()
                             .chain(proof_block.iter().map(|proof| proof.info().clone()))
@@ -192,34 +200,16 @@ impl ProofManager {
         counters::BATCH_PROOF_RATIO.observe(proof_ratio);
 
         let response = if request.maybe_optqs_payload_pull_params.is_some() {
-            let mut sub_blocks = SubBlocks::default();
-
-            fn div_ceil(dividend: usize, divisor: usize) -> usize {
-                if dividend % divisor == 0 {
-                    dividend / divisor
-                } else {
-                    dividend / divisor + 1
-                }
-            }
-
-            let num_chunks = sub_blocks.len();
-            let mut chunks_remaining = num_chunks;
-            while chunks_remaining > 0 {
-                let chunk_size = div_ceil(opt_batches.len(), chunks_remaining);
-                let remaining = opt_batches.split_off(chunk_size);
-                sub_blocks[num_chunks - chunks_remaining] = opt_batches.into();
-                opt_batches = remaining;
-
-                chunks_remaining -= 1;
-            }
-
+            let sub_blocks = split_into_sub_blocks(opt_batches);
             Payload::Raikou(RaikouPayload::new(proof_block.into(), sub_blocks))
         } else if proof_block.is_empty() && inline_block.is_empty() {
             Payload::empty(true, self.allow_batches_without_pos_in_proposal)
         } else {
             trace!(
-                "QS: GetBlockRequest excluded len {}, block len {}, inline len {}",
-                excluded_batches.len(),
+                "QS: GetBlockRequest excluded len {} (everywhere) and \
+                {} (optimistic), block len {}, inline len {}",
+                exclude_everywhere.len(),
+                exclude_optimistic.len(),
                 proof_block.len(),
                 inline_block.len()
             );

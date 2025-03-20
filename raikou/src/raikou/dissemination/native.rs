@@ -360,10 +360,11 @@ where
         self.config.module_id
     }
 
-    async fn prepare_block(
+    async fn prepare_payload(
         &self,
-        round: Round,
-        exclude: HashSet<BatchInfo>,
+        round: Option<Round>,
+        exclude_everywhere: HashSet<BatchInfo>,
+        exclude_optimistic: HashSet<BatchInfo>,
         _missing_authors: Option<BitVec>,
     ) -> Payload {
         let mut inner = self.inner.lock().await;
@@ -508,10 +509,6 @@ where
         );
         inner.execute_prefix().await;
     }
-
-    async fn set_first_committed_block_timestamp(&self, timestamp: SystemTime) {
-        self.inner.lock().await.first_committed_block_timestamp = Some(timestamp);
-    }
 }
 
 #[derive(Clone)]
@@ -577,7 +574,7 @@ pub struct NativeDisseminationLayerProtocol<TI> {
 
     // Logging and metrics
     detailed_logging: bool,
-    first_committed_block_timestamp: Option<SystemTime>,
+    logging_base_timestamp: Option<SystemTime>,
     metrics: Metrics,
     batch_send_time: BTreeMap<BatchHash, Instant>,
     batch_commit_time: BTreeMap<BatchHash, Instant>,
@@ -593,7 +590,7 @@ impl<TI> NativeDisseminationLayerProtocol<TI> {
         Some(
             self.to_deltas(
                 SystemTime::now()
-                    .duration_since(self.first_committed_block_timestamp?)
+                    .duration_since(self.logging_base_timestamp?)
                     .ok()?,
             ),
         )
@@ -658,7 +655,7 @@ where
             consensus_module_id,
             execution_queue: Default::default(),
             detailed_logging,
-            first_committed_block_timestamp: None,
+            logging_base_timestamp: None,
             metrics,
             batch_send_time: Default::default(),
             batch_commit_time: Default::default(),
@@ -1001,6 +998,13 @@ where
         upon start {
             self.log_detail("Started".to_string());
             ctx.set_timer(self.config.status_interval, TimerEvent::Status);
+        };
+
+        upon event of type [SetLoggingBaseTimestamp] from [_any_module] {
+            upon [SetLoggingBaseTimestamp(base_timestamp)] {
+                self.log_detail(format!("Setting logging base timestamp to {:?}", base_timestamp));
+                self.logging_base_timestamp = Some(base_timestamp);
+            };
         };
 
         upon event of type [Kill] from [_any_module] {

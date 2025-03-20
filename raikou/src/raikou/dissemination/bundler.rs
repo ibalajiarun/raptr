@@ -369,15 +369,14 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
         ctx.multicast(Message::Bundle(bundle)).await;
     }
 
-    fn reconstruct_block(
+    fn reconstruct_block_data(
         &self,
         round: Round,
         author: NodeId,
         bundles: Range<usize>,
         timestamp_usecs: u64,
         reason: RoundEntryReason,
-        signature: Option<Signature>,
-    ) -> anyhow::Result<Block> {
+    ) -> BlockData {
         let payloads = bundles
             .clone()
             .into_iter()
@@ -385,28 +384,11 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
 
         let payload = merge_payloads(round, author, payloads);
 
-        let block_data = BlockData {
+        BlockData {
             timestamp_usecs,
             payload,
             reason,
-        };
-
-        let digest = block_data.hash();
-
-        let signature = if let Some(signature) = signature {
-            self.sig_verifier
-                .verify(author, &BlockSignatureData { digest }, &signature)
-                .context("Error verifying block signature")?;
-            signature
-        } else {
-            self.signer.sign(&BlockSignatureData { digest })?
-        };
-
-        Ok(Block {
-            data: block_data,
-            signature,
-            digest,
-        })
+        }
     }
 
     async fn try_reconstruct(&mut self, author: Option<NodeId>, ctx: &mut impl ContextFor<Self>) {
@@ -446,27 +428,23 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
             block_header.round, block_header.author,
         ));
 
-        // TODO: add a monitor!
-        let reconstruction_result = self.reconstruct_block(
+        // TODO: add a `monitor!`
+        let block_data = self.reconstruct_block_data(
             block_header.round,
             block_header.author,
             block_header.bundles.clone(),
             block_header.timestamp_usecs,
             block_header.reason.clone(),
-            Some(block_header.signature.clone()),
         );
 
-        match reconstruction_result {
-            Ok(block) => {
-                ctx.notify(self.consensus_module_id, BlockReconstructed { block })
-                    .await;
-            },
-            Err(e) => {
-                warn!(
-                    "Error reconstructing block {} proposed by node: {:?}",
-                    block_header.round, block_header.author,
-                );
-            },
+        if block_data.hash() == block_header.digest {
+            ctx.notify(self.consensus_module_id, BlockReconstructed { block })
+                .await;
+        } else {
+            warn!(
+                "Digest mismatch for block {} proposed by node {}",
+                block_header.round, block_header.author,
+            );
         }
 
         self.reconstruction_request = None;
@@ -547,15 +525,21 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
 
                 // TODO: add a `monitor!`
 
-                let block = self.reconstruct_block(
+                let block_data = self.reconstruct_block_data(
                     round,
                     self.node_id,
                     bundles.clone(),
                     timestamp_usecs,
                     reason.clone(),
-                    None,
-                )
-                .unwrap();
+                );
+
+                let digest = block_data.hash();
+
+                let block = Block {
+                    data: block_data,
+                    signature: self.signer.sign(&BlockSignatureData { digest }).unwrap(),
+                    digest,
+                };
 
                 self.log_detail(format!(
                     "Created block {} with {} ACs and {} sub-blocks",

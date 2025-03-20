@@ -35,8 +35,33 @@ use std::{
     sync::{atomic::AtomicBool, Arc},
     time::{Duration, SystemTime},
 };
+use std::any::Any;
+use std::ops::{RangeInclusive, RangeToInclusive};
 use tokio::{sync::RwLock, time::Instant};
+use aptos_logger::warn;
+use crate::framework::module_network::ModuleEventTrait;
 use crate::framework::network::{NoopCertifier, NoopVerifier};
+
+
+
+pub struct BlockHeader {
+    pub bundles: RangeInclusive<usize>,
+    pub digest: Signature,
+}
+
+/// Event sent by the consensus module to the dissemination layer to notify of a new block.
+#[derive(Debug)]
+pub struct ReconstructBlock {
+    pub leader: NodeId,
+    pub round: Round,
+    pub payload: Payload,
+}
+
+impl ModuleEventTrait for crate::raikou::dissemination::ProposalReceived {
+    fn as_any(self: Box<Self>) -> Box<dyn Any> {
+        self
+    }
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(from = "BundleSerialization")]
@@ -86,10 +111,10 @@ pub type Certifier = NoopCertifier<Message>;
 
 pub type Verifier = NoopVerifier<Message>;
 
-
 #[derive(Clone)]
 pub enum TimerEvent {
     NewBundle(usize),
+    Status,
 }
 
 #[derive(Clone)]
@@ -99,6 +124,8 @@ pub struct Config {
     // pub f: usize,
     // pub poa_quorum: usize,
     pub delta: Duration,
+    pub bundle_window: usize,
+    pub bundle_store_window: usize,
     pub bundle_interval: Duration,
     // pub batch_fetch_interval: Duration,
     // pub batch_fetch_multiplicity: usize,
@@ -121,7 +148,7 @@ impl<DL: DisseminationLayer> Bundler<DL> {
         config: Config,
         consensus_module_id: ModuleId,
         detailed_logging: bool,
-        metrics: Metrics,
+        // metrics: Metrics,
         dissemination: DL,
     ) -> Self {
         Self {
@@ -129,9 +156,9 @@ impl<DL: DisseminationLayer> Bundler<DL> {
             inner: Arc::new(tokio::sync::Mutex::new(BundlerProtocol::new(
                 node_id,
                 config,
-                consensus_module_id
+                consensus_module_id,
                 detailed_logging,
-                metrics,
+                // metrics,
                 dissemination,
             ))),
         }
@@ -150,12 +177,16 @@ pub struct BundlerProtocol<DL> {
     dissemination: DL,
     consensus_module_id: ModuleId,
 
+    my_bundles: VecDeque<Bundle>,
+    included_poas: HashSet<BatchInfo>,
+    included_batches: HashSet<BatchInfo>,
+
     bundles: Vec<BTreeMap<usize, Bundle>>,
 
     // Logging and metrics
     detailed_logging: bool,
     first_committed_block_timestamp: Option<SystemTime>,
-    metrics: Metrics,
+    // metrics: Metrics,
 }
 
 impl<DL> BundlerProtocol<DL> {
@@ -200,154 +231,28 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
         config: Config,
         consensus_module_id: ModuleId,
         detailed_logging: bool,
-        metrics: Metrics,
+        // metrics: Metrics,
         dissemination: DL,
     ) -> Self {
+        let n_nodes = config.n_nodes;
+
         Self {
             config,
             node_id,
             consensus_module_id,
-            bundles: vec![BTreeMap::new(); config.n_nodes],
+            my_bundles: Default::default(),
+            included_poas: Default::default(),
+            included_batches: Default::default(),
+            bundles: vec![BTreeMap::new(); n_nodes],
             detailed_logging,
             first_committed_block_timestamp: None,
-            metrics,
+            // metrics,
             dissemination,
-        }
-    }
-
-    async fn on_new_batch(&mut self, batch: Batch, fetched: bool, ctx: &mut impl ContextFor<Self>) {
-        let digest = batch.digest.clone();
-        let batch_id = batch.batch_id();
-        let author = batch.author();
-
-        // NB: it may happen that the same batch is received multiple times.
-        self.batches.insert(digest.clone(), batch);
-
-        if !self.current_proposal_status.missing_batches.is_empty() {
-            self.current_proposal_status.missing_batches.remove(&digest);
-            if self.current_proposal_status.missing_batches.is_empty() {
-                ctx.notify(self.consensus_module_id, FullBlockAvailable {
-                    round: self.current_proposal_status.round,
-                })
-                .await;
-            }
-        }
-
-        if let Some(handle) = self.fetch_tasks.remove(&digest) {
-            handle.kill();
-        }
-
-        // NB: batches that are received ONLY through fetching will not be included in new blocks.
-        if !fetched {
-            self.penalty_tracker.on_new_batch(digest.clone());
-
-            ctx.unicast(
-                Message::PoAVote(
-                    batch_id,
-                    digest.clone(),
-                    dummy_signature(), // Populated in the `sign` method.
-                ),
-                author,
-            )
-            .await;
-
-            // Track the list of known uncommitted uncertified batches.
-            if !self.uncommitted_poas.contains_key(&digest)
-                && !self.committed_batches.contains(&digest)
-            {
-                self.uncommitted_uncertified_batches.insert(digest);
-            }
-        }
-    }
-
-    async fn on_new_poa(&mut self, poa: PoA, ctx: &mut impl ContextFor<Self>) {
-        if !self.batches.contains_key(&poa.info.digest) {
-            let signers = poa.signers.iter_ones().collect();
-            // We set `override_current` to `true` because a PoA typically has more
-            // signers than a QC.
-            self.fetch_batch(poa.info.digest.clone(), signers, true, ctx)
-                .await;
-        }
-
-        // Track the list of known uncommitted PoAs
-        // and the list of known uncommitted uncertified batches.
-        if !self.committed_batches.contains(&poa.info.digest) {
-            self.uncommitted_uncertified_batches
-                .remove(&poa.info.digest);
-            self.uncommitted_poas.insert(poa.info.digest.clone(), poa);
-        }
-    }
-
-    async fn fetch_batch(
-        &mut self,
-        digest: BatchHash,
-        signers: Vec<NodeId>,
-        override_current: bool,
-        ctx: &mut impl ContextFor<Self>,
-    ) {
-        if self.batches.contains_key(&digest) {
-            return;
-        }
-
-        if !override_current && self.fetch_tasks.contains_key(&digest) {
-            return;
-        }
-
-        let batch_fetch_interval = self.config.batch_fetch_interval;
-        let batch_fetch_multiplicity = self.config.batch_fetch_multiplicity;
-
-        let handle = FetchTaskHandle::new();
-
-        if let Some(old_handle) = self.fetch_tasks.insert(digest.clone(), handle.clone()) {
-            old_handle.kill();
-        }
-
-        let network_sender = ctx.new_network_sender();
-        tokio::spawn(async move {
-            while !handle.is_killed() {
-                let sample = signers
-                    .choose_multiple(&mut rand::thread_rng(), batch_fetch_multiplicity)
-                    .copied()
-                    .collect();
-
-                network_sender
-                    .send(Message::Fetch(vec![digest.clone()]), sample)
-                    .await;
-
-                tokio::time::sleep(batch_fetch_interval).await;
-            }
-        });
-    }
-
-    async fn execute_prefix(&mut self) {
-        let now = Instant::now();
-
-        while let Some(batch_digest) = self.execution_queue.front() {
-            let Some(batch) = self.batches.get(batch_digest) else {
-                break;
-            };
-
-            let batch_digest = self.execution_queue.pop_front().unwrap();
-            self.execute_tx.send(batch.clone()).await.unwrap();
-
-            if let Some(&send_time) = self.batch_send_time.get(&batch_digest) {
-                self.metrics
-                    .batch_execute_time
-                    .push((now, self.to_deltas(now - send_time)));
-            }
-
-            self.metrics.fetch_wait_time_after_commit.push((
-                now,
-                self.to_deltas(now - self.batch_commit_time[&batch_digest]),
-            ));
         }
     }
 }
 
-impl<TI> Protocol for NativeDisseminationLayerProtocol<TI>
-where
-    TI: Iterator<Item = Vec<Txn>> + Send + Sync,
-{
+impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
     type Message = Message;
     type TimerEvent = TimerEvent;
 
@@ -355,192 +260,110 @@ where
         self: self;
         ctx: ctx;
 
-        // Dissemination layer
-        // In this implementation, batches are simply sent periodically, by a timer.
-
         upon start {
             // The first batch is sent immediately.
-            ctx.set_timer(Duration::ZERO, TimerEvent::NewBatch(1));
+            ctx.set_timer(Duration::ZERO, TimerEvent::NewBundle(1));
         };
 
         // Creating and certifying batches
 
-        upon timer [TimerEvent::NewBatch(batch_id)] {
-            // Multicast a new batch
-            let batch_data = BatchData {
-                author: self.node_id,
-                batch_id,
-                txns: Arc::new(self.txns_iter.next().unwrap()),
-            };
-            let digest = batch_data.hash();
-            let signature = self.signer.sign(&BatchSignatureData { digest: digest.clone() }).unwrap();
+        upon timer [TimerEvent::NewBundle(index)] {
+            // Reset the timer.
+            ctx.set_timer(self.config.bundle_interval, TimerEvent::NewBundle(index + 1));
 
-            let batch = Batch {
-                data: batch_data,
-                digest: digest.clone(),
-                signature,
+            self.log_detail(format!("Creating bundle #{} ...", index));
+
+            if self.my_bundles.len() >= self.config.bundle_window {
+                let preempted = self.my_bundles.pop_front().unwrap();
+                self.log_detail(format!(
+                    "Preempting bundle #{} with digest {:#x}",
+                    preempted.data.index,
+                    preempted.digest,
+                ));
+
+                for poa in preempted.data.payload.poas() {
+                    self.included_poas.remove(poa.info());
+                }
+                for batch in preempted.data.payload.sub_blocks().flatten() {
+                    self.included_batches.remove(batch);
+                }
+            }
+
+
+            let payload = self.dissemination.prepare_block(
+                777,
+                // NB: these clones are unnecessary and expensive.
+                self.included_poas.clone(),
+                self.included_batches.clone(),
+                None,
+            )
+            .await;
+
+            for poa in payload.poas() {
+                let inserted = self.included_poas.insert(poa.info().clone());
+                assert!(inserted);
+            }
+
+            for batch_info in payload.sub_blocks().flatten() {
+                let inserted = self.included_batches.insert(batch_info.clone());
+                assert!(inserted);
+            }
+
+            let bundle_data = BundleData {
+                payload,
+                index,
+            };
+
+            let digest = bundle_data.hash();
+            let bundle = Bundle {
+                data: bundle_data,
+                digest,
             };
 
             self.log_detail(format!(
-                "Creating batch #{} with digest {:#x}",
-                batch_id,
+                "Created bundle #{} with digest {:#x}, {} PoAs, {} batches",
+                index,
                 digest,
+                bundle.data.payload.poas().len(),
+                bundle.data.payload.sub_blocks().map(|sub_block| sub_block.len()).sum::<usize>(),
             ));
-            ctx.multicast(Message::Batch(batch.clone())).await;
-
-            self.my_batches.write().await.insert(batch_id, digest.clone());
-            self.on_new_batch(batch, false, ctx).await;
-
-            // Reset the timer.
-            ctx.set_timer(self.config.batch_interval, TimerEvent::NewBatch(batch_id + 1));
-
-            self.batch_send_time.insert(digest, Instant::now());
+            self.my_bundles.push_back(bundle.clone());
+            ctx.multicast(Message::Bundle(bundle)).await;
         };
 
         // Upon receiving a batch, store it, reply with a BatchStored message,
         // and execute try_vote.
-        upon receive [Message::Batch(batch)] from [_any_node] {
-            // self.log_detail(format!(
-            //     "Received batch #{} from node {} with digest {:#x}",
-            //     batch.batch_id(),
-            //     batch.author(),
-            //     batch.digest,
-            // ));
+        upon receive [Message::Bundle(bundle)] from [author_id] {
+            let index = bundle.data.index;
 
-            // We call `on_new_batch` on our own batches right after we create them.
-            if batch.author() != self.node_id {
-                self.on_new_batch(batch, false, ctx).await;
+            if self.bundles[author_id].contains_key(&index) {
+                warn!("Received a duplicate bundle #{} from author {}", index, author_id);
+                return;
             }
-        };
 
-        // Upon receiving a quorum of BatchStored messages for a batch,
-        // form a PoA and broadcast it.
-        upon receive [Message::PoAVote(batch_id, batch_digest, signature)] from node [p] {
-            self.batch_stored_votes[batch_id].insert(p, signature);
+            self.log_detail(
+                format!(
+                    "Received bundle #{} with digest {:#x} from author {}",
+                    index,
+                    bundle.digest,
+                    author_id,
+                )
+            );
 
-            if self.batch_stored_votes[batch_id].len() == self.config.poa_quorum {
-                self.log_detail(format!(
-                    "Forming the PoA for batch #{} with digest {:#x}",
-                    batch_id,
-                    batch_digest,
-                ));
-
-                let mut signers = BitVec::with_num_bits(self.config.n_nodes as u16);
-                for (node, _) in self.batch_stored_votes[batch_id].iter() {
-                    signers.set(*node as u16);
-                }
-
-                let multi_signature = self.sig_verifier.aggregate_signatures(
-                    self.batch_stored_votes[batch_id].values().cloned()
-                ).unwrap();
-
-                let poa = PoA {
-                    info: self.batches[&batch_digest].get_info(),
-                    signers,
-                    multi_signature,
+            // Remove old bundles from this author.
+            loop {
+                let Some((&first_index, _)) = self.bundles[author_id].first_key_value() else {
+                    break;
                 };
 
-                ctx.multicast(Message::AvailabilityCert(poa)).await;
+                if first_index + self.config.bundle_store_window < index {
+                    self.bundles[author_id].pop_first();
+                } else {
+                    break;
+                }
             }
-        };
 
-
-        upon receive [Message::AvailabilityCert(poa)] from [_any_node] {
-            self.on_new_poa(poa, ctx).await;
-        };
-
-        upon event of type [ProposalReceived] from [_any_module] {
-            upon [ProposalReceived { leader, round, payload, .. }] {
-                for poa in payload.poas() {
-                    if !self.uncommitted_poas.contains_key(&poa.info.digest)
-                        && !self.committed_batches.contains(&poa.info.digest)
-                    {
-                        self.on_new_poa(poa.clone(), ctx).await;
-                    }
-                }
-
-                if self.config.enable_penalty_tracker {
-                    ctx.set_timer(
-                        self.config.penalty_tracker_report_delay,
-                        TimerEvent::PenaltyTrackerReport(
-                            leader,
-                            round,
-                            Instant::now(),
-                            payload.clone(),
-                        )
-                    );
-                }
-
-                let missing_batches: HashSet<_> = payload
-                    .sub_blocks()
-                    .flatten()
-                    .filter(|batch_info| !self.batches.contains_key(&batch_info.digest))
-                    .map(|batch_info| batch_info.digest.clone())
-                    .collect();
-
-                if missing_batches.is_empty() {
-                    ctx.notify(
-                        self.consensus_module_id,
-                        FullBlockAvailable { round },
-                    ).await;
-                }
-
-                self.current_proposal_status = CurrentProposalStatus {
-                    round,
-                    missing_batches,
-                }
-            };
-        };
-
-        // Penalty tracker
-
-        upon timer event [TimerEvent::PenaltyTrackerReport(leader, round, block_receive_time, payload)] {
-            let reports = self.penalty_tracker.prepare_reports(payload, block_receive_time);
-            ctx.unicast(Message::PenaltyTrackerReport(round, reports), leader).await;
-        };
-
-        upon receive [Message::PenaltyTrackerReport(round, reports)] from node [p] {
-            if self.config.enable_penalty_tracker {
-                self.penalty_tracker.register_reports(round, p, reports);
-            }
-        };
-
-        // Fetching
-
-        upon event of type [NewQCWithPayload] from [_any_module] {
-            upon [NewQCWithPayload { payload, qc }] {
-                for (idx, sub_block) in payload.sub_blocks().enumerate() {
-                    let signers: Vec<_> = qc.vote_prefixes().sub_block_signers(idx).collect();
-
-                    for batch in sub_block {
-                        if !self.batches.contains_key(&batch.digest) {
-                            self.fetch_batch(batch.digest.clone(), signers.clone(), false, ctx).await;
-                        }
-                    }
-                }
-            };
-        };
-
-        upon receive [Message::Fetch(digests)] from node [p] {
-            // If receive a Fetch message, reply with the batch if it is known.
-            let resp = digests.iter().filter_map(|digest| {
-                self.batches.get(digest).cloned()
-            }).collect();
-
-            ctx.unicast(Message::FetchResp(resp), p).await;
-        };
-
-        upon receive [Message::FetchResp(batches)] from [_any_node] {
-            // If receive a FetchResp message, store the batches.
-            for batch in batches {
-                if !self.fetch_tasks.contains_key(&batch.digest) {
-                    // Either we already received the batch or we never requested it.
-                    continue;
-                }
-
-                self.on_new_batch(batch, true, ctx).await;
-            }
-            self.execute_prefix().await;
+            self.bundles[author_id].insert(index, bundle);
         };
 
         // Logging and halting
@@ -554,42 +377,22 @@ where
             upon [Kill()] {
                 self.log_detail("Halting by Kill event".to_string());
                 ctx.halt();
-
-                for handle in self.fetch_tasks.values() {
-                    handle.kill();
-                }
             };
         };
 
         upon timer [TimerEvent::Status] {
             self.log_detail(format!(
                 "STATUS:\n\
-                \tbatches produced: {}\n\
-                \tbatches stored: {}\n\
-                \tbatches committed: {}\n\
-                \tuncommitted_poas.len(): {}\n\
-                \tuncommitted_uncertified_batches.len(): {}\n\
-                \texecution_queue.len(): {}\n\
-                \tactive fetch tasks: {}\n",
-                self.my_batches.read().await.len(),
-                self.batches.len(),
-                self.committed_batches.len(),
-                self.uncommitted_poas.len(),
-                self.uncommitted_uncertified_batches.len(),
-                self.execution_queue.len(),
-                self.fetch_tasks.len(),
+                \tlast produced bundle index: {:?}\n",
+                self.my_bundles.back().map(|bundle| bundle.data.index),
             ));
             ctx.set_timer(self.config.status_interval, TimerEvent::Status);
         };
     }
 }
 
-impl<TI> Drop for NativeDisseminationLayerProtocol<TI> {
+impl<DL> Drop for BundlerProtocol<DL> {
     fn drop(&mut self) {
         self.log_detail("Halting by Drop".to_string());
-
-        for handle in self.fetch_tasks.values() {
-            handle.kill();
-        }
     }
 }

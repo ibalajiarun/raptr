@@ -424,12 +424,29 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
             .bundles
             .clone()
             .into_iter()
-            .all(|index| self.bundles[block_header.author].contains_key(&index));
+            .filter(|index| self.bundles[block_header.author].contains_key(&index))
+            .count();
 
-        if !bundles_available {
+        if bundles_available != block_header.bundles.len() {
+            self.log_detail(format!(
+                "Missing bundles for block {} proposed by node: {:?}: {}/{}",
+                block_header.round,
+                block_header.author,
+                bundles_available,
+                block_header.bundles.len(),
+            ));
+
             return;
         }
 
+        // TODO: add a metric for how long we waited (if any).
+
+        self.log_detail(format!(
+            "Reconstructing block {} proposed by node: {:?}",
+            block_header.round, block_header.author,
+        ));
+
+        // TODO: add a monitor!
         let reconstruction_result = self.reconstruct_block(
             block_header.round,
             block_header.author,
@@ -528,6 +545,8 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
                 let to = self.my_bundles.back().unwrap().data.index;
                 let bundles = from..(to + 1);
 
+                // TODO: add a `monitor!`
+
                 let block = self.reconstruct_block(
                     round,
                     self.node_id,
@@ -538,6 +557,13 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
                 )
                 .unwrap();
 
+                self.log_detail(format!(
+                    "Created block {} with {} ACs and {} sub-blocks",
+                    round,
+                    block.poas().len(),
+                    N_SUB_BLOCKS,
+                ));
+
                 let block_header = BlockHeader {
                     round,
                     author: self.node_id,
@@ -547,13 +573,6 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
                     reason,
                     signature: block.signature,
                 };
-
-                self.log_detail(format!(
-                    "Created block {} with {} ACs and {} sub-blocks",
-                    round,
-                    block.poas().len(),
-                    N_SUB_BLOCKS,
-                ));
 
                 ctx.notify(
                     self.consensus_module_id,
@@ -567,6 +586,11 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
 
         upon event of type [ReconstructBlock] from [_consensus_module] {
             upon [ReconstructBlock { block_header }] {
+                self.log_detail(format!(
+                    "Received a request to reconstruct block {} proposed by node {}",
+                    block_header.round, block_header.author,
+                ));
+
                 self.reconstruction_request = Some(block_header);
                 self.try_reconstruct(None, ctx).await;
             };

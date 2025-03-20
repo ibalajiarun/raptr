@@ -438,6 +438,12 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
         );
 
         if block_data.hash() == block_header.digest {
+            let block = Block {
+                data: block_data,
+                signature: block_header.signature.clone(),
+                digest: block_header.digest,
+            };
+
             ctx.notify(self.consensus_module_id, BlockReconstructed { block })
                 .await;
         } else {

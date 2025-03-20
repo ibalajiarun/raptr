@@ -95,10 +95,10 @@ pub enum TimerEvent {
 #[derive(Clone)]
 pub struct Config {
     pub module_id: ModuleId,
-    // pub n_nodes: usize,
+    pub n_nodes: usize,
     // pub f: usize,
     // pub poa_quorum: usize,
-    // pub delta: Duration,
+    pub delta: Duration,
     pub bundle_interval: Duration,
     // pub batch_fetch_interval: Duration,
     // pub batch_fetch_multiplicity: usize,
@@ -115,43 +115,25 @@ pub struct Bundler<DL> {
     inner: Arc<tokio::sync::Mutex<BundlerProtocol<DL>>>,
 }
 
-impl<DL> Bundler<DL>
-where
-    TI: Iterator<Item = Vec<Txn>> + Send + Sync,
-{
+impl<DL: DisseminationLayer> Bundler<DL> {
     pub fn new(
         node_id: NodeId,
-        mut config: Config,
-        txns_iter: TI,
+        config: Config,
         consensus_module_id: ModuleId,
         detailed_logging: bool,
         metrics: Metrics,
-        signer: Signer,
-        verifier: SignatureVerifier,
-        execute_tx: tokio::sync::mpsc::Sender<Batch>,
+        dissemination: DL,
     ) -> Self {
-        if !config.enable_optimistic_dissemination && !config.enable_penalty_tracker {
-            aptos_logger::warn!(
-                "Disabling the penalty tracker because optimistic dissemination is disabled."
-            );
-            config.enable_penalty_tracker = false;
-        }
-
         Self {
             config: config.clone(),
-            inner: Arc::new(tokio::sync::Mutex::new(
-                NativeDisseminationLayerProtocol::new(
-                    node_id,
-                    config,
-                    txns_iter,
-                    consensus_module_id,
-                    detailed_logging,
-                    metrics,
-                    signer,
-                    verifier,
-                    execute_tx,
-                ),
-            )),
+            inner: Arc::new(tokio::sync::Mutex::new(BundlerProtocol::new(
+                node_id,
+                config,
+                consensus_module_id
+                detailed_logging,
+                metrics,
+                dissemination,
+            ))),
         }
     }
 
@@ -162,239 +144,21 @@ where
     }
 }
 
-impl<TI> DisseminationLayer for NativeDisseminationLayer<TI>
-where
-    TI: Iterator<Item = Vec<Txn>> + Send + Sync + 'static,
-{
-    fn module_id(&self) -> ModuleId {
-        self.config.module_id
-    }
-
-    async fn prepare_block(
-        &self,
-        round: Round,
-        exclude: HashSet<BatchInfo>,
-        _missing_authors: Option<BitVec>,
-    ) -> Payload {
-        let mut inner = self.inner.lock().await;
-
-        let mut poas: Vec<PoA> = inner
-            .uncommitted_poas
-            .iter()
-            .filter(|&(_batch_digest, poa)| !exclude.contains(poa.info()))
-            .map(|(_batch_digest, poa)| poa.clone())
-            .collect();
-
-        let limit = inner.config.block_size_limit.poa_limit();
-        if poas.len() > limit {
-            aptos_logger::warn!(
-                "Block size limit reached: {} PoAs, {} allowed",
-                poas.len(),
-                limit
-            );
-            poas.truncate(limit);
-        }
-
-        let batches = if inner.config.enable_optimistic_dissemination && poas.len() < limit {
-            let mut batches: Vec<BatchInfo> = inner
-                .uncommitted_uncertified_batches
-                .iter()
-                .map(|batch_hash| inner.batches[batch_hash].get_info())
-                .filter(|batch_info| !exclude.contains(batch_info))
-                .collect();
-
-            let limit = inner.config.block_size_limit.batch_limit(poas.len());
-            if batches.len() > limit {
-                aptos_logger::warn!(
-                    "Block size limit reached: {} batches, {} allowed",
-                    batches.len(),
-                    limit
-                );
-                batches.truncate(limit);
-            }
-
-            // If the penalty tracker is disabled, this will sort the batches
-            // by the order they were received.
-            inner.penalty_tracker.prepare_new_block(round, batches)
-        } else {
-            Default::default()
-        };
-
-        Payload::new(round, inner.node_id, poas, batches)
-    }
-
-    async fn available_prefix(&self, payload: &Payload, _cached_value: usize) -> (Prefix, BitVec) {
-        let inner = self.inner.lock().await;
-
-        let mut missing_authors = BitVec::with_num_bits(inner.config.n_nodes as u16);
-        let mut prefix = N_SUB_BLOCKS;
-
-        for (i, sub_block) in payload.sub_blocks().enumerate() {
-            for batch_info in sub_block {
-                if !inner.batches.contains_key(&batch_info.digest) {
-                    missing_authors.set(batch_info.author as u16);
-                    if prefix == N_SUB_BLOCKS {
-                        prefix = i;
-                    }
-                }
-            }
-        }
-
-        if prefix == N_SUB_BLOCKS {
-            assert!(missing_authors.all_zeros());
-        }
-
-        (prefix, missing_authors)
-    }
-
-    async fn notify_commit(&self, payloads: Vec<Payload>, _block_timestamp: u64) {
-        let mut inner = self.inner.lock().await;
-        let now = Instant::now();
-
-        for payload in &payloads {
-            for batch in payload.all() {
-                if inner.committed_batches.contains(&batch.digest) {
-                    // NB: This may happen because de-duplication is best-effort:
-                    // e.g., if the block for the parent QC is not available, we will
-                    // go ahead with an incomplete `exclude` set.
-                    aptos_logger::warn!(
-                        "Duplicate commit for batch {} (digest: {:#x})",
-                        batch.batch_id,
-                        batch.digest,
-                    );
-                    continue;
-                }
-
-                inner.committed_batches.insert(batch.digest.clone());
-                inner.uncommitted_poas.remove(&batch.digest);
-                inner.uncommitted_uncertified_batches.remove(&batch.digest);
-
-                inner.batch_commit_time.insert(batch.digest.clone(), now);
-
-                if batch.author == inner.node_id {
-                    let commit_time = inner.to_deltas(now - inner.batch_send_time[&batch.digest]);
-                    inner.metrics.batch_commit_time.push((now, commit_time));
-                }
-            }
-        }
-
-        // Metrics:
-        // Only track queueing time and penalties for the committed batches.
-        // At the moment, they are only tracked for optimistically committed batches.
-        for payload in &payloads {
-            for batch in payload.sub_blocks().flatten() {
-                if payload.author() == inner.node_id {
-                    let block_prepare_time =
-                        inner.penalty_tracker.block_prepare_time(payload.round());
-                    let batch_receive_time = inner
-                        .penalty_tracker
-                        .batch_receive_time(batch.digest.clone());
-                    let penalty = inner
-                        .penalty_tracker
-                        .block_prepare_penalty(payload.round(), batch.author);
-                    let batch_propose_delay = block_prepare_time - batch_receive_time;
-
-                    assert!(batch_propose_delay >= penalty);
-                    let queueing_time_in_deltas = inner.to_deltas(batch_propose_delay);
-                    inner
-                        .metrics
-                        .queueing_time
-                        .push((now, queueing_time_in_deltas));
-
-                    let penalty_in_deltas = inner.to_deltas(penalty);
-                    inner
-                        .metrics
-                        .penalty_wait_time
-                        .push((now, penalty_in_deltas));
-                }
-            }
-        }
-
-        inner.execution_queue.extend(
-            payloads
-                .iter()
-                .flat_map(|payload| payload.all())
-                .map(|batch_info| batch_info.digest.clone()),
-        );
-        inner.execute_prefix().await;
-    }
-
-    async fn set_first_committed_block_timestamp(&self, timestamp: SystemTime) {
-        self.inner.lock().await.first_committed_block_timestamp = Some(timestamp);
-    }
-}
-
-#[derive(Clone)]
-struct FetchTaskHandle {
-    kill: Arc<AtomicBool>,
-}
-
-impl FetchTaskHandle {
-    fn new() -> Self {
-        Self {
-            kill: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
-    fn kill(&self) {
-        self.kill.store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn is_killed(&self) -> bool {
-        self.kill.load(std::sync::atomic::Ordering::Relaxed)
-    }
-}
-
-#[derive(Default)]
-struct CurrentProposalStatus {
-    round: Round,
-    missing_batches: HashSet<BatchHash>,
-}
-
-pub struct NativeDisseminationLayerProtocol<TI> {
-    txns_iter: TI,
-    config: Config,
+pub struct BundlerProtocol<DL> {
     node_id: NodeId,
-
-    penalty_tracker: PenaltyTracker,
-
-    // Storage for all received batches.
-    batches: BTreeMap<BatchHash, Batch>,
-    // Batches currently being fetched and the flags to notify them to stop.
-    fetch_tasks: BTreeMap<BatchHash, FetchTaskHandle>,
-    // List of batches created by this node.
-    my_batches: Arc<RwLock<BTreeMap<BatchId, BatchHash>>>,
-    // Set of committed batches.
-    committed_batches: BTreeSet<BatchHash>,
-    // Set of known PoAs that are not yet committed.
-    uncommitted_poas: BTreeMap<BatchHash, PoA>,
-    // Set of known uncertified batches that are not yet committed.
-    uncommitted_uncertified_batches: BTreeSet<BatchHash>,
-
-    // The set of nodes that have stored this node's batch with the given sequence number.
-    batch_stored_votes: DefaultBTreeMap<BatchId, BTreeMap<NodeId, Signature>>,
-
-    // Tracking the missing batches in the current proposal.
-    current_proposal_status: CurrentProposalStatus,
+    config: Config,
+    dissemination: DL,
     consensus_module_id: ModuleId,
 
-    // Crypto
-    signer: Signer,
-    sig_verifier: SignatureVerifier,
-
-    // Execution
-    execute_tx: tokio::sync::mpsc::Sender<Batch>,
+    bundles: Vec<BTreeMap<usize, Bundle>>,
 
     // Logging and metrics
     detailed_logging: bool,
     first_committed_block_timestamp: Option<SystemTime>,
     metrics: Metrics,
-    batch_send_time: BTreeMap<BatchHash, Instant>,
-    batch_commit_time: BTreeMap<BatchHash, Instant>,
-    execution_queue: VecDeque<BatchHash>,
 }
 
-impl<TI> NativeDisseminationLayerProtocol<TI> {
+impl<DL> BundlerProtocol<DL> {
     fn to_deltas(&self, duration: Duration) -> f64 {
         duration.as_secs_f64() / self.config.delta.as_secs_f64()
     }
@@ -430,51 +194,24 @@ impl<TI> NativeDisseminationLayerProtocol<TI> {
     }
 }
 
-impl<TI> NativeDisseminationLayerProtocol<TI>
-where
-    TI: Iterator<Item = Vec<Txn>> + Send + Sync,
-{
+impl<DL: DisseminationLayer> BundlerProtocol<DL> {
     pub fn new(
         node_id: NodeId,
         config: Config,
-        txns_iter: TI,
         consensus_module_id: ModuleId,
         detailed_logging: bool,
         metrics: Metrics,
-        signer: Signer,
-        sig_verifier: SignatureVerifier,
-        execute_tx: tokio::sync::mpsc::Sender<Batch>,
+        dissemination: DL,
     ) -> Self {
-        let penalty_tracker_config = penalty_tracker::Config {
-            n_nodes: config.n_nodes,
-            f: config.f,
-            enable: config.enable_penalty_tracker,
-            batch_expiration_time: config.delta * 3,
-        };
-
         Self {
-            txns_iter,
             config,
             node_id,
-            penalty_tracker: PenaltyTracker::new(node_id, penalty_tracker_config, detailed_logging),
-            batches: BTreeMap::new(),
-            fetch_tasks: Default::default(),
-            my_batches: Default::default(),
-            committed_batches: BTreeSet::new(),
-            uncommitted_poas: BTreeMap::new(),
-            uncommitted_uncertified_batches: BTreeSet::new(),
-            batch_stored_votes: Default::default(),
-            current_proposal_status: Default::default(),
             consensus_module_id,
-            execution_queue: Default::default(),
+            bundles: vec![BTreeMap::new(); config.n_nodes],
             detailed_logging,
             first_committed_block_timestamp: None,
             metrics,
-            batch_send_time: Default::default(),
-            batch_commit_time: Default::default(),
-            signer,
-            sig_verifier,
-            execute_tx,
+            dissemination,
         }
     }
 

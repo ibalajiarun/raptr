@@ -702,11 +702,14 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
                 };
 
                 self.log_detail(format!(
-                    "Created block {} with {} ACs and {} sub-blocks",
+                    "Created block {} with {} bundles, {} PoAs, and {} opt batches",
                     round,
-                    block.poas().len(),
-                    N_SUB_BLOCKS,
+                    masked_bundles.len(),
+                    block.payload().poas().len(),
+                    block.payload().num_opt_batches(),
                 ));
+
+                OP_COUNTERS.observe("bundle_count", masked_bundles.len() as f64);
 
                 let block_header = BlockHeader {
                     data: Arc::new(BlockHeaderData {

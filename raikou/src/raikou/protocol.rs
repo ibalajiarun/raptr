@@ -75,7 +75,7 @@ pub enum Message {
 impl Debug for Message {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Message::Propose(block_header) => write!(f, "Propose({})", block_header.round),
+            Message::Propose(block_header) => write!(f, "Propose({})", block_header.round()),
             Message::QcVote(round, _, _, _, _) => write!(f, "QcVote({})", round),
             Message::CcVote(qc, _) => {
                 write!(f, "CcVote({})", qc.round())
@@ -116,13 +116,13 @@ impl MessageVerifier<Message> for Verifier {
     async fn verify(&self, sender: NodeId, message: &Message) -> anyhow::Result<()> {
         match message {
             Message::Propose(block_header) => monitor!("verify_propose", {
-                ensure!(block_header.round > 0, "Invalid round in Propose message");
+                ensure!(block_header.round() > 0, "Invalid round in Propose message");
                 ensure!(
-                    self.config.leader(block_header.round) == sender,
+                    self.config.leader(block_header.round()) == sender,
                     "Propose message from non-leader node"
                 );
                 ensure!(
-                    block_header.author == sender,
+                    block_header.author() == sender,
                     "Propose message from non-author"
                 );
 
@@ -130,15 +130,15 @@ impl MessageVerifier<Message> for Verifier {
                     .verify(
                         sender,
                         &BlockSignatureData {
-                            digest: block_header.digest,
+                            digest: block_header.digest(),
                         },
-                        &block_header.signature,
+                        &block_header.signature(),
                     )
                     .context("Error verifying Propose signature")?;
 
                 // TODO: verify `block_header.bundles.len()`
 
-                block_header.reason.verify(block_header.round, self)
+                block_header.reason().verify(block_header.round(), self)
             }),
             Message::QcVote(round, prefix, block_digest, signature, _) => {
                 monitor!("verify_qcvote", {
@@ -1069,9 +1069,9 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
 
         upon event of type [BlockCreated] from [_bundler_module] {
             upon [BlockCreated { header } ] {
-                observe_block(header.timestamp_usecs, "Propose");
+                observe_block(header.timestamp_usecs(), "Propose");
 
-                self.block_create_time.insert(header.round, Instant::now());
+                self.block_create_time.insert(header.round(), Instant::now());
                 ctx.multicast(Message::Propose(header)).await;
             };
         };
@@ -1082,7 +1082,7 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
         // and report missing batches to the leader.
         upon receive [Message::Propose(block_header)] from [leader] {
             // part of the message verification.
-            assert_eq!(self.config.leader(block_header.round), leader);
+            assert_eq!(self.config.leader(block_header.round()), leader);
 
             // TODO: add a check for repeated proposals.
             ctx.notify(

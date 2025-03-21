@@ -47,14 +47,71 @@ use std::{
 use tokio::{sync::RwLock, time::Instant};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockHeaderData {
+    round: Round,
+    author: NodeId,
+    timestamp_usecs: u64,
+    bundles: Range<usize>,
+    digest: HashValue,
+    reason: RoundEntryReason,
+    signature: Signature,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockHeader {
-    pub round: Round,
-    pub author: NodeId,
-    pub timestamp_usecs: u64,
-    pub bundles: Range<usize>,
-    pub digest: HashValue,
-    pub reason: RoundEntryReason,
-    pub signature: Signature,
+    data: Arc<BlockHeaderData>,
+}
+
+impl BlockHeader {
+    pub fn new(
+        round: Round,
+        author: NodeId,
+        timestamp_usecs: u64,
+        bundles: Range<usize>,
+        digest: HashValue,
+        reason: RoundEntryReason,
+        signature: Signature,
+    ) -> Self {
+        Self {
+            data: Arc::new(BlockHeaderData {
+                round,
+                author,
+                timestamp_usecs,
+                bundles,
+                digest,
+                reason,
+                signature,
+            }),
+        }
+    }
+
+    pub fn round(&self) -> Round {
+        self.data.round
+    }
+
+    pub fn author(&self) -> NodeId {
+        self.data.author
+    }
+
+    pub fn timestamp_usecs(&self) -> u64 {
+        self.data.timestamp_usecs
+    }
+
+    pub fn bundles(&self) -> &Range<usize> {
+        &self.data.bundles
+    }
+
+    pub fn digest(&self) -> HashValue {
+        self.data.digest
+    }
+
+    pub fn reason(&self) -> &RoundEntryReason {
+        &self.data.reason
+    }
+
+    pub fn signature(&self) -> &Signature {
+        &self.data.signature
+    }
 }
 
 derive_module_event!(CreateBlock);
@@ -416,19 +473,19 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
         ctx: &mut impl ContextFor<Self>,
     ) -> bool {
         let bundles_available = block_header
-            .bundles
+            .bundles()
             .clone()
             .into_iter()
-            .filter(|index| self.bundles[block_header.author].contains_key(&index))
+            .filter(|index| self.bundles[block_header.author()].contains_key(&index))
             .count();
 
-        if bundles_available != block_header.bundles.len() {
+        if bundles_available != block_header.bundles().len() {
             self.log_detail(format!(
                 "Missing bundles for block {} proposed by node: {:?}: {}/{}",
-                block_header.round,
-                block_header.author,
+                block_header.round(),
+                block_header.author(),
                 bundles_available,
-                block_header.bundles.len(),
+                block_header.bundles().len(),
             ));
 
             return false;
@@ -438,25 +495,26 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
 
         self.log_detail(format!(
             "Reconstructing block {} proposed by node: {:?}",
-            block_header.round, block_header.author,
+            block_header.round(),
+            block_header.author(),
         ));
 
         let block_data = monitor!(
             "reconstruct_block_received",
             self.reconstruct_block_data(
-                block_header.round,
-                block_header.author,
-                block_header.bundles.clone(),
-                block_header.timestamp_usecs,
-                block_header.reason.clone(),
+                block_header.round(),
+                block_header.author(),
+                block_header.bundles().clone(),
+                block_header.timestamp_usecs(),
+                block_header.reason().clone(),
             )
         );
 
-        if block_data.hash() == block_header.digest {
+        if block_data.hash() == block_header.digest() {
             let block = Block {
                 data: block_data,
-                signature: block_header.signature.clone(),
-                digest: block_header.digest,
+                signature: block_header.signature().clone(),
+                digest: block_header.digest(),
             };
 
             ctx.notify(self.consensus_module_id, BlockReconstructed { block })
@@ -466,7 +524,8 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
         } else {
             warn!(
                 "Digest mismatch for block {} proposed by node {}",
-                block_header.round, block_header.author,
+                block_header.round(),
+                block_header.author(),
             );
 
             // Still return true to remove the request.
@@ -584,13 +643,15 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
                 ));
 
                 let block_header = BlockHeader {
-                    round,
-                    author: self.node_id,
-                    timestamp_usecs,
-                    bundles,
-                    digest: block.digest,
-                    reason,
-                    signature: block.signature,
+                    data: Arc::new(BlockHeaderData {
+                        round,
+                        author: self.node_id,
+                        timestamp_usecs,
+                        bundles,
+                        digest: block.digest,
+                        reason,
+                        signature: block.signature,
+                    }),
                 };
 
                 ctx.notify(
@@ -607,11 +668,12 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
             upon [ReconstructBlock { block_header }] {
                 self.log_detail(format!(
                     "Received a request to reconstruct block {} proposed by node {}",
-                    block_header.round, block_header.author,
+                    block_header.round(),
+                    block_header.author(),
                 ));
 
-                let author = block_header.author;
-                let round = block_header.round;
+                let author = block_header.author();
+                let round = block_header.round();
 
                 assert!(!self.reconstruction_requests[author].contains_key(&round));
                 if self.reconstruction_requests[author].len() >= self.config.max_pending_requests_per_node {
@@ -623,8 +685,8 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
                     self.log_detail(format!(
                         "Preempted request to reconstruct block {} proposed by node {} \
                         after waiting for {:.3}s ({}Δ)",
-                        old_header.round,
-                        old_header.author,
+                        old_header.round(),
+                        old_header.author(),
                         elapsed.as_secs_f64(),
                         self.to_deltas(elapsed),
                     ));

@@ -364,6 +364,41 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
         }
     }
 
+    async fn on_new_bundle(
+        &mut self,
+        author: NodeId,
+        bundle: Bundle,
+        ctx: &mut impl ContextFor<Self>,
+    ) {
+        let index = bundle.data.index;
+
+        // Remove old bundles from this author.
+        loop {
+            let Some((&first_index, _)) = self.bundles[author].first_key_value() else {
+                break;
+            };
+
+            if first_index + self.config.bundle_store_window < index {
+                self.bundles[author].pop_first();
+            } else {
+                break;
+            }
+        }
+
+        self.bundles[author].insert(index, bundle);
+
+        let mut satisfied_requests = vec![];
+        for (&req_id, (block_header, ts)) in &self.reconstruction_requests[author] {
+            if self.try_reconstruct(block_header, ts, ctx).await {
+                satisfied_requests.push(req_id);
+            }
+        }
+
+        for req_id in satisfied_requests {
+            self.reconstruction_requests[author].remove(&req_id);
+        }
+    }
+
     async fn create_bundle(&mut self, ctx: &mut impl ContextFor<Self>) {
         monitor!("create_bundle", self.create_bundle_impl(ctx).await);
     }
@@ -441,6 +476,7 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
                 .sum::<usize>(),
         ));
         self.my_bundles.push_back(bundle.clone());
+        self.on_new_bundle(self.node_id, bundle.clone(), ctx).await;
         ctx.multicast(Message::Bundle(bundle)).await;
     }
 
@@ -560,12 +596,17 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
 
         // Upon receiving a batch, store it, reply with a BatchStored message,
         // and execute try_vote.
-        upon receive [Message::Bundle(bundle)] from [author] {
+        upon receive [Message::Bundle(bundle)] from [author] 'handler: {
             let index = bundle.data.index;
+
+            if author == self.node_id {
+                assert!(self.bundles[author].contains_key(&index));
+                break 'handler;
+            }
 
             if self.bundles[author].contains_key(&index) {
                 warn!("Received a duplicate bundle #{} from author {}", index, author);
-                return;
+                break 'handler;
             }
 
             self.log_detail(
@@ -577,31 +618,7 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
                 )
             );
 
-            // Remove old bundles from this author.
-            loop {
-                let Some((&first_index, _)) = self.bundles[author].first_key_value() else {
-                    break;
-                };
-
-                if first_index + self.config.bundle_store_window < index {
-                    self.bundles[author].pop_first();
-                } else {
-                    break;
-                }
-            }
-
-            self.bundles[author].insert(index, bundle);
-
-            let mut satisfied_requests = vec![];
-            for (&req_id, (block_header, ts)) in &self.reconstruction_requests[author] {
-                if self.try_reconstruct(block_header, ts, ctx).await {
-                    satisfied_requests.push(req_id);
-                }
-            }
-
-            for req_id in satisfied_requests {
-                self.reconstruction_requests[author].remove(&req_id);
-            }
+            self.on_new_bundle(author, bundle, ctx).await;
         };
 
         upon event of type [CreateBlock] from [_consensus_module] {

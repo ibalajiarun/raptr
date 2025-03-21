@@ -566,7 +566,7 @@ impl RaikouManager {
             config: consensus_config,
             payload_manager: payload_manager.clone(),
             module_id: module_network.module_id(),
-            state_sync_notifier,
+            state_sync_notifier: state_sync_notifier.clone(),
             optqs_payload_param_provider,
             index_to_address: index_to_address.clone(),
         };
@@ -652,6 +652,96 @@ impl RaikouManager {
                             Some(block_voters)
                         )
                     )
+                } else if match_event_type::<dissemination::NotifyCommit>(&event) {
+                    let event: Box<_> = event
+                        .as_any()
+                        .downcast::<dissemination::NotifyCommit>()
+                        .ok()
+                        .unwrap();
+
+                    let dissemination::NotifyCommit {
+                        payloads,
+                        block_timestamp_usecs,
+                        voters,
+                    } = *event;
+
+                    let payload_manager = payload_manager.clone();
+                    let state_sync_notifier = state_sync_notifier.clone();
+                    let self_peer = index_to_address.get(&node_id).unwrap().clone();
+
+                    tokio::spawn(async move {
+                        let _timer = RAIKOU_COMMIT_NOTIFY_TO_MEMPOOL_NOTIFY.start_timer();
+
+                        let payloads: Vec<Payload> =
+                            payloads.into_iter().map(|payload| payload.inner).collect();
+
+                        for payload in &payloads {
+                            quorum_store::counters::NUM_BATCH_PER_BLOCK
+                                .observe(payload.as_raikou_payload().num_batches() as f64);
+                            quorum_store::counters::NUM_TXNS_PER_BLOCK
+                                .observe(payload.as_raikou_payload().num_txns() as f64);
+                            for batch in payload.as_raikou_payload().get_all_batch_infos() {
+                                if batch.author == self_peer {
+                                    let batch_create_ts = Duration::from_micros(batch.expiration)
+                                        .saturating_sub(Duration::from_secs(60));
+                                    raikou::raikou::observe_block(
+                                        batch_create_ts.as_micros() as u64,
+                                        "BATCHCOMMIT",
+                                    );
+                                    raikou::raikou::observe_block(
+                                        block_timestamp_usecs,
+                                        "ORIGINCOMMIT",
+                                    );
+                                }
+                            }
+                        }
+
+                        payload_manager.notify_commit(
+                            aptos_infallible::duration_since_epoch()
+                                .saturating_sub(Duration::from_secs(1))
+                                .as_micros() as u64,
+                            payloads.clone(),
+                        );
+
+                        for payload in payloads {
+                            let num_txns = payload.as_raikou_payload().num_txns();
+
+                            let block = Block::new_for_dag(
+                                0,
+                                0,
+                                0,
+                                Vec::new(),
+                                payload,
+                                PeerId::ZERO,
+                                Vec::new(),
+                                HashValue::zero(),
+                                BitVec::with_num_bits(8),
+                                Vec::new(),
+                            );
+
+                            let payload_manager = payload_manager.clone();
+                            let state_sync_notifier = state_sync_notifier.clone();
+                            let voters = voters.clone();
+                            tokio::spawn(async move {
+                                // TODO(ibalaiarun) fix authors
+                                let txns_result = monitor!(
+                                    "raikouman_dl_nc_gt",
+                                    payload_manager.get_transactions(&block, voters).await
+                                );
+                                match  txns_result {
+                                    Ok((txns, _)) => {
+                                        assert_eq!(txns.len(), num_txns);
+                                        let txns = txns.into_par_iter().with_min_len(20).map(Transaction::UserTransaction).collect();
+                                        state_sync_notifier
+                                            .notify_new_commit(txns, Vec::new())
+                                            .await
+                                            .unwrap();
+                                    },
+                                    Err(_e) => unreachable!("Failed to get transactions for block {:?} even after waiting for the payload", block),
+                                }
+                            });
+                        }
+                    });
                 } else if match_event_type::<dissemination::SetLoggingBaseTimestamp>(&event) {
                     // No-op.
                 } else if match_event_type::<dissemination::Kill>(&event) {
@@ -1127,88 +1217,6 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
             self.payload_manager
                 .available_prefix(payload.inner.as_raikou_payload(), cached_value)
         )
-    }
-
-    async fn notify_commit(
-        &self,
-        payloads: Vec<raikou_types::Payload>,
-        block_timestamp_usecs: u64,
-        voters: Option<BitVec>,
-    ) {
-        let payload_manager = self.payload_manager.clone();
-        let state_sync_notifier = self.state_sync_notifier.clone();
-        let self_peer = *self.index_to_address.get(&self.node_id).unwrap();
-
-        tokio::spawn(async move {
-            let _timer = RAIKOU_COMMIT_NOTIFY_TO_MEMPOOL_NOTIFY.start_timer();
-
-            let payloads: Vec<Payload> =
-                payloads.into_iter().map(|payload| payload.inner).collect();
-
-            for payload in &payloads {
-                quorum_store::counters::NUM_BATCH_PER_BLOCK
-                    .observe(payload.as_raikou_payload().num_batches() as f64);
-                quorum_store::counters::NUM_TXNS_PER_BLOCK
-                    .observe(payload.as_raikou_payload().num_txns() as f64);
-                for batch in payload.as_raikou_payload().get_all_batch_infos() {
-                    if batch.author == self_peer {
-                        let batch_create_ts = Duration::from_micros(batch.expiration)
-                            .saturating_sub(Duration::from_secs(60));
-                        raikou::raikou::observe_block(
-                            batch_create_ts.as_micros() as u64,
-                            "BATCHCOMMIT",
-                        );
-                        raikou::raikou::observe_block(block_timestamp_usecs, "ORIGINCOMMIT");
-                    }
-                }
-            }
-
-            payload_manager.notify_commit(
-                aptos_infallible::duration_since_epoch()
-                    .saturating_sub(Duration::from_secs(1))
-                    .as_micros() as u64,
-                payloads.clone(),
-            );
-
-            for payload in payloads {
-                let num_txns = payload.as_raikou_payload().num_txns();
-
-                let block = Block::new_for_dag(
-                    0,
-                    0,
-                    0,
-                    Vec::new(),
-                    payload,
-                    PeerId::ZERO,
-                    Vec::new(),
-                    HashValue::zero(),
-                    BitVec::with_num_bits(8),
-                    Vec::new(),
-                );
-
-                let payload_manager = payload_manager.clone();
-                let state_sync_notifier = state_sync_notifier.clone();
-                let voters = voters.clone();
-                tokio::spawn(async move {
-                    // TODO(ibalaiarun) fix authors
-                    let txns_result = monitor!(
-                        "raikouman_dl_nc_gt",
-                        payload_manager.get_transactions(&block, voters).await
-                    );
-                    match  txns_result {
-                        Ok((txns, _)) => {
-                            assert_eq!(txns.len(), num_txns);
-                            let txns = txns.into_par_iter().with_min_len(20).map(Transaction::UserTransaction).collect();
-                            state_sync_notifier
-                                .notify_new_commit(txns, Vec::new())
-                                .await
-                                .unwrap();
-                        },
-                        Err(_e) => unreachable!("Failed to get transactions for block {:?} even after waiting for the payload", block),
-                    }
-                });
-            }
-        });
     }
 
     fn check_payload(&self, payload: &raikou::raikou::types::Payload) -> Result<(), BitVec> {

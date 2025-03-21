@@ -721,9 +721,15 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
             }
         }
 
-        self.dissemination
-            .notify_commit(payloads, ts, Some(voters))
-            .await;
+        ctx.notify(
+            self.dissemination.module_id(),
+            dissemination::NotifyCommit {
+                payloads,
+                block_timestamp_usecs: ts,
+                voters: Some(voters),
+            },
+        )
+        .await;
     }
 
     fn commit_qc_impl(&mut self, qc: QC, commit_reason: CommitReason) -> Vec<Payload> {

@@ -27,6 +27,7 @@ derive_module_event!(NewQCWithPayload);
 derive_module_event!(Kill);
 derive_module_event!(FullBlockAvailable);
 derive_module_event!(SetLoggingBaseTimestamp);
+derive_module_event!(NotifyCommit);
 
 /// Event sent by the consensus module to the dissemination layer to notify of a new block.
 #[derive(Debug)]
@@ -40,6 +41,13 @@ pub struct ProposalReceived {
 pub struct NewQCWithPayload {
     pub payload: Payload,
     pub qc: QC,
+}
+
+#[derive(Debug)]
+pub struct NotifyCommit {
+    pub payloads: Vec<Payload>,
+    pub block_timestamp_usecs: u64,
+    pub voters: Option<BitVec>,
 }
 
 /// Event sent by the consensus module to the dissemination layer to notify that it should stop.
@@ -73,13 +81,6 @@ pub trait DisseminationLayer: Send + Sync + 'static {
         payload: &Payload,
         cached_value: Prefix,
     ) -> impl Future<Output = (Prefix, BitVec)> + Send;
-
-    fn notify_commit(
-        &self,
-        payloads: Vec<Payload>,
-        block_timestamp: u64,
-        voters: Option<BitVec>,
-    ) -> impl Future<Output = ()> + Send;
 
     fn check_payload(&self, payload: &Payload) -> Result<(), BitVec> {
         Ok(())

@@ -16,8 +16,9 @@ use crate::{
     },
     metrics,
     metrics::Sender,
-    protocol,
+    monitor, protocol,
     raikou::{
+        counters::OP_COUNTERS,
         dissemination::{
             DisseminationLayer, FullBlockAvailable, Kill, Metrics, NewQCWithPayload,
             ProposalReceived, SetLoggingBaseTimestamp,
@@ -213,7 +214,7 @@ pub struct BundlerProtocol<DL> {
     included_poas: HashSet<BatchInfo>,
     included_batches: HashSet<BatchInfo>,
 
-    reconstruction_request: Option<BlockHeader>,
+    reconstruction_request: Option<(BlockHeader, Instant)>,
 
     bundles: Vec<BTreeMap<usize, Bundle>>,
 
@@ -295,6 +296,10 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
     }
 
     async fn create_bundle(&mut self, ctx: &mut impl ContextFor<Self>) {
+        monitor!("create_bundle", { self.create_bundle_impl(ctx).await })
+    }
+
+    async fn create_bundle_impl(&mut self, ctx: &mut impl ContextFor<Self>) {
         let index = if let Some(last_bundle) = self.my_bundles.back() {
             last_bundle.data.index + 1
         } else {
@@ -324,16 +329,17 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
             }
         }
 
-        let payload = self
-            .dissemination
-            .prepare_payload(
-                None,
-                // NB: these clones are unnecessary and expensive.
-                self.included_poas.clone(),
-                self.included_batches.clone(),
-                None,
-            )
-            .await;
+        let payload = monitor!("prepare_bundle", {
+            self.dissemination
+                .prepare_payload(
+                    None,
+                    // NB: these clones are unnecessary and expensive.
+                    self.included_poas.clone(),
+                    self.included_batches.clone(),
+                    None,
+                )
+                .await
+        });
 
         for poa in payload.poas() {
             let inserted = self.included_poas.insert(poa.info().clone());
@@ -392,7 +398,7 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
     }
 
     async fn try_reconstruct(&mut self, author: Option<NodeId>, ctx: &mut impl ContextFor<Self>) {
-        let Some(block_header) = &self.reconstruction_request else {
+        let Some((block_header, ts)) = &self.reconstruction_request else {
             return;
         };
 
@@ -421,20 +427,23 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
             return;
         }
 
-        // TODO: add a metric for how long we waited (if any).
+        let (block_header, ts) = self.reconstruction_request.take().unwrap();
+        OP_COUNTERS.observe_duration("bundler_wait", ts.elapsed());
 
         self.log_detail(format!(
             "Reconstructing block {} proposed by node: {:?}",
             block_header.round, block_header.author,
         ));
 
-        // TODO: add a `monitor!`
-        let block_data = self.reconstruct_block_data(
-            block_header.round,
-            block_header.author,
-            block_header.bundles.clone(),
-            block_header.timestamp_usecs,
-            block_header.reason.clone(),
+        let block_data = monitor!(
+            "reconstruct_block_received",
+            self.reconstruct_block_data(
+                block_header.round,
+                block_header.author,
+                block_header.bundles.clone(),
+                block_header.timestamp_usecs,
+                block_header.reason.clone(),
+            )
         );
 
         if block_data.hash() == block_header.digest {
@@ -452,8 +461,6 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
                 block_header.round, block_header.author,
             );
         }
-
-        self.reconstruction_request = None;
     }
 }
 
@@ -529,14 +536,15 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
                 let to = self.my_bundles.back().unwrap().data.index;
                 let bundles = from..(to + 1);
 
-                // TODO: add a `monitor!`
-
-                let block_data = self.reconstruct_block_data(
-                    round,
-                    self.node_id,
-                    bundles.clone(),
-                    timestamp_usecs,
-                    reason.clone(),
+                let block_data = monitor!(
+                    "reconstruct_block_leader",
+                    self.reconstruct_block_data(
+                        round,
+                        self.node_id,
+                        bundles.clone(),
+                        timestamp_usecs,
+                        reason.clone(),
+                    )
                 );
 
                 let digest = block_data.hash();
@@ -581,7 +589,22 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
                     block_header.round, block_header.author,
                 ));
 
-                self.reconstruction_request = Some(block_header);
+                if let Some((header, ts)) = &self.reconstruction_request {
+                    let elapsed = ts.elapsed();
+
+                    self.log_detail(format!(
+                        "Preempted a previous request to reconstruct block {} proposed by node {} \
+                        after waiting for {:.3}s ({}Δ)",
+                        header.round,
+                        header.author,
+                        elapsed.as_secs_f64(),
+                        self.to_deltas(elapsed),
+                    ));
+
+                    OP_COUNTERS.inc("reconstruction_preempted");
+                }
+
+                self.reconstruction_request = Some((block_header, Instant::now()));
                 self.try_reconstruct(None, ctx).await;
             };
         };

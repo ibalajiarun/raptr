@@ -6,6 +6,7 @@ use crate::{
     proof_of_store::{BatchInfo, ProofOfStore},
 };
 use anyhow::ensure;
+use aptos_bitvec::BitVec;
 use aptos_executor_types::ExecutorResult;
 use aptos_infallible::Mutex;
 use aptos_types::{transaction::SignedTransaction, PeerId};
@@ -492,28 +493,40 @@ impl RaikouPayload {
         }
     }
 
-    pub fn merge(payloads: &Vec<Self>) -> Self {
+    pub fn merge(payloads: &Vec<(Self, BitVec, BitVec)>) -> Self {
         let proofs = payloads
             .iter()
-            .flat_map(|payload| payload.proofs().iter())
-            .cloned()
+            .flat_map(|(payload, proofs_mask, _)| {
+                payload
+                    .proofs()
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| proofs_mask.is_set(*i as u16))
+                    .map(|(_, proof)| proof.clone())
+            })
             .collect_vec()
             .into();
 
         let n_opt_batches = payloads
             .iter()
-            .map(|payload| payload.num_sub_block_batches())
-            .sum::<usize>();
+            .map(|(_, _, batches_mask)| batches_mask.count_ones())
+            .sum::<u32>() as usize;
 
         let mut opt_batches = Vec::with_capacity(n_opt_batches);
-        for payload in payloads {
-            for sub_block in payload.sub_blocks() {
-                opt_batches.extend(sub_block.iter().cloned());
+        for (payload, _, batch_mask) in payloads {
+            for (i, batch) in payload
+                .sub_blocks()
+                .iter()
+                .flat_map(|sub_block| sub_block.iter())
+                .enumerate()
+            {
+                if batch_mask.is_set(i as u16) {
+                    opt_batches.push(batch.clone());
+                }
             }
         }
 
         let sub_blocks = split_into_sub_blocks(opt_batches);
-
         Self::new(proofs, sub_blocks)
     }
 

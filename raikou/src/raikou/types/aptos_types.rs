@@ -12,6 +12,7 @@ use crate::{
     },
 };
 use anyhow::ensure;
+use aptos_bitvec::BitVec;
 pub use aptos_consensus_types::proof_of_store::{BatchId, BatchInfo};
 use aptos_consensus_types::{payload::RaikouPayload, proof_of_store::ProofCache};
 pub use aptos_crypto::hash::HashValue;
@@ -107,11 +108,10 @@ impl Payload {
             .map(|inner| &inner.batch_summary)
     }
 
-    pub fn all(&self) -> impl Iterator<Item = &BatchInfo> {
-        self.poas()
-            .iter()
-            .map(|poa| poa.info())
-            .chain(self.sub_blocks().flatten())
+    pub fn num_opt_batches(&self) -> usize {
+        self.sub_blocks()
+            .map(|sub_block| sub_block.len())
+            .sum::<usize>()
     }
 
     pub fn verify(
@@ -148,13 +148,25 @@ impl Payload {
 pub fn merge_payloads(
     round: Round,
     author: NodeId,
-    payloads: impl IntoIterator<Item = Payload>,
+    payloads: impl IntoIterator<Item = (Payload, BitVec, BitVec)>,
 ) -> Payload {
     let inners = payloads
         .into_iter()
-        .map(|p| p.inner.as_raikou_payload().clone())
+        .map(|(payload, proof_mask, batch_mask)| {
+            (
+                payload.inner.as_raikou_payload().clone(),
+                proof_mask,
+                batch_mask,
+            )
+        })
         .collect_vec();
+
+    if inners.is_empty() {
+        return Payload::empty(round, author);
+    }
+
     let merged_inner = RaikouPayload::merge(&inners);
+
     Payload::new(
         Some(round),
         author,

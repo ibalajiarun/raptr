@@ -724,11 +724,18 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
         ctx.notify(
             self.dissemination.module_id(),
             dissemination::NotifyCommit {
-                payloads,
+                payloads: payloads.clone(),
                 block_timestamp_usecs: ts,
-                voters: Some(voters),
+                voters: Some(voters.clone()),
             },
         )
+        .await;
+
+        ctx.notify(self.bundler_module_id, dissemination::NotifyCommit {
+            payloads,
+            block_timestamp_usecs: ts,
+            voters: Some(voters),
+        })
         .await;
     }
 
@@ -1064,7 +1071,12 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
 
                 ctx.notify(
                     self.bundler_module_id,
-                    CreateBlock { round, timestamp_usecs, reason },
+                    CreateBlock {
+                        round,
+                        timestamp_usecs,
+                        reason,
+                        exclude: monitor!("uncommitted_batches", self.uncommitted_batches(&self.committed_qc)),
+                    },
                 )
                 .await;
             }

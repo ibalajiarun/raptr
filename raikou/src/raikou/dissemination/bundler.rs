@@ -20,7 +20,7 @@ use crate::{
     raikou::{
         counters::OP_COUNTERS,
         dissemination::{
-            DisseminationLayer, FullBlockAvailable, Kill, Metrics, NewQCWithPayload,
+            DisseminationLayer, FullBlockAvailable, Kill, Metrics, NewQCWithPayload, NotifyCommit,
             ProposalReceived, SetLoggingBaseTimestamp,
         },
         protocol,
@@ -51,7 +51,7 @@ pub struct BlockHeaderData {
     round: Round,
     author: NodeId,
     timestamp_usecs: u64,
-    bundles: Range<usize>,
+    masked_bundles: Vec<(usize, (BitVec, BitVec))>,
     digest: HashValue,
     reason: RoundEntryReason,
     signature: Signature,
@@ -67,7 +67,7 @@ impl BlockHeader {
         round: Round,
         author: NodeId,
         timestamp_usecs: u64,
-        bundles: Range<usize>,
+        masked_bundles: Vec<(usize, (BitVec, BitVec))>,
         digest: HashValue,
         reason: RoundEntryReason,
         signature: Signature,
@@ -77,7 +77,7 @@ impl BlockHeader {
                 round,
                 author,
                 timestamp_usecs,
-                bundles,
+                masked_bundles,
                 digest,
                 reason,
                 signature,
@@ -97,8 +97,16 @@ impl BlockHeader {
         self.data.timestamp_usecs
     }
 
-    pub fn bundles(&self) -> &Range<usize> {
-        &self.data.bundles
+    pub fn bundle_indices(&self) -> impl ExactSizeIterator<Item = usize> + '_ {
+        self.data.masked_bundles.iter().map(|(index, _)| *index)
+    }
+
+    pub fn n_bundles(&self) -> usize {
+        self.data.masked_bundles.len()
+    }
+
+    pub fn masked_bundles(&self) -> &Vec<(usize, (BitVec, BitVec))> {
+        &self.data.masked_bundles
     }
 
     pub fn digest(&self) -> HashValue {
@@ -125,6 +133,7 @@ pub struct CreateBlock {
     pub round: Round,
     pub timestamp_usecs: u64,
     pub reason: RoundEntryReason,
+    pub exclude: HashSet<BatchInfo>,
 }
 
 #[derive(Debug)]
@@ -151,6 +160,16 @@ pub struct Bundle {
 
     #[serde(skip)]
     digest: BatchHash,
+}
+
+impl Bundle {
+    pub fn payload(&self) -> &Payload {
+        &self.data.payload
+    }
+
+    pub fn index(&self) -> usize {
+        self.data.index
+    }
 }
 
 #[derive(Deserialize)]
@@ -287,6 +306,8 @@ pub struct BundlerProtocol<DL> {
 
     bundles: Vec<BTreeMap<usize, Bundle>>,
 
+    committed_batches: HashSet<BatchInfo>,
+
     // Crypto
     signer: Signer,
     // sig_verifier: SignatureVerifier,
@@ -355,6 +376,7 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
             included_batches: Default::default(),
             reconstruction_requests: vec![BTreeMap::new(); n_nodes],
             bundles: vec![BTreeMap::new(); n_nodes],
+            committed_batches: Default::default(),
             signer,
             // sig_verifier,
             detailed_logging,
@@ -467,31 +489,62 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
             "Created bundle #{} with digest {:#x}, {} PoAs, {} batches",
             index,
             digest,
-            bundle.data.payload.poas().len(),
-            bundle
-                .data
-                .payload
-                .sub_blocks()
-                .map(|sub_block| sub_block.len())
-                .sum::<usize>(),
+            bundle.payload().poas().len(),
+            bundle.payload().num_opt_batches(),
         ));
         self.my_bundles.push_back(bundle.clone());
         self.on_new_bundle(self.node_id, bundle.clone(), ctx).await;
         ctx.multicast(Message::Bundle(bundle)).await;
     }
 
+    fn select_bundles(&self, exclude: HashSet<BatchInfo>) -> Vec<(usize, (BitVec, BitVec))> {
+        let mut masked_bundles = vec![];
+
+        for bundle in &self.my_bundles {
+            let payload = &bundle.data.payload;
+
+            let mut proof_mask = BitVec::with_num_bits(payload.poas().len() as u16);
+            let mut batch_mask = BitVec::with_num_bits(payload.num_opt_batches() as u16);
+
+            for (i, poa) in payload.poas().iter().enumerate() {
+                if !exclude.contains(poa.info()) && !self.committed_batches.contains(poa.info()) {
+                    proof_mask.set(i as u16);
+                }
+            }
+
+            for (i, batch) in payload.sub_blocks().flatten().enumerate() {
+                if !exclude.contains(batch) && !self.committed_batches.contains(batch) {
+                    batch_mask.set(i as u16);
+                }
+            }
+
+            if proof_mask.count_ones() > 0 || batch_mask.count_ones() > 0 {
+                masked_bundles.push((bundle.data.index, (proof_mask, batch_mask)));
+            }
+        }
+
+        masked_bundles
+    }
+
     fn reconstruct_block_data(
         &self,
         round: Round,
         author: NodeId,
-        bundles: Range<usize>,
+        masked_bundles: Vec<(usize, (BitVec, BitVec))>,
         timestamp_usecs: u64,
         reason: RoundEntryReason,
     ) -> BlockData {
-        let payloads = bundles
-            .clone()
-            .into_iter()
-            .map(|index| self.bundles[author][&index].data.payload.clone());
+        let payloads =
+            masked_bundles
+                .clone()
+                .into_iter()
+                .map(|(index, (proof_mask, batch_mask))| {
+                    (
+                        self.bundles[author][&index].data.payload.clone(),
+                        proof_mask,
+                        batch_mask,
+                    )
+                });
 
         let payload = merge_payloads(round, author, payloads);
 
@@ -509,19 +562,17 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
         ctx: &mut impl ContextFor<Self>,
     ) -> bool {
         let bundles_available = block_header
-            .bundles()
-            .clone()
-            .into_iter()
+            .bundle_indices()
             .filter(|index| self.bundles[block_header.author()].contains_key(&index))
             .count();
 
-        if bundles_available != block_header.bundles().len() {
+        if bundles_available != block_header.n_bundles() {
             self.log_detail(format!(
                 "Missing bundles for block {} proposed by node: {:?}: {}/{}",
                 block_header.round(),
                 block_header.author(),
                 bundles_available,
-                block_header.bundles().len(),
+                block_header.n_bundles(),
             ));
 
             return false;
@@ -540,7 +591,7 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
             self.reconstruct_block_data(
                 block_header.round(),
                 block_header.author(),
-                block_header.bundles().clone(),
+                block_header.masked_bundles().clone(),
                 block_header.timestamp_usecs(),
                 block_header.reason().clone(),
             )
@@ -622,23 +673,21 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
         };
 
         upon event of type [CreateBlock] from [_consensus_module] {
-            upon [CreateBlock { round, timestamp_usecs, reason }] {
+            upon [CreateBlock { round, timestamp_usecs, reason, exclude }] {
                 assert!(!self.my_bundles.is_empty());
 
                 if self.config.push_bundle_when_proposing {
                     self.create_bundle(ctx).await;
                 }
 
-                let from = self.my_bundles.front().unwrap().data.index;
-                let to = self.my_bundles.back().unwrap().data.index;
-                let bundles = from..(to + 1);
+                let masked_bundles = monitor!("select_bundles", self.select_bundles(exclude));
 
                 let block_data = monitor!(
                     "reconstruct_block_leader",
                     self.reconstruct_block_data(
                         round,
                         self.node_id,
-                        bundles.clone(),
+                        masked_bundles.clone(),
                         timestamp_usecs,
                         reason.clone(),
                     )
@@ -664,7 +713,7 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
                         round,
                         author: self.node_id,
                         timestamp_usecs,
-                        bundles,
+                        masked_bundles,
                         digest: block.digest,
                         reason,
                         signature: block.signature,
@@ -714,6 +763,19 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
                 let ts = Instant::now();
                 if !self.try_reconstruct(&block_header, &ts, ctx).await {
                     self.reconstruction_requests[author].insert(round, (block_header, ts));
+                }
+            };
+        };
+
+        upon event of type [NotifyCommit] from [_any_module] {
+            upon [NotifyCommit { payloads, .. }] {
+                for payload in payloads {
+                    for poa in payload.poas() {
+                        self.committed_batches.insert(poa.info().clone());
+                    }
+                    for batch in payload.sub_blocks().flatten() {
+                        self.committed_batches.insert(batch.clone());
+                    }
                 }
             };
         };

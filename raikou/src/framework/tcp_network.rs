@@ -91,7 +91,7 @@ async fn send_msg_to_stream(
 impl<M, C> NetworkSender for TcpNetworkSender<M, C>
 where
     M: NetworkMessage + Serialize + for<'de> Deserialize<'de> + std::fmt::Debug,
-    C: MessageCertifier<Message = M>,
+    C: MessageCertifier<M>,
 {
     type Message = M;
 
@@ -159,8 +159,8 @@ pub struct TcpNetworkService<M, C, V> {
 impl<M, C, V> TcpNetworkService<M, C, V>
 where
     M: NetworkMessage + Serialize + for<'de> Deserialize<'de> + std::fmt::Debug,
-    C: MessageCertifier<Message = M>,
-    V: MessageVerifier<Message = M> + Send + 'static,
+    C: MessageCertifier<M>,
+    V: MessageVerifier<M> + Send + 'static,
 {
     pub async fn new(
         node_id: NodeId,
@@ -378,8 +378,8 @@ where
 impl<M, C, V> NetworkSender for TcpNetworkService<M, C, V>
 where
     M: NetworkMessage + Serialize + for<'de> Deserialize<'de> + std::fmt::Debug,
-    C: MessageCertifier<Message = M>,
-    V: MessageVerifier<Message = M>,
+    C: MessageCertifier<M>,
+    V: MessageVerifier<M>,
 {
     type Message = M;
 
@@ -395,8 +395,8 @@ where
 impl<M, C, V> NetworkService for TcpNetworkService<M, C, V>
 where
     M: NetworkMessage + Serialize + for<'de> Deserialize<'de> + std::fmt::Debug,
-    C: MessageCertifier<Message = M>,
-    V: MessageVerifier<Message = M>,
+    C: MessageCertifier<M>,
+    V: MessageVerifier<M>,
 {
     type Sender = TcpNetworkSender<M, C>;
 

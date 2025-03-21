@@ -64,7 +64,7 @@ use raikou::{
     metrics::{self, display_metric_to},
     raikou::{
         dissemination::{self, bundler, DisseminationLayer},
-        duration_since_epoch,
+        duration_since_epoch, protocol,
         types::{self as raikou_types, Prefix, Round, N_SUB_BLOCKS},
         RaikouNode,
     },
@@ -165,7 +165,7 @@ impl RaikouManager {
             N_SUB_BLOCKS + 1,
         );
 
-        let sig_verifier = raikou::framework::crypto::SignatureVerifier::new(
+        let sig_verifier = SignatureVerifier::new(
             index_to_address
                 .iter()
                 .sorted_by_key(|(&index, _)| index)
@@ -300,18 +300,19 @@ impl RaikouManager {
         )
         .await;
 
+        let verifier = protocol::Verifier::new(config.clone(), sig_verifier.clone(), proof_cache);
+
         Self::spawn_bundler(
             node_id,
             bundler_module_network,
             epoch_state.clone(),
             n_nodes,
-            index_to_address.clone(),
             todo!(), // bundler_network_sender,
             todo!(), // bundler_messages_rx,
             cons_module_id,
             delta,
             signer.clone(),
-            sig_verifier.clone(),
+            verifier.clone(),
             dissemination.clone(),
         )
         .await;
@@ -340,10 +341,7 @@ impl RaikouManager {
             messages_rx,
             network_sender,
             Arc::new(raikou::raikou::protocol::Certifier::new()),
-            Arc::new(raikou::raikou::protocol::Verifier::new(
-                raikou_node.lock().await.deref(),
-                proof_cache,
-            )),
+            Arc::new(verifier),
         )
         .await;
 
@@ -498,7 +496,6 @@ impl RaikouManager {
         bundler_module_network: ModuleNetworkService,
         epoch_state: Arc<EpochState>,
         n_nodes: usize,
-        index_to_address: HashMap<usize, Author>,
         bundler_network_sender: Arc<NetworkSender>,
         bundler_messages_rx: aptos_channels::aptos_channel::Receiver<
             PeerId,
@@ -507,7 +504,7 @@ impl RaikouManager {
         cons_module_id: ModuleId,
         delta: f64,
         signer: Signer,
-        sig_verifier: SignatureVerifier,
+        verifier: protocol::Verifier,
         dissemination: Arc<impl DisseminationLayer>,
     ) {
         let bundler_network_service = RaikouNetworkService::new(
@@ -515,7 +512,7 @@ impl RaikouManager {
             bundler_messages_rx,
             bundler_network_sender,
             Arc::new(bundler::Certifier::new()),
-            Arc::new(bundler::Verifier::new()),
+            Arc::new(verifier),
         )
         .await;
 
@@ -535,7 +532,7 @@ impl RaikouManager {
             true,
             // metrics,
             signer,
-            sig_verifier,
+            // sig_verifier,
             dissemination,
         );
 
@@ -843,7 +840,7 @@ pub struct RaikouNetworkSenderInner<M, C> {
 impl<M, C> RaikouNetworkSenderInner<M, C>
 where
     M: raikou::framework::network::NetworkMessage + Serialize + for<'de> Deserialize<'de>,
-    C: MessageCertifier<Message = M>,
+    C: MessageCertifier<M>,
 {
     async fn send_impl(&self, mut msg: M, targets: Option<Vec<Author>>) {
         let epoch = self.epoch;
@@ -905,7 +902,7 @@ impl<M, C> Clone for RaikouNetworkSender<M, C> {
 impl<M, C> raikou::framework::network::NetworkSender for RaikouNetworkSender<M, C>
 where
     M: raikou::framework::network::NetworkMessage + Serialize + for<'de> Deserialize<'de>,
-    C: MessageCertifier<Message = M>,
+    C: MessageCertifier<M>,
 {
     type Message = M;
 
@@ -931,8 +928,8 @@ pub struct RaikouNetworkService<M, C, V> {
 impl<M, C, V> RaikouNetworkService<M, C, V>
 where
     M: Serialize + for<'de> Deserialize<'de> + Send + Sync + 'static + std::fmt::Debug,
-    C: MessageCertifier<Message = M> + Send + Sync + 'static,
-    V: MessageVerifier<Message = M> + Send + 'static,
+    C: MessageCertifier<M> + Send + Sync + 'static,
+    V: MessageVerifier<M> + Send + 'static,
 {
     pub async fn new(
         epoch_state: Arc<EpochState>,
@@ -1006,8 +1003,8 @@ where
 impl<M, C, V> raikou::framework::network::NetworkSender for RaikouNetworkService<M, C, V>
 where
     M: raikou::framework::network::NetworkMessage + Serialize + for<'de> Deserialize<'de>,
-    C: MessageCertifier<Message = M>,
-    V: MessageVerifier<Message = M>,
+    C: MessageCertifier<M>,
+    V: MessageVerifier<M>,
 {
     type Message = M;
 
@@ -1027,8 +1024,8 @@ where
 impl<M, C, V> NetworkService for RaikouNetworkService<M, C, V>
 where
     M: raikou::framework::network::NetworkMessage + Serialize + for<'de> Deserialize<'de>,
-    C: MessageCertifier<Message = M>,
-    V: MessageVerifier<Message = M>,
+    C: MessageCertifier<M>,
+    V: MessageVerifier<M>,
 {
     type Sender = RaikouNetworkSender<M, C>;
 

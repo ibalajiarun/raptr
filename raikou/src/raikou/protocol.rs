@@ -93,8 +93,9 @@ impl Debug for Message {
 }
 
 // All signatures are done in-line in the protocol.
-pub type Certifier = framework::network::NoopCertifier<Message>;
+pub type Certifier = framework::network::NoopCertifier;
 
+#[derive(Clone)]
 pub struct Verifier {
     pub config: Config,
     pub sig_verifier: SignatureVerifier,
@@ -102,29 +103,42 @@ pub struct Verifier {
 }
 
 impl Verifier {
-    pub fn new<DL>(protocol: &RaikouNode<DL>, proof_cache: ProofCache) -> Self {
+    pub fn new(config: Config, sig_verifier: SignatureVerifier, proof_cache: ProofCache) -> Self {
         Verifier {
-            config: protocol.config.clone(),
-            sig_verifier: protocol.sig_verifier.clone(),
+            config,
+            sig_verifier,
             proof_cache,
         }
     }
 }
 
-impl MessageVerifier for Verifier {
-    type Message = Message;
-
-    async fn verify(&self, sender: NodeId, message: &Self::Message) -> anyhow::Result<()> {
+impl MessageVerifier<Message> for Verifier {
+    async fn verify(&self, sender: NodeId, message: &Message) -> anyhow::Result<()> {
         match message {
             Message::Propose(block_header) => monitor!("verify_propose", {
-                // TODO
+                ensure!(block_header.round > 0, "Invalid round in Propose message");
+                ensure!(
+                    self.config.leader(block_header.round) == sender,
+                    "Propose message from non-leader node"
+                );
+                ensure!(
+                    block_header.author == sender,
+                    "Propose message from non-author"
+                );
 
-                // ensure!(block.author() == sender, "Propose message from non-author");
-                //
-                // block
-                //     .verify(self)
-                //     .context("Error verifying the block in Propose message")
-                Ok(())
+                self.sig_verifier
+                    .verify(
+                        sender,
+                        &BlockSignatureData {
+                            digest: block_header.digest,
+                        },
+                        &block_header.signature,
+                    )
+                    .context("Error verifying Propose signature")?;
+
+                // TODO: verify `block_header.bundles.len()`
+
+                block_header.reason.verify(block_header.round, self)
             }),
             Message::QcVote(round, prefix, block_digest, signature, _) => {
                 monitor!("verify_qcvote", {

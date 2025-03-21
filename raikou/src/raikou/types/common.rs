@@ -137,7 +137,7 @@ impl Block {
         );
 
         self.payload()
-            .verify(verifier, self)
+            .verify(verifier, Some(self.round()), self.author())
             .context("Error verifying payload")?;
         self.reason()
             .verify(self.round(), verifier)

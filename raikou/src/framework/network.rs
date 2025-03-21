@@ -7,63 +7,44 @@ use rand::{distributions::Distribution, Rng};
 use std::{future::Future, marker::PhantomData, sync::Arc, task::Poll::Ready, time::Duration};
 use tokio::sync::mpsc;
 
-pub trait MessageVerifier: Send + Sync + 'static {
-    type Message: NetworkMessage;
-
+pub trait MessageVerifier<M>: Send + Sync + 'static {
     /// Verify the message, possibly checking signatures, certificates, etc.
     fn verify(
         &self,
         sender: NodeId,
-        message: &Self::Message,
+        message: &M,
     ) -> impl Future<Output = anyhow::Result<()>> + Send;
 }
 
-pub trait MessageCertifier: Send + Sync + 'static {
-    type Message: NetworkMessage;
-
+pub trait MessageCertifier<M>: Send + Sync + 'static {
     /// Certify the message.
-    fn certify(
-        &self,
-        message: &mut Self::Message,
-    ) -> impl Future<Output = anyhow::Result<()>> + Send;
+    fn certify(&self, message: &mut M) -> impl Future<Output = anyhow::Result<()>> + Send;
 }
 
-pub struct NoopCertifier<M> {
-    _phantom: PhantomData<M>,
-}
+pub struct NoopCertifier;
 
-impl<M> NoopCertifier<M> {
+impl NoopCertifier {
     pub fn new() -> Self {
-        NoopCertifier {
-            _phantom: PhantomData,
-        }
+        NoopCertifier {}
     }
 }
 
-impl<M: NetworkMessage> MessageCertifier for NoopCertifier<M> {
-    type Message = M;
-
-    async fn certify(&self, _message: &mut Self::Message) -> anyhow::Result<()> {
+impl<M: NetworkMessage> MessageCertifier<M> for NoopCertifier {
+    async fn certify(&self, _message: &mut M) -> anyhow::Result<()> {
         Ok(())
     }
 }
 
-pub struct NoopVerifier<M> {
-    _phantom: PhantomData<M>,
-}
+pub struct NoopVerifier;
 
-impl<M> NoopVerifier<M> {
+impl NoopVerifier {
     pub fn new() -> Self {
-        NoopVerifier {
-            _phantom: PhantomData,
-        }
+        NoopVerifier {}
     }
 }
 
-impl<M: NetworkMessage> MessageVerifier for NoopVerifier<M> {
-    type Message = M;
-
-    async fn verify(&self, _sender: NodeId, _message: &Self::Message) -> anyhow::Result<()> {
+impl<M: NetworkMessage> MessageVerifier<M> for NoopVerifier {
+    async fn verify(&self, _sender: NodeId, _message: &M) -> anyhow::Result<()> {
         Ok(())
     }
 }
@@ -138,7 +119,7 @@ impl<M, I, C> NetworkSender for InjectedLocalNetworkSender<M, I, C>
 where
     M: NetworkMessage + Clone,
     I: NetworkInjection<M>,
-    C: MessageCertifier<Message = M>,
+    C: MessageCertifier<M>,
 {
     type Message = M;
 
@@ -186,7 +167,7 @@ impl<M, I, C> NetworkSender for InjectedLocalNetworkService<M, I, C>
 where
     M: NetworkMessage + Clone,
     I: NetworkInjection<M>,
-    C: MessageCertifier<Message = M>,
+    C: MessageCertifier<M>,
 {
     type Message = M;
 
@@ -203,7 +184,7 @@ impl<M, I, C> NetworkService for InjectedLocalNetworkService<M, I, C>
 where
     M: NetworkMessage + Clone,
     I: NetworkInjection<M>,
-    C: MessageCertifier<Message = M>,
+    C: MessageCertifier<M>,
 {
     type Sender = InjectedLocalNetworkSender<M, I, C>;
 
@@ -248,7 +229,7 @@ where
         certifier: Arc<C>,
     ) -> InjectedLocalNetworkService<M, I, C>
     where
-        C: MessageCertifier<Message = M>,
+        C: MessageCertifier<M>,
     {
         InjectedLocalNetworkService {
             sender: InjectedLocalNetworkSender {

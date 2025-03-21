@@ -114,9 +114,24 @@ impl Payload {
             .chain(self.sub_blocks().flatten())
     }
 
-    pub fn verify(&self, verifier: &protocol::Verifier, block: &Block) -> anyhow::Result<()> {
-        ensure!(self.round() == block.round(), "Invalid round");
-        ensure!(self.author() == block.author(), "Invalid author");
+    pub fn verify(
+        &self,
+        verifier: &protocol::Verifier,
+        round: Option<Round>,
+        author: NodeId,
+    ) -> anyhow::Result<()> {
+        ensure!(
+            self.round == round,
+            "Invalid round. Expected: {:?}, got: {:?}",
+            round,
+            self.round
+        );
+        ensure!(
+            self.author == author,
+            "Invalid author. Expected: {:?}, got: {:?}",
+            author,
+            self.author
+        );
         ensure!(
             self.sub_blocks().len() == N_SUB_BLOCKS,
             "Received a partial payload: Sub-blocks excluded"

@@ -23,10 +23,11 @@ use crate::{
             DisseminationLayer, FullBlockAvailable, Kill, Metrics, NewQCWithPayload,
             ProposalReceived, SetLoggingBaseTimestamp,
         },
+        protocol,
         types::*,
     },
 };
-use anyhow::Context;
+use anyhow::{ensure, Context};
 use aptos_bitvec::BitVec;
 use aptos_crypto::{bls12381::Signature, hash::CryptoHash, Genesis};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
@@ -135,9 +136,19 @@ impl std::fmt::Debug for Message {
     }
 }
 
-pub type Certifier = NoopCertifier<Message>;
+pub type Certifier = NoopCertifier;
 
-pub type Verifier = NoopVerifier<Message>;
+impl MessageVerifier<Message> for protocol::Verifier {
+    async fn verify(&self, sender: NodeId, message: &Message) -> anyhow::Result<()> {
+        match message {
+            Message::Bundle(bundle) => monitor!("verify_bundle", {
+                // TODO: verify payload size.
+
+                bundle.data.payload.verify(self, None, sender)
+            }),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub enum TimerEvent {
@@ -179,7 +190,7 @@ impl<DL: DisseminationLayer> Bundler<DL> {
         detailed_logging: bool,
         // metrics: Metrics,
         signer: Signer,
-        sig_verifier: SignatureVerifier,
+        // sig_verifier: SignatureVerifier,
         dissemination: Arc<DL>,
     ) -> Self {
         Self {
@@ -191,7 +202,7 @@ impl<DL: DisseminationLayer> Bundler<DL> {
                 detailed_logging,
                 // metrics,
                 signer,
-                sig_verifier,
+                // sig_verifier,
                 dissemination,
             ))),
         }
@@ -220,7 +231,7 @@ pub struct BundlerProtocol<DL> {
 
     // Crypto
     signer: Signer,
-    sig_verifier: SignatureVerifier,
+    // sig_verifier: SignatureVerifier,
 
     // Logging and metrics
     detailed_logging: bool,
@@ -272,7 +283,7 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
         detailed_logging: bool,
         // metrics: Metrics,
         signer: Signer,
-        sig_verifier: SignatureVerifier,
+        // sig_verifier: SignatureVerifier,
         dissemination: Arc<DL>,
     ) -> Self {
         let n_nodes = config.n_nodes;
@@ -287,7 +298,7 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
             reconstruction_request: None,
             bundles: vec![BTreeMap::new(); n_nodes],
             signer,
-            sig_verifier,
+            // sig_verifier,
             detailed_logging,
             logging_base_timestamp: None,
             // metrics,
@@ -296,7 +307,7 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
     }
 
     async fn create_bundle(&mut self, ctx: &mut impl ContextFor<Self>) {
-        monitor!("create_bundle", { self.create_bundle_impl(ctx).await })
+        monitor!("create_bundle", self.create_bundle_impl(ctx).await);
     }
 
     async fn create_bundle_impl(&mut self, ctx: &mut impl ContextFor<Self>) {
@@ -398,7 +409,7 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
     }
 
     async fn try_reconstruct(&mut self, author: Option<NodeId>, ctx: &mut impl ContextFor<Self>) {
-        let Some((block_header, ts)) = &self.reconstruction_request else {
+        let Some((block_header, _ts)) = &self.reconstruction_request else {
             return;
         };
 

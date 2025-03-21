@@ -525,6 +525,7 @@ impl RaikouManager {
                 bundle_window: 10,
                 bundle_store_window: 40,
                 bundle_interval: Duration::from_millis(50),
+                max_pending_requests_per_node: 3,
                 status_interval: Duration::from_secs_f64(delta) * 10,
                 push_bundle_when_proposing: false,
             },

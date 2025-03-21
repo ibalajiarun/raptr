@@ -166,6 +166,7 @@ pub struct Config {
     pub bundle_window: usize,
     pub bundle_store_window: usize,
     pub bundle_interval: Duration,
+    pub max_pending_requests_per_node: usize,
     // pub batch_fetch_interval: Duration,
     // pub batch_fetch_multiplicity: usize,
     // pub enable_optimistic_dissemination: bool,
@@ -225,7 +226,7 @@ pub struct BundlerProtocol<DL> {
     included_poas: HashSet<BatchInfo>,
     included_batches: HashSet<BatchInfo>,
 
-    reconstruction_request: Option<(BlockHeader, Instant)>,
+    reconstruction_requests: Vec<BTreeMap<Round, (BlockHeader, Instant)>>,
 
     bundles: Vec<BTreeMap<usize, Bundle>>,
 
@@ -295,7 +296,7 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
             my_bundles: Default::default(),
             included_poas: Default::default(),
             included_batches: Default::default(),
-            reconstruction_request: None,
+            reconstruction_requests: vec![BTreeMap::new(); n_nodes],
             bundles: vec![BTreeMap::new(); n_nodes],
             signer,
             // sig_verifier,
@@ -408,17 +409,12 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
         }
     }
 
-    async fn try_reconstruct(&mut self, author: Option<NodeId>, ctx: &mut impl ContextFor<Self>) {
-        let Some((block_header, _ts)) = &self.reconstruction_request else {
-            return;
-        };
-
-        if let Some(author) = author {
-            if author != block_header.author {
-                return;
-            }
-        }
-
+    async fn try_reconstruct(
+        &self,
+        block_header: &BlockHeader,
+        request_timestamp: &Instant,
+        ctx: &mut impl ContextFor<Self>,
+    ) -> bool {
         let bundles_available = block_header
             .bundles
             .clone()
@@ -435,11 +431,10 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
                 block_header.bundles.len(),
             ));
 
-            return;
+            return false;
         }
 
-        let (block_header, ts) = self.reconstruction_request.take().unwrap();
-        OP_COUNTERS.observe_duration("bundler_wait", ts.elapsed());
+        OP_COUNTERS.observe_duration("bundler_wait", request_timestamp.elapsed());
 
         self.log_detail(format!(
             "Reconstructing block {} proposed by node: {:?}",
@@ -466,11 +461,16 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
 
             ctx.notify(self.consensus_module_id, BlockReconstructed { block })
                 .await;
+
+            true
         } else {
             warn!(
                 "Digest mismatch for block {} proposed by node {}",
                 block_header.round, block_header.author,
             );
+
+            // Still return true to remove the request.
+            true
         }
     }
 }
@@ -532,7 +532,17 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
             }
 
             self.bundles[author].insert(index, bundle);
-            self.try_reconstruct(Some(author), ctx).await;
+
+            let mut satisfied_requests = vec![];
+            for (&req_id, (block_header, ts)) in &self.reconstruction_requests[author] {
+                if self.try_reconstruct(block_header, ts, ctx).await {
+                    satisfied_requests.push(req_id);
+                }
+            }
+
+            for req_id in satisfied_requests {
+                self.reconstruction_requests[author].remove(&req_id);
+            }
         };
 
         upon event of type [CreateBlock] from [_consensus_module] {
@@ -600,14 +610,21 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
                     block_header.round, block_header.author,
                 ));
 
-                if let Some((header, ts)) = &self.reconstruction_request {
-                    let elapsed = ts.elapsed();
+                let author = block_header.author;
+                let round = block_header.round;
+
+                assert!(!self.reconstruction_requests[author].contains_key(&round));
+                if self.reconstruction_requests[author].len() >= self.config.max_pending_requests_per_node {
+                    let (_, (old_header, old_ts)) =
+                        self.reconstruction_requests[author].first_key_value().unwrap();
+
+                    let elapsed = old_ts.elapsed();
 
                     self.log_detail(format!(
-                        "Preempted a previous request to reconstruct block {} proposed by node {} \
+                        "Preempted request to reconstruct block {} proposed by node {} \
                         after waiting for {:.3}s ({}Δ)",
-                        header.round,
-                        header.author,
+                        old_header.round,
+                        old_header.author,
                         elapsed.as_secs_f64(),
                         self.to_deltas(elapsed),
                     ));
@@ -615,8 +632,10 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
                     OP_COUNTERS.inc("reconstruction_preempted");
                 }
 
-                self.reconstruction_request = Some((block_header, Instant::now()));
-                self.try_reconstruct(None, ctx).await;
+                let ts = Instant::now();
+                if !self.try_reconstruct(&block_header, &ts, ctx).await {
+                    self.reconstruction_requests[author].insert(round, (block_header, ts));
+                }
             };
         };
 

@@ -17,8 +17,8 @@ use crate::{
         dissemination::{
             penalty_tracker,
             penalty_tracker::{PenaltyTracker, PenaltyTrackerReports},
-            DisseminationLayer, FullBlockAvailable, Kill, Metrics, NewQCWithPayload,
-            ProposalReceived,
+            BlockPrepareTime, DisseminationLayer, FullBlockAvailable, Kill, Metrics,
+            NewQCWithPayload, NotifyCommit, ProposalReceived, SetLoggingBaseTimestamp,
         },
         types::*,
     },
@@ -110,7 +110,7 @@ impl Batch {
 pub enum Message {
     Batch(Batch),
     PoAVote(BatchId, BatchHash, Signature),
-    AvailabilityCert(PoA),
+    ProofOfAvailability(PoA),
     Fetch(Vec<BatchHash>),
     FetchResp(Vec<Batch>),
     PenaltyTrackerReport(Round, PenaltyTrackerReports),
@@ -121,7 +121,9 @@ impl std::fmt::Debug for Message {
         match self {
             Message::Batch(batch) => write!(f, "Batch({})", batch.batch_id()),
             Message::PoAVote(batch_id, _, _) => write!(f, "BatchStored({})", batch_id),
-            Message::AvailabilityCert(poa) => write!(f, "AvailabilityCert({})", poa.info.batch_id),
+            Message::ProofOfAvailability(poa) => {
+                write!(f, "AvailabilityCert({})", poa.info.batch_id)
+            },
             Message::Fetch(digests) => write!(f, "Fetch({} batches)", digests.len()),
             Message::FetchResp(batches) => write!(f, "FetchResp({} batches)", batches.len()),
             Message::PenaltyTrackerReport(round, reports) => {
@@ -141,10 +143,8 @@ impl Certifier {
     }
 }
 
-impl MessageCertifier for Certifier {
-    type Message = Message;
-
-    async fn certify(&self, message: &mut Self::Message) -> anyhow::Result<()> {
+impl MessageCertifier<Message> for Certifier {
+    async fn certify(&self, message: &mut Message) -> anyhow::Result<()> {
         match message {
             Message::Batch(_batch) => {},
             Message::PoAVote(_batch_id, batch_digest, signature) => {
@@ -155,7 +155,7 @@ impl MessageCertifier for Certifier {
                     })
                     .unwrap();
             },
-            Message::AvailabilityCert(_) => {},
+            Message::ProofOfAvailability(_) => {},
             Message::Fetch(_) => {},
             Message::FetchResp(_) => {},
             Message::PenaltyTrackerReport(_, _) => {},
@@ -182,10 +182,8 @@ impl Verifier {
     }
 }
 
-impl MessageVerifier for Verifier {
-    type Message = Message;
-
-    async fn verify(&self, sender: NodeId, message: &Self::Message) -> anyhow::Result<()> {
+impl MessageVerifier<Message> for Verifier {
+    async fn verify(&self, sender: NodeId, message: &Message) -> anyhow::Result<()> {
         match message {
             Message::Batch(batch) => {
                 if batch.author() != sender {
@@ -215,7 +213,7 @@ impl MessageVerifier for Verifier {
                     .context("Invalid signature in PoAVote")
             },
 
-            Message::AvailabilityCert(poa) => poa
+            Message::ProofOfAvailability(poa) => poa
                 .verify(&self.sig_verifier, self.config.poa_quorum)
                 .context("Invalid PoA"),
 
@@ -320,7 +318,11 @@ where
         verifier: SignatureVerifier,
         execute_tx: tokio::sync::mpsc::Sender<Batch>,
     ) -> Self {
-        if !config.enable_optimistic_dissemination && !config.enable_penalty_tracker {
+        if config.enable_penalty_tracker {
+            unimplemented!("Penalty tracker is broken since the introduction of bundling.");
+        }
+
+        if !config.enable_optimistic_dissemination && config.enable_penalty_tracker {
             aptos_logger::warn!(
                 "Disabling the penalty tracker because optimistic dissemination is disabled."
             );
@@ -372,7 +374,7 @@ where
         let mut poas: Vec<PoA> = inner
             .uncommitted_poas
             .iter()
-            .filter(|&(_batch_digest, poa)| !exclude.contains(poa.info()))
+            .filter(|&(_batch_digest, poa)| !exclude_everywhere.contains(poa.info()))
             .map(|(_batch_digest, poa)| poa.clone())
             .collect();
 
@@ -391,7 +393,10 @@ where
                 .uncommitted_uncertified_batches
                 .iter()
                 .map(|batch_hash| inner.batches[batch_hash].get_info())
-                .filter(|batch_info| !exclude.contains(batch_info))
+                .filter(|batch_info| {
+                    !exclude_everywhere.contains(batch_info)
+                        && !exclude_optimistic.contains(batch_info)
+                })
                 .collect();
 
             let limit = inner.config.block_size_limit.batch_limit(poas.len());
@@ -406,7 +411,7 @@ where
 
             // If the penalty tracker is disabled, this will sort the batches
             // by the order they were received.
-            inner.penalty_tracker.prepare_new_block(round, batches)
+            inner.penalty_tracker.prepare_payload(round, batches)
         } else {
             Default::default()
         };
@@ -436,78 +441,6 @@ where
         }
 
         (prefix, missing_authors)
-    }
-
-    async fn notify_commit(&self, payloads: Vec<Payload>, _block_timestamp: u64) {
-        let mut inner = self.inner.lock().await;
-        let now = Instant::now();
-
-        for payload in &payloads {
-            for batch in payload.all() {
-                if inner.committed_batches.contains(&batch.digest) {
-                    // NB: This may happen because de-duplication is best-effort:
-                    // e.g., if the block for the parent QC is not available, we will
-                    // go ahead with an incomplete `exclude` set.
-                    aptos_logger::warn!(
-                        "Duplicate commit for batch {} (digest: {:#x})",
-                        batch.batch_id,
-                        batch.digest,
-                    );
-                    continue;
-                }
-
-                inner.committed_batches.insert(batch.digest.clone());
-                inner.uncommitted_poas.remove(&batch.digest);
-                inner.uncommitted_uncertified_batches.remove(&batch.digest);
-
-                inner.batch_commit_time.insert(batch.digest.clone(), now);
-
-                if batch.author == inner.node_id {
-                    let commit_time = inner.to_deltas(now - inner.batch_send_time[&batch.digest]);
-                    inner.metrics.batch_commit_time.push((now, commit_time));
-                }
-            }
-        }
-
-        // Metrics:
-        // Only track queueing time and penalties for the committed batches.
-        // At the moment, they are only tracked for optimistically committed batches.
-        for payload in &payloads {
-            for batch in payload.sub_blocks().flatten() {
-                if payload.author() == inner.node_id {
-                    let block_prepare_time =
-                        inner.penalty_tracker.block_prepare_time(payload.round());
-                    let batch_receive_time = inner
-                        .penalty_tracker
-                        .batch_receive_time(batch.digest.clone());
-                    let penalty = inner
-                        .penalty_tracker
-                        .block_prepare_penalty(payload.round(), batch.author);
-                    let batch_propose_delay = block_prepare_time - batch_receive_time;
-
-                    assert!(batch_propose_delay >= penalty);
-                    let queueing_time_in_deltas = inner.to_deltas(batch_propose_delay);
-                    inner
-                        .metrics
-                        .queueing_time
-                        .push((now, queueing_time_in_deltas));
-
-                    let penalty_in_deltas = inner.to_deltas(penalty);
-                    inner
-                        .metrics
-                        .penalty_wait_time
-                        .push((now, penalty_in_deltas));
-                }
-            }
-        }
-
-        inner.execution_queue.extend(
-            payloads
-                .iter()
-                .flat_map(|payload| payload.all())
-                .map(|batch_info| batch_info.digest.clone()),
-        );
-        inner.execute_prefix().await;
     }
 }
 
@@ -577,6 +510,7 @@ pub struct NativeDisseminationLayerProtocol<TI> {
     logging_base_timestamp: Option<SystemTime>,
     metrics: Metrics,
     batch_send_time: BTreeMap<BatchHash, Instant>,
+    block_prepare_time: BTreeMap<Round, Instant>,
     batch_commit_time: BTreeMap<BatchHash, Instant>,
     execution_queue: VecDeque<BatchHash>,
 }
@@ -658,6 +592,7 @@ where
             logging_base_timestamp: None,
             metrics,
             batch_send_time: Default::default(),
+            block_prepare_time: Default::default(),
             batch_commit_time: Default::default(),
             signer,
             sig_verifier,
@@ -890,13 +825,18 @@ where
                     multi_signature,
                 };
 
-                ctx.multicast(Message::AvailabilityCert(poa)).await;
+                ctx.multicast(Message::ProofOfAvailability(poa)).await;
             }
         };
 
-
-        upon receive [Message::AvailabilityCert(poa)] from [_any_node] {
+        upon receive [Message::ProofOfAvailability(poa)] from [_any_node] {
             self.on_new_poa(poa, ctx).await;
+        };
+
+        upon event of type [BlockPrepareTime] from [_any_module] {
+            upon [BlockPrepareTime { round, time }] {
+                self.block_prepare_time.insert(round, time);
+            };
         };
 
         upon event of type [ProposalReceived] from [_any_module] {
@@ -939,6 +879,79 @@ where
                     round,
                     missing_batches,
                 }
+            };
+        };
+
+        upon event of type [NotifyCommit] from [_consensus_module] {
+            upon [NotifyCommit { payloads, .. }] {
+                let now = Instant::now();
+
+                for payload in &payloads {
+                    for batch in payload.all() {
+                        if self.committed_batches.contains(&batch.digest) {
+                            // NB: This may happen because de-duplication is best-effort:
+                            // e.g., if the block for the parent QC is not available, we will
+                            // go ahead with an incomplete `exclude` set.
+                            aptos_logger::warn!(
+                                "Duplicate commit for batch {} (digest: {:#x})",
+                                batch.batch_id,
+                                batch.digest,
+                            );
+                            continue;
+                        }
+
+                        self.committed_batches.insert(batch.digest.clone());
+                        self.uncommitted_poas.remove(&batch.digest);
+                        self.uncommitted_uncertified_batches.remove(&batch.digest);
+
+                        self.batch_commit_time.insert(batch.digest.clone(), now);
+
+                        if batch.author == self.node_id {
+                            let commit_time = self.to_deltas(now - self.batch_send_time[&batch.digest]);
+                            self.metrics.batch_commit_time.push((now, commit_time));
+                        }
+                    }
+                }
+
+                // Metrics:
+                // Only track queueing time and penalties for the committed batches.
+                // At the moment, they are only tracked for optimistically committed batches.
+                for payload in &payloads {
+                    for batch in payload.sub_blocks().flatten() {
+                        if payload.author() == self.node_id {
+                            let block_prepare_time =
+                                self.block_prepare_time[&payload.round()];
+                            let batch_receive_time = self
+                                .penalty_tracker
+                                .batch_receive_time(batch.digest.clone());
+                            let penalty = self
+                                .penalty_tracker
+                                .block_prepare_penalty(payload.round(), batch.author);
+                            let batch_propose_delay = block_prepare_time - batch_receive_time;
+
+                            assert!(batch_propose_delay >= penalty);
+                            let queueing_time_in_deltas = self.to_deltas(batch_propose_delay);
+                            self
+                                .metrics
+                                .queueing_time
+                                .push((now, queueing_time_in_deltas));
+
+                            let penalty_in_deltas = self.to_deltas(penalty);
+                            self
+                                .metrics
+                                .penalty_wait_time
+                                .push((now, penalty_in_deltas));
+                        }
+                    }
+                }
+
+                self.execution_queue.extend(
+                    payloads
+                        .iter()
+                        .flat_map(|payload| payload.all())
+                        .map(|batch_info| batch_info.digest.clone()),
+                );
+                self.execute_prefix().await;
             };
         };
 

@@ -17,7 +17,10 @@ use crate::{
     raikou,
     raikou::{
         dissemination,
-        dissemination::native::{Batch, NativeDisseminationLayer},
+        dissemination::{
+            bundler,
+            native::{Batch, NativeDisseminationLayer},
+        },
         types::N_SUB_BLOCKS,
         RaikouNode,
     },
@@ -646,6 +649,8 @@ async fn test_raikou(
 
     let mut diss_network =
         InjectedLocalNetwork::new(n_nodes, network_injection(delay_function.clone()));
+    let mut bundler_network =
+        InjectedLocalNetwork::new(n_nodes, network_injection(delay_function.clone()));
     let mut network = InjectedLocalNetwork::new(n_nodes, network_injection(delay_function));
 
     let f = (n_nodes - 1) / 3;
@@ -719,6 +724,8 @@ async fn test_raikou(
             node_id,
             Arc::new(dissemination::native::Certifier::new(signer.clone())),
         );
+        let mut bundler_network_service =
+            bundler_network.service(node_id, Arc::new(bundler::Certifier::new()));
         let mut network_service =
             network.service(node_id, Arc::new(raikou::protocol::Certifier::new()));
 
@@ -726,6 +733,7 @@ async fn test_raikou(
 
         // introduce artificial clock skew.
         let diss_timer = InjectedTimerService::local(clock_skew_injection(clock_speed));
+        let bundler_timer = InjectedTimerService::local(clock_skew_injection(clock_speed));
         let timer = InjectedTimerService::local(clock_skew_injection(clock_speed));
 
         // let propose_time_sender = Some(propose_time.new_sender());
@@ -760,12 +768,19 @@ async fn test_raikou(
             // Before starting the node, "drop" all messages sent to it during the spawn delay.
             network_service.clear_inbox().await;
             diss_network_service.clear_inbox().await;
+            bundler_network_service.clear_inbox().await;
 
             let txns_iter = iter::repeat_with(|| vec![]);
 
             let mut module_network = ModuleNetwork::new();
+
             let diss_module_network = module_network.register().await;
+            let bundler_module_network = module_network.register().await;
             let cons_module_network = module_network.register().await;
+
+            let bundler_module_id = bundler_module_network.module_id();
+            let diss_module_id = diss_module_network.module_id();
+            let cons_module_id = cons_module_network.module_id();
 
             let (execute_tx, mut execute_rx) = tokio::sync::mpsc::channel::<Batch>(1024);
 
@@ -778,21 +793,21 @@ async fn test_raikou(
                 }
             });
 
-            let batch_interval_secs = delta * 0.1;
+            let batch_interval_secs = delta * 1.0;
             let expected_load =
                 f64::ceil(n_nodes as f64 * (3. * delta) / batch_interval_secs) as usize;
 
-            let dissemination = NativeDisseminationLayer::new(
+            let dissemination = Arc::new(NativeDisseminationLayer::new(
                 node_id,
                 dissemination::native::Config {
-                    module_id: diss_module_network.module_id(),
+                    module_id: diss_module_id,
                     n_nodes,
                     f,
                     poa_quorum,
                     delta: Duration::from_secs_f64(delta),
                     batch_interval: Duration::from_secs_f64(batch_interval_secs),
                     enable_optimistic_dissemination,
-                    enable_penalty_tracker: true,
+                    enable_penalty_tracker: false,
                     penalty_tracker_report_delay: Duration::from_secs_f64(delta * 5.),
                     batch_fetch_multiplicity: std::cmp::min(2, n_nodes),
                     batch_fetch_interval: Duration::from_secs_f64(delta) * 2,
@@ -804,7 +819,7 @@ async fn test_raikou(
                         ),
                 },
                 txns_iter,
-                cons_module_network.module_id(),
+                cons_module_id,
                 node_id == monitored_node,
                 dissemination::Metrics {
                     batch_commit_time: batch_commit_time_sender,
@@ -816,6 +831,27 @@ async fn test_raikou(
                 signer.clone(),
                 sig_verifier.clone(),
                 execute_tx,
+            ));
+
+            let bundler = bundler::Bundler::new(
+                node_id,
+                bundler::Config {
+                    module_id: bundler_module_id,
+                    n_nodes,
+                    delta: Duration::from_secs_f64(delta),
+                    bundle_window: 10,
+                    bundle_store_window: 40,
+                    bundle_interval: Duration::from_secs_f64(delta * 0.5),
+                    max_pending_requests_per_node: 3,
+                    status_interval: Duration::from_secs_f64(delta) * 10,
+                    push_bundle_when_proposing: false,
+                },
+                cons_module_id,
+                true,
+                // metrics,
+                signer.clone(),
+                // sig_verifier,
+                dissemination.clone(),
             );
 
             // println!("Spawning node {node_id}");
@@ -823,6 +859,7 @@ async fn test_raikou(
                 node_id,
                 config,
                 dissemination.clone(),
+                bundler_module_id,
                 node_id == monitored_node,
                 raikou::Metrics {
                     block_consensus_latency: block_consensus_latency_sender,
@@ -844,6 +881,14 @@ async fn test_raikou(
                 diss_network_service,
                 diss_module_network,
                 diss_timer,
+            ));
+
+            tokio::spawn(Protocol::run(
+                bundler.protocol(),
+                node_id,
+                bundler_network_service,
+                bundler_module_network,
+                bundler_timer,
             ));
 
             Protocol::run(node, node_id, network_service, cons_module_network, timer).await;

@@ -20,8 +20,8 @@ use crate::{
     raikou::{
         counters::OP_COUNTERS,
         dissemination::{
-            DisseminationLayer, FullBlockAvailable, Kill, Metrics, NewQCWithPayload, NotifyCommit,
-            ProposalReceived, SetLoggingBaseTimestamp,
+            BlockPrepareTime, DisseminationLayer, FullBlockAvailable, Kill, Metrics,
+            NewQCWithPayload, NotifyCommit, ProposalReceived, SetLoggingBaseTimestamp,
         },
         protocol,
         types::*,
@@ -679,6 +679,15 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
                 if self.config.push_bundle_when_proposing {
                     self.create_bundle(ctx).await;
                 }
+
+                ctx.notify(
+                    self.dissemination.module_id(),
+                    BlockPrepareTime {
+                        round,
+                        time: Instant::now(),
+                    },
+                )
+                .await;
 
                 let masked_bundles = monitor!("select_bundles", self.select_bundles(exclude));
 

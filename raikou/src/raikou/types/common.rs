@@ -11,7 +11,8 @@ use crate::{
 use anyhow::{ensure, Context};
 use aptos_bitvec::BitVec;
 use aptos_consensus_types::round_timeout::RoundTimeoutReason;
-use aptos_crypto::{bls12381::Signature, hash::CryptoHash, HashValue};
+pub use aptos_crypto::hash::HashValue;
+use aptos_crypto::{bls12381::Signature, hash::CryptoHash};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};

@@ -15,7 +15,6 @@ use anyhow::ensure;
 use aptos_bitvec::BitVec;
 pub use aptos_consensus_types::proof_of_store::{BatchId, BatchInfo};
 use aptos_consensus_types::{payload::RaikouPayload, proof_of_store::ProofCache};
-pub use aptos_crypto::hash::HashValue;
 use aptos_crypto::hash::{CryptoHash, CryptoHasher};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
 use aptos_types::validator_verifier::ValidatorVerifier;

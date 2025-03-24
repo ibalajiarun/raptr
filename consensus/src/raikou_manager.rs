@@ -746,6 +746,8 @@ impl RaikouManager {
                     // No-op.
                 } else if match_event_type::<dissemination::Kill>(&event) {
                     break;
+                } else if match_event_type::<dissemination::BlockPrepareTime>(&event) {
+                    todo!();
                 } else {
                     panic!("Unhandled module event: {}", event.debug_string());
                 }

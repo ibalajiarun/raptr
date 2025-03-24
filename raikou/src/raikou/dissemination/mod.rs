@@ -28,6 +28,14 @@ derive_module_event!(Kill);
 derive_module_event!(FullBlockAvailable);
 derive_module_event!(SetLoggingBaseTimestamp);
 derive_module_event!(NotifyCommit);
+derive_module_event!(BlockPrepareTime);
+
+/// Event sent from the bundler to the dissemination layer for metrics tracking.
+#[derive(Debug)]
+pub struct BlockPrepareTime {
+    pub round: Round,
+    pub time: Instant,
+}
 
 /// Event sent by the consensus module to the dissemination layer to notify of a new block.
 #[derive(Debug)]

@@ -88,7 +88,6 @@ pub struct PenaltyTracker {
     last_selected_quorum: Vec<NodeId>,
 
     // For metrics
-    block_prepare_time: BTreeMap<Round, Instant>,
     block_prepare_penalties: BTreeMap<Round, NodeIdMap<Duration>>,
 }
 
@@ -108,13 +107,8 @@ impl PenaltyTracker {
             block_issue_time: Instant::now(),
             reports: Default::default(),
             last_selected_quorum: vec![],
-            block_prepare_time: Default::default(),
             block_prepare_penalties: Default::default(),
         }
-    }
-
-    pub fn block_prepare_time(&self, round: Round) -> Instant {
-        self.block_prepare_time[&round]
     }
 
     pub fn block_prepare_penalty(&self, round: Round, node_id: NodeId) -> Duration {
@@ -423,13 +417,12 @@ impl PenaltyTracker {
         sub_blocks
     }
 
-    pub fn prepare_new_block(
+    pub fn prepare_payload(
         &mut self,
-        round: Round,
+        round: Option<Round>,
         batches: Vec<BatchInfo>,
     ) -> [Vec<BatchInfo>; N_SUB_BLOCKS] {
         if !self.config.enable {
-            self.block_prepare_time.insert(round, Instant::now());
             let now = Instant::now();
 
             let batches = batches
@@ -444,49 +437,50 @@ impl PenaltyTracker {
             return self.split_to_sub_blocks(batches);
         }
 
-        // `compute_new_penalties` must be called before any parts of the state are updated.
-        let new_penalties = self.compute_new_penalties();
+        unimplemented!("Penalty tracker is broken since the introduction of bundling.");
 
-        if self.last_round_this_node_was_leader != -1 {
-            self.log_detail(format!(
-                "New penalties after round {}: {:?}",
-                self.last_round_this_node_was_leader, new_penalties
-            ));
-        }
-
-        let now = Instant::now();
-        self.block_prepare_time.insert(round, now);
-
-        self.block_prepare_penalties
-            .insert(round, new_penalties.clone());
-        let batches_to_propose: Vec<BatchInfo> = batches
-            .into_iter()
-            .filter(|batch_info| {
-                (now - self.batch_receive_time[&batch_info.digest])
-                    < self.config.batch_expiration_time
-            })
-            .map(|batch_info| {
-                let receive_time = self.batch_receive_time[&batch_info.digest];
-                let safe_propose_time = receive_time + new_penalties[batch_info.author];
-                (safe_propose_time, batch_info)
-            })
-            .filter(|&(safe_propose_time, _)| safe_propose_time <= now)
-            .sorted_by_key(|(safe_propose_time, _)| *safe_propose_time)
-            .map(|(_, batch_info)| batch_info)
-            .collect_vec();
-
-        self.penalties = new_penalties;
-
-        self.last_round_this_node_was_leader = round;
-        self.block_issue_time = now;
-        self.proposed_batches = batches_to_propose.clone();
-        self.batch_authors = batches_to_propose
-            .iter()
-            .map(|batch_info| batch_info.author)
-            .collect();
-        self.reports.clear();
-
-        self.split_to_sub_blocks(batches_to_propose)
+        // // `compute_new_penalties` must be called before any parts of the state are updated.
+        // let new_penalties = self.compute_new_penalties();
+        //
+        // if self.last_round_this_node_was_leader != -1 {
+        //     self.log_detail(format!(
+        //         "New penalties after round {}: {:?}",
+        //         self.last_round_this_node_was_leader, new_penalties
+        //     ));
+        // }
+        //
+        // let now = Instant::now();
+        //
+        // self.block_prepare_penalties
+        //     .insert(round, new_penalties.clone());
+        // let batches_to_propose: Vec<BatchInfo> = batches
+        //     .into_iter()
+        //     .filter(|batch_info| {
+        //         (now - self.batch_receive_time[&batch_info.digest])
+        //             < self.config.batch_expiration_time
+        //     })
+        //     .map(|batch_info| {
+        //         let receive_time = self.batch_receive_time[&batch_info.digest];
+        //         let safe_propose_time = receive_time + new_penalties[batch_info.author];
+        //         (safe_propose_time, batch_info)
+        //     })
+        //     .filter(|&(safe_propose_time, _)| safe_propose_time <= now)
+        //     .sorted_by_key(|(safe_propose_time, _)| *safe_propose_time)
+        //     .map(|(_, batch_info)| batch_info)
+        //     .collect_vec();
+        //
+        // self.penalties = new_penalties;
+        //
+        // self.last_round_this_node_was_leader = round;
+        // self.block_issue_time = now;
+        // self.proposed_batches = batches_to_propose.clone();
+        // self.batch_authors = batches_to_propose
+        //     .iter()
+        //     .map(|batch_info| batch_info.author)
+        //     .collect();
+        // self.reports.clear();
+        //
+        // self.split_to_sub_blocks(batches_to_propose)
     }
 
     fn log_info(&self, msg: String) {

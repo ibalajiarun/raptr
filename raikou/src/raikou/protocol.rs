@@ -1074,8 +1074,11 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
                     CreateBlock {
                         round,
                         timestamp_usecs,
+                        exclude: monitor!(
+                            "uncommitted_batches",
+                            self.uncommitted_batches(&reason.qc())
+                        ),
                         reason,
-                        exclude: monitor!("uncommitted_batches", self.uncommitted_batches(&self.committed_qc)),
                     },
                 )
                 .await;
@@ -1519,6 +1522,7 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
         upon timer [TimerEvent::EndOfRun] {
             self.log_detail("Halting by end-of-run timer".to_string());
             ctx.notify(self.dissemination.module_id(), Kill()).await;
+            ctx.notify(self.bundler_module_id, Kill()).await;
             ctx.halt();
         };
 
@@ -1526,6 +1530,7 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
             upon [Kill()] {
                 self.log_detail("Halting by Kill event".to_string());
                 ctx.notify(self.dissemination.module_id(), Kill()).await;
+                ctx.notify(self.bundler_module_id, Kill()).await;
                 ctx.halt();
             };
         };

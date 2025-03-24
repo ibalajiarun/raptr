@@ -327,15 +327,13 @@ impl RaikouManager {
 
         let network_service = TcpNetworkService::new(
             node_id,
-            format!("0.0.0.0:{}", CONS_BASE_PORT + node_id as u16)
-                .parse()
-                .unwrap(),
+            format!("0.0.0.0:{}", "12002").parse().unwrap(),
             raikou::framework::tcp_network::Config {
                 peers: ip_addresses
                     .iter()
                     .enumerate()
                     .map(|(peer_id, addr)| {
-                        format!("{}:{}", addr, CONS_BASE_PORT + peer_id as u16)
+                        format!("{}:{}", addr, 32008 + (10 * peer_id as u16))
                             .parse()
                             .unwrap()
                     })

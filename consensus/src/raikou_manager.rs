@@ -593,7 +593,7 @@ impl RaikouManager {
                         round,
                         exclude_everywhere,
                         exclude_optimistic,
-                        exclude_authors
+                        exclude_authors,
                     } = *event;
 
                     // let mut optqs_params = self.optqs_payload_param_provider.get_params();
@@ -621,7 +621,9 @@ impl RaikouManager {
                         let (_, payload) = payload_client
                             .pull_payload(
                                 PayloadPullParameters {
-                                    max_poll_time: Duration::from_millis(config.quorum_store_poll_time_ms),
+                                    max_poll_time: Duration::from_millis(
+                                        config.quorum_store_poll_time_ms,
+                                    ),
                                     max_txns: PayloadTxnsSize::new(
                                         config.max_sending_block_txns,
                                         config.max_sending_block_bytes,
@@ -632,7 +634,10 @@ impl RaikouManager {
                                         config.max_sending_inline_txns,
                                         config.max_sending_inline_bytes,
                                     ),
-                                    user_txn_filter: PayloadFilter::Raptr(exclude_everywhere, exclude_optimistic),
+                                    user_txn_filter: PayloadFilter::Raptr(
+                                        exclude_everywhere,
+                                        exclude_optimistic,
+                                    ),
                                     pending_ordering: true,
                                     pending_uncommitted_blocks: 0,
                                     recent_max_fill_fraction: 0.0,
@@ -675,9 +680,7 @@ impl RaikouManager {
                         if prefix == N_SUB_BLOCKS {
                             info!("Full prefix available {}/{}", prefix, N_SUB_BLOCKS);
                             module_network_sender
-                                .notify(module, dissemination::FullBlockAvailable {
-                                    round,
-                                })
+                                .notify(module, dissemination::FullBlockAvailable { round })
                                 .await;
                         } else {
                             info!("Partial prefix available {}/{}", prefix, N_SUB_BLOCKS);
@@ -696,9 +699,7 @@ impl RaikouManager {
                                     .await
                             ) {
                                 module_network_sender
-                                    .notify(module, dissemination::FullBlockAvailable {
-                                        round,
-                                    })
+                                    .notify(module, dissemination::FullBlockAvailable { round })
                                     .await;
                             }
                         }

@@ -345,6 +345,7 @@ pub fn setup_networks_and_get_interfaces(
             if consensus_network_handle.is_some()
                 && consensus_network_handle2.is_some()
                 && consensus_network_handle3.is_some()
+                && consensus_network_handle4.is_some()
             {
                 panic!("There can be at most two validator network!");
             } else {

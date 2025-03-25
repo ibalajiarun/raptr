@@ -19,7 +19,7 @@ const MAX_SENDING_BLOCK_TXNS: u64 = 50000;
 pub(crate) static MAX_RECEIVING_BLOCK_TXNS: Lazy<u64> =
     Lazy::new(|| 10000.max(2 * MAX_SENDING_BLOCK_TXNS));
 // stop reducing size at this point, so 1MB transactions can still go through
-const MIN_BLOCK_BYTES_OVERRIDE: u64 = 1024 * 1024 + BATCH_PADDING_BYTES as u64;
+const MIN_BLOCK_BYTES_OVERRIDE: u64 = 4 * 1024 * 1024 + BATCH_PADDING_BYTES as u64;
 // We should reduce block size only until two QS batch sizes.
 const MIN_BLOCK_TXNS_AFTER_FILTERING: u64 = DEFEAULT_MAX_BATCH_TXNS as u64 * 2;
 

@@ -405,7 +405,7 @@ impl NetworkSender {
         fail_point!("consensus::send::any", |_| ());
 
         let msg = match msg {
-            ConsensusMsg::RaikouDissMessage(msg) => RaikouDissMessage(msg),
+            ConsensusMsg::RaikouMessage(msg) => RaikouDissMessage(msg),
             msg @ ConsensusMsg::RaikouDissMessage(_) => msg,
             _ => unreachable!(),
         };
@@ -424,7 +424,7 @@ impl NetworkSender {
         fail_point!("consensus::send::any", |_| ());
 
         let msg = match msg {
-            ConsensusMsg::RaikouDissMessage(msg) => RaikouDissMessage(msg),
+            ConsensusMsg::RaikouMessage(msg) => RaikouDissMessage(msg),
             msg @ ConsensusMsg::RaikouDissMessage(_) => msg,
             _ => unreachable!(),
         };
@@ -452,7 +452,7 @@ impl NetworkSender {
     /// Tries to send msg to given recipients.
     pub async fn send_bundle(&self, msg: ConsensusMsg, recipients: Vec<Author>) {
         let msg = match msg {
-            ConsensusMsg::RaikouDissMessage(msg) => RaikouDissMessage(msg),
+            ConsensusMsg::RaikouMessage(msg) => RaikouDissMessage(msg),
             msg @ ConsensusMsg::RaikouDissMessage(_) => msg,
             _ => unreachable!(),
         };

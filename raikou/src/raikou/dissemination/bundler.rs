@@ -345,12 +345,7 @@ impl<DL> BundlerProtocol<DL> {
             .map(|t| format!("{:.2}Δ", t))
             .unwrap_or_else(|| "???Δ".to_string());
 
-        aptos_logger::info!(
-            "Node {} at {}: Dissemination Layer: {}",
-            self.node_id,
-            time_str,
-            msg
-        );
+        aptos_logger::info!("Node {} at {}: Bundler: {}", self.node_id, time_str, msg);
     }
 
     fn log_detail(&self, msg: String) {
@@ -631,11 +626,11 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
                 };
 
                 self.log_detail(format!(
-                    "Created bundle #{} with digest {:#x}, {} PoAs, {} batches",
+                    "Created bundle #{} with {} PoAs, {} batches, digest {:#x}",
                     index,
-                    digest,
                     bundle.payload().poas().len(),
                     bundle.payload().num_opt_batches(),
+                    digest,
                 ));
                 self.my_bundles.push_back(bundle.clone());
                 self.on_new_bundle(self.node_id, bundle.clone(), ctx).await;
@@ -667,10 +662,10 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
 
             self.log_detail(
                 format!(
-                    "Received bundle #{} with digest {:#x} from author {}",
+                    "Received bundle #{} from author {} with digest {:#x}",
                     index,
-                    bundle.digest,
                     author,
+                    bundle.digest,
                 )
             );
 

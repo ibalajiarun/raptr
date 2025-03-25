@@ -813,10 +813,12 @@ impl RaikouManager {
                                     Ok((txns, _)) => {
                                         assert_eq!(txns.len(), num_txns);
                                         let txns = txns.into_par_iter().with_min_len(20).map(Transaction::UserTransaction).collect();
-                                        state_sync_notifier
+                                        if let Err(e) = state_sync_notifier
                                             .notify_new_commit(txns, Vec::new())
-                                            .await
-                                            .unwrap();
+                                            .await {
+                                                error!("unable to notify mempool")
+                                            }
+
                                     },
                                     Err(_e) => unreachable!("Failed to get transactions for block {:?} even after waiting for the payload", block),
                                 }

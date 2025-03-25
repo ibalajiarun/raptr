@@ -303,7 +303,7 @@ pub fn create_mempool_runtime(
         futures::channel::mpsc::channel(100);
 
     let (consensus_notifier, consensus_listener) =
-        aptos_consensus_notifications::new_consensus_notifier_listener_pair(1000);
+        aptos_consensus_notifications::new_consensus_notifier_listener_pair(5000);
 
     let runtime = aptos_runtimes::spawn_named_runtime("mempool".into(), None);
 

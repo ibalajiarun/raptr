@@ -296,7 +296,7 @@ impl RaikouManager {
         let dissemination = Self::spawn_qs_dissemination_layer(
             node_id,
             payload_client,
-            consensus_config,
+            Arc::new(consensus_config),
             payload_manager,
             diss_module_network,
             state_sync_notifier,
@@ -532,9 +532,10 @@ impl RaikouManager {
                 bundle_window: 10,
                 bundle_store_window: 40,
                 bundle_interval: Duration::from_millis(50),
+                min_bundle_interval: Duration::from_millis(20),
                 max_pending_requests_per_node: 3,
                 status_interval: Duration::from_secs_f64(delta) * 10,
-                push_bundle_when_proposing: false,
+                // push_bundle_when_proposing: false,
             },
             cons_module_id,
             true,
@@ -557,7 +558,7 @@ impl RaikouManager {
     async fn spawn_qs_dissemination_layer(
         node_id: NodeId,
         payload_client: Arc<dyn PayloadClient>,
-        consensus_config: ConsensusConfig,
+        consensus_config: Arc<ConsensusConfig>,
         payload_manager: Arc<dyn TPayloadManager>,
         mut module_network: ModuleNetworkService,
         state_sync_notifier: Arc<dyn ConsensusNotificationSender>,
@@ -569,20 +570,92 @@ impl RaikouManager {
 
         let dissemination = RaikouQSDisseminationLayer {
             node_id,
-            payload_client,
-            config: consensus_config,
+            payload_client: payload_client.clone(),
+            config: consensus_config.clone(),
             payload_manager: payload_manager.clone(),
             module_id: module_network.module_id(),
             state_sync_notifier: state_sync_notifier.clone(),
-            optqs_payload_param_provider,
             index_to_address: index_to_address.clone(),
         };
 
         tokio::spawn(async move {
             loop {
-                let (consensus_module, event) = module_network.recv().await;
+                let (module, event) = module_network.recv().await;
 
-                if match_event_type::<dissemination::ProposalReceived>(&event) {
+                if match_event_type::<dissemination::PreparePayload>(&event) {
+                    let event: Box<_> = event
+                        .as_any()
+                        .downcast::<dissemination::PreparePayload>()
+                        .ok()
+                        .unwrap();
+                    let dissemination::PreparePayload {
+                        request_uid,
+                        round,
+                        exclude_everywhere,
+                        exclude_optimistic,
+                        exclude_authors
+                    } = *event;
+
+                    // let mut optqs_params = self.optqs_payload_param_provider.get_params();
+                    // if let Some(param) = optqs_params.as_mut() {
+                    //     if let Some(additional_exclude) = exclude_authors {
+                    //         for idx in additional_exclude.iter_ones() {
+                    //             let author = *self.index_to_address.get(&idx).unwrap();
+                    //             param.exclude_authors.insert(author);
+                    //         }
+                    //     }
+                    // }
+
+                    // let optqs_params = Some(OptQSPayloadPullParams {
+                    //     exclude_authors: HashSet::new(),
+                    //     minimum_batch_age_usecs: Duration::from_millis(30).as_micros() as u64,
+                    // });
+
+                    let payload_client = payload_client.clone();
+                    let config = consensus_config.clone();
+                    let optqs_payload_param_provider = optqs_payload_param_provider.clone();
+                    let module_network_sender = module_network.new_sender();
+
+                    tokio::spawn(async move {
+                        let optqs_params = optqs_payload_param_provider.get_params();
+                        let (_, payload) = payload_client
+                            .pull_payload(
+                                PayloadPullParameters {
+                                    max_poll_time: Duration::from_millis(config.quorum_store_poll_time_ms),
+                                    max_txns: PayloadTxnsSize::new(
+                                        config.max_sending_block_txns,
+                                        config.max_sending_block_bytes,
+                                    ),
+                                    max_txns_after_filtering: config.max_sending_block_txns,
+                                    soft_max_txns_after_filtering: config.max_sending_block_txns,
+                                    max_inline_txns: PayloadTxnsSize::new(
+                                        config.max_sending_inline_txns,
+                                        config.max_sending_inline_bytes,
+                                    ),
+                                    user_txn_filter: PayloadFilter::Raptr(exclude_everywhere, exclude_optimistic),
+                                    pending_ordering: true,
+                                    pending_uncommitted_blocks: 0,
+                                    recent_max_fill_fraction: 0.0,
+                                    block_timestamp: aptos_infallible::duration_since_epoch(),
+                                    maybe_optqs_payload_pull_params: optqs_params,
+                                },
+                                TransactionFilter::no_op(),
+                                async {}.boxed(),
+                            )
+                            .await
+                            .unwrap_or_else(|e| {
+                                error!("pull failed {:?}", e);
+                                (Vec::new(), Payload::Raikou(RaikouPayload::new_empty()))
+                            });
+
+                        module_network_sender
+                            .notify(module, dissemination::PayloadReady {
+                                request_uid,
+                                payload: raikou_types::Payload::new(round, node_id, payload),
+                            })
+                            .await;
+                    });
+                } else if match_event_type::<dissemination::ProposalReceived>(&event) {
                     let event: Box<_> = event
                         .as_any()
                         .downcast::<dissemination::ProposalReceived>()
@@ -602,7 +675,7 @@ impl RaikouManager {
                         if prefix == N_SUB_BLOCKS {
                             info!("Full prefix available {}/{}", prefix, N_SUB_BLOCKS);
                             module_network_sender
-                                .notify(consensus_module, dissemination::FullBlockAvailable {
+                                .notify(module, dissemination::FullBlockAvailable {
                                     round,
                                 })
                                 .await;
@@ -623,7 +696,7 @@ impl RaikouManager {
                                     .await
                             ) {
                                 module_network_sender
-                                    .notify(consensus_module, dissemination::FullBlockAvailable {
+                                    .notify(module, dissemination::FullBlockAvailable {
                                         round,
                                     })
                                     .await;
@@ -1179,11 +1252,10 @@ where
 struct RaikouQSDisseminationLayer {
     node_id: usize,
     payload_client: Arc<dyn PayloadClient>,
-    config: ConsensusConfig,
+    config: Arc<ConsensusConfig>,
     payload_manager: Arc<dyn TPayloadManager>,
     module_id: ModuleId,
     state_sync_notifier: Arc<dyn ConsensusNotificationSender>,
-    optqs_payload_param_provider: Arc<dyn TOptQSPullParamsProvider>,
     index_to_address: HashMap<usize, Author>,
 }
 
@@ -1194,63 +1266,6 @@ impl RaikouQSDisseminationLayer {}
 impl DisseminationLayer for RaikouQSDisseminationLayer {
     fn module_id(&self) -> ModuleId {
         self.module_id
-    }
-
-    async fn prepare_payload(
-        &self,
-        round: Option<raikou_types::Round>,
-        exclude_everywhere: HashSet<raikou_types::BatchInfo>,
-        exclude_optimistic: HashSet<raikou_types::BatchInfo>,
-        exclude_authors: Option<BitVec>,
-    ) -> raikou_types::Payload {
-        // let mut optqs_params = self.optqs_payload_param_provider.get_params();
-        // if let Some(param) = optqs_params.as_mut() {
-        //     if let Some(additional_exclude) = exclude_authors {
-        //         for idx in additional_exclude.iter_ones() {
-        //             let author = *self.index_to_address.get(&idx).unwrap();
-        //             param.exclude_authors.insert(author);
-        //         }
-        //     }
-        // }
-
-        // let optqs_params = Some(OptQSPayloadPullParams {
-        //     exclude_authors: HashSet::new(),
-        //     minimum_batch_age_usecs: Duration::from_millis(30).as_micros() as u64,
-        // });
-
-        let optqs_params = self.optqs_payload_param_provider.get_params();
-        let (_, payload) = self
-            .payload_client
-            .pull_payload(
-                PayloadPullParameters {
-                    max_poll_time: Duration::from_millis(self.config.quorum_store_poll_time_ms),
-                    max_txns: PayloadTxnsSize::new(
-                        self.config.max_sending_block_txns,
-                        self.config.max_sending_block_bytes,
-                    ),
-                    max_txns_after_filtering: self.config.max_sending_block_txns,
-                    soft_max_txns_after_filtering: self.config.max_sending_block_txns,
-                    max_inline_txns: PayloadTxnsSize::new(
-                        self.config.max_sending_inline_txns,
-                        self.config.max_sending_inline_bytes,
-                    ),
-                    user_txn_filter: PayloadFilter::Raptr(exclude_everywhere, exclude_optimistic),
-                    pending_ordering: true,
-                    pending_uncommitted_blocks: 0,
-                    recent_max_fill_fraction: 0.0,
-                    block_timestamp: aptos_infallible::duration_since_epoch(),
-                    maybe_optqs_payload_pull_params: optqs_params,
-                },
-                TransactionFilter::no_op(),
-                async {}.boxed(),
-            )
-            .await
-            .unwrap_or_else(|e| {
-                error!("pull failed {:?}", e);
-                (Vec::new(), Payload::Raikou(RaikouPayload::new_empty()))
-            });
-
-        raikou_types::Payload::new(round, self.node_id, payload)
     }
 
     async fn available_prefix(

@@ -29,6 +29,25 @@ derive_module_event!(FullBlockAvailable);
 derive_module_event!(SetLoggingBaseTimestamp);
 derive_module_event!(NotifyCommit);
 derive_module_event!(BlockPrepareTime);
+derive_module_event!(PreparePayload);
+derive_module_event!(PayloadReady);
+
+/// Event sent to the dissemination layer to prepare a payload.
+#[derive(Debug)]
+pub struct PreparePayload {
+    pub request_uid: u64,
+    pub round: Option<Round>,
+    pub exclude_everywhere: HashSet<BatchInfo>,
+    pub exclude_optimistic: HashSet<BatchInfo>,
+    pub exclude_authors: Option<BitVec>,
+}
+
+/// Response from the dissemination layer to the `PreparePayload` event.
+#[derive(Debug)]
+pub struct PayloadReady {
+    pub request_uid: u64,
+    pub payload: Payload,
+}
 
 /// Event sent from the bundler to the dissemination layer for metrics tracking.
 #[derive(Debug)]
@@ -75,14 +94,6 @@ pub struct SetLoggingBaseTimestamp(pub SystemTime);
 
 pub trait DisseminationLayer: Send + Sync + 'static {
     fn module_id(&self) -> ModuleId;
-
-    fn prepare_payload(
-        &self,
-        round: Option<Round>,
-        exclude_everywhere: HashSet<BatchInfo>,
-        exclude_optimistic: HashSet<BatchInfo>,
-        exclude_authors: Option<BitVec>,
-    ) -> impl Future<Output = Payload> + Send;
 
     fn available_prefix(
         &self,

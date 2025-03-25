@@ -21,7 +21,8 @@ use crate::{
         counters::OP_COUNTERS,
         dissemination::{
             BlockPrepareTime, DisseminationLayer, FullBlockAvailable, Kill, Metrics,
-            NewQCWithPayload, NotifyCommit, ProposalReceived, SetLoggingBaseTimestamp,
+            NewQCWithPayload, NotifyCommit, PayloadReady, PreparePayload, ProposalReceived,
+            SetLoggingBaseTimestamp,
         },
         protocol,
         types::*,
@@ -38,6 +39,7 @@ use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use std::{
     any::Any,
+    cmp::max,
     collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
     future::Future,
     ops::Range,
@@ -46,12 +48,14 @@ use std::{
 };
 use tokio::{sync::RwLock, time::Instant};
 
+pub type BundleIndex = usize;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockHeaderData {
     round: Round,
     author: NodeId,
     timestamp_usecs: u64,
-    masked_bundles: Vec<(usize, (BitVec, BitVec))>,
+    masked_bundles: Vec<(BundleIndex, (BitVec, BitVec))>,
     digest: HashValue,
     reason: RoundEntryReason,
     signature: Signature,
@@ -67,7 +71,7 @@ impl BlockHeader {
         round: Round,
         author: NodeId,
         timestamp_usecs: u64,
-        masked_bundles: Vec<(usize, (BitVec, BitVec))>,
+        masked_bundles: Vec<(BundleIndex, (BitVec, BitVec))>,
         digest: HashValue,
         reason: RoundEntryReason,
         signature: Signature,
@@ -97,7 +101,7 @@ impl BlockHeader {
         self.data.timestamp_usecs
     }
 
-    pub fn bundle_indices(&self) -> impl ExactSizeIterator<Item = usize> + '_ {
+    pub fn bundle_indices(&self) -> impl ExactSizeIterator<Item = BundleIndex> + '_ {
         self.data.masked_bundles.iter().map(|(index, _)| *index)
     }
 
@@ -105,7 +109,7 @@ impl BlockHeader {
         self.data.masked_bundles.len()
     }
 
-    pub fn masked_bundles(&self) -> &Vec<(usize, (BitVec, BitVec))> {
+    pub fn masked_bundles(&self) -> &Vec<(BundleIndex, (BitVec, BitVec))> {
         &self.data.masked_bundles
     }
 
@@ -167,7 +171,7 @@ impl Bundle {
         &self.data.payload
     }
 
-    pub fn index(&self) -> usize {
+    pub fn index(&self) -> BundleIndex {
         self.data.index
     }
 }
@@ -189,7 +193,7 @@ impl From<BundleSerialization> for Bundle {
 #[derive(Clone, CryptoHasher, BCSCryptoHash, Serialize, Deserialize)]
 struct BundleData {
     payload: Payload,
-    index: usize,
+    index: BundleIndex,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -228,7 +232,7 @@ impl MessageVerifier<Message> for protocol::Verifier {
 
 #[derive(Clone)]
 pub enum TimerEvent {
-    NewBundle(usize),
+    NewBundle(BundleIndex),
     Status,
 }
 
@@ -239,9 +243,10 @@ pub struct Config {
     // pub f: usize,
     // pub poa_quorum: usize,
     pub delta: Duration,
-    pub bundle_window: usize,
-    pub bundle_store_window: usize,
+    pub bundle_window: BundleIndex,
+    pub bundle_store_window: BundleIndex,
     pub bundle_interval: Duration,
+    pub min_bundle_interval: Duration,
     pub max_pending_requests_per_node: usize,
     // pub batch_fetch_interval: Duration,
     // pub batch_fetch_multiplicity: usize,
@@ -250,7 +255,7 @@ pub struct Config {
     // pub penalty_tracker_report_delay: Duration,
     pub status_interval: Duration,
     // pub block_size_limit: BlockSizeLimit,
-    pub push_bundle_when_proposing: bool,
+    // pub push_bundle_when_proposing: bool,
 }
 
 #[derive(Clone)]
@@ -298,13 +303,14 @@ pub struct BundlerProtocol<DL> {
     dissemination: Arc<DL>,
     consensus_module_id: ModuleId,
 
+    ongoing_payload_request: Option<(BundleIndex, Instant)>,
     my_bundles: VecDeque<Bundle>,
     included_poas: HashSet<BatchInfo>,
     included_batches: HashSet<BatchInfo>,
 
     reconstruction_requests: Vec<BTreeMap<Round, (BlockHeader, Instant)>>,
 
-    bundles: Vec<BTreeMap<usize, Bundle>>,
+    bundles: Vec<BTreeMap<BundleIndex, Bundle>>,
 
     committed_batches: HashSet<BatchInfo>,
 
@@ -371,6 +377,7 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
             config,
             node_id,
             consensus_module_id,
+            ongoing_payload_request: None,
             my_bundles: Default::default(),
             included_poas: Default::default(),
             included_batches: Default::default(),
@@ -421,83 +428,7 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
         }
     }
 
-    async fn create_bundle(&mut self, ctx: &mut impl ContextFor<Self>) {
-        monitor!("create_bundle", self.create_bundle_impl(ctx).await);
-    }
-
-    async fn create_bundle_impl(&mut self, ctx: &mut impl ContextFor<Self>) {
-        let index = if let Some(last_bundle) = self.my_bundles.back() {
-            last_bundle.data.index + 1
-        } else {
-            1
-        };
-
-        // Schedule the next bundle.
-        ctx.set_timer(
-            self.config.bundle_interval,
-            TimerEvent::NewBundle(index + 1),
-        );
-
-        self.log_detail(format!("Creating bundle #{} ...", index));
-
-        if self.my_bundles.len() >= self.config.bundle_window {
-            let preempted = self.my_bundles.pop_front().unwrap();
-            self.log_detail(format!(
-                "Preempting bundle #{} with digest {:#x}",
-                preempted.data.index, preempted.digest,
-            ));
-
-            for poa in preempted.data.payload.poas() {
-                self.included_poas.remove(poa.info());
-            }
-            for batch in preempted.data.payload.sub_blocks().flatten() {
-                self.included_batches.remove(batch);
-            }
-        }
-
-        let payload = monitor!("prepare_bundle", {
-            self.dissemination
-                .prepare_payload(
-                    None,
-                    // NB: these clones are unnecessary and expensive.
-                    self.included_poas.clone(),
-                    self.included_batches.clone(),
-                    None,
-                )
-                .await
-        });
-
-        for poa in payload.poas() {
-            let inserted = self.included_poas.insert(poa.info().clone());
-            assert!(inserted);
-        }
-
-        for batch_info in payload.sub_blocks().flatten() {
-            let inserted = self.included_batches.insert(batch_info.clone());
-            assert!(inserted);
-        }
-
-        let bundle_data = BundleData { payload, index };
-
-        let digest = bundle_data.hash();
-        let bundle = Bundle {
-            data: bundle_data,
-            digest,
-        };
-
-        self.log_detail(format!(
-            "Created bundle #{} with digest {:#x}, {} PoAs, {} batches",
-            index,
-            digest,
-            bundle.payload().poas().len(),
-            bundle.payload().num_opt_batches(),
-        ));
-        self.my_bundles.push_back(bundle.clone());
-        self.on_new_bundle(self.node_id, bundle.clone(), ctx).await;
-        ctx.multicast(Message::Bundle(bundle)).await;
-    }
-
-    fn select_bundles(&self, exclude: HashSet<BatchInfo>) -> Vec<(usize, (BitVec, BitVec))> {
+    fn select_bundles(&self, exclude: HashSet<BatchInfo>) -> Vec<(BundleIndex, (BitVec, BitVec))> {
         let mut masked_bundles = vec![];
 
         for bundle in &self.my_bundles {
@@ -530,7 +461,7 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
         &self,
         round: Round,
         author: NodeId,
-        masked_bundles: Vec<(usize, (BitVec, BitVec))>,
+        masked_bundles: Vec<(BundleIndex, (BitVec, BitVec))>,
         timestamp_usecs: u64,
         reason: RoundEntryReason,
     ) -> BlockData {
@@ -631,22 +562,96 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
 
         upon start {
             // The first bundle is created immediately.
-            self.create_bundle(ctx).await;
+            ctx.set_timer(Duration::ZERO, TimerEvent::NewBundle(1));
         };
 
         // Creating and certifying batches
 
         upon timer [TimerEvent::NewBundle(index)] {
-            if let Some(last_bundle) = self.my_bundles.back() {
-                if last_bundle.data.index < index {
-                    assert_eq!(index, last_bundle.data.index + 1);
-                    self.create_bundle(ctx).await;
+            assert!(self.my_bundles.is_empty() || index == self.my_bundles.back().unwrap().data.index + 1);
+            assert!(self.ongoing_payload_request.is_none());
+
+            self.log_detail(format!("Preparing payload for bundle #{} ...", index));
+
+            self.ongoing_payload_request = Some((index, Instant::now()));
+
+            ctx.notify(
+                self.dissemination.module_id(),
+                PreparePayload {
+                    request_uid: index as u64,
+                    round: None,
+                    exclude_everywhere: self.included_poas.clone(),
+                    exclude_optimistic: self.included_batches.clone(),
+                    exclude_authors: None,
                 }
-            }
+            )
+            .await;
         };
 
-        // Upon receiving a batch, store it, reply with a BatchStored message,
-        // and execute try_vote.
+        upon event of type [PayloadReady] from [_] {
+            upon [PayloadReady { request_uid, payload } ] {
+                let (index, ts) = self.ongoing_payload_request.take().unwrap();
+                assert_eq!(request_uid, index as u64);
+
+                OP_COUNTERS.observe_duration("prepare_bundle", ts.elapsed());
+
+                self.log_detail(format!("Creating bundle #{} ...", index));
+
+                if self.my_bundles.len() >= self.config.bundle_window {
+                    let preempted = self.my_bundles.pop_front().unwrap();
+                    self.log_detail(format!(
+                        "Preempting bundle #{} with digest {:#x}",
+                        preempted.data.index, preempted.digest,
+                    ));
+
+                    for poa in preempted.data.payload.poas() {
+                        self.included_poas.remove(poa.info());
+                    }
+                    for batch in preempted.data.payload.sub_blocks().flatten() {
+                        self.included_batches.remove(batch);
+                    }
+                }
+
+                for poa in payload.poas() {
+                    let inserted = self.included_poas.insert(poa.info().clone());
+                    assert!(inserted);
+                }
+
+                for batch_info in payload.sub_blocks().flatten() {
+                    let inserted = self.included_batches.insert(batch_info.clone());
+                    assert!(inserted);
+                }
+
+                let bundle_data = BundleData { payload, index };
+
+                let digest = bundle_data.hash();
+                let bundle = Bundle {
+                    data: bundle_data,
+                    digest,
+                };
+
+                self.log_detail(format!(
+                    "Created bundle #{} with digest {:#x}, {} PoAs, {} batches",
+                    index,
+                    digest,
+                    bundle.payload().poas().len(),
+                    bundle.payload().num_opt_batches(),
+                ));
+                self.my_bundles.push_back(bundle.clone());
+                self.on_new_bundle(self.node_id, bundle.clone(), ctx).await;
+
+                ctx.multicast(Message::Bundle(bundle)).await;
+
+                OP_COUNTERS.observe_duration("create_bundle", ts.elapsed());
+
+                let timer_duration = max(
+                    self.config.bundle_interval.saturating_sub(ts.elapsed()),
+                    self.config.min_bundle_interval,
+                );
+                ctx.set_timer(timer_duration, TimerEvent::NewBundle(index + 1));
+            };
+        };
+
         upon receive [Message::Bundle(bundle)] from [author] 'handler: {
             let index = bundle.data.index;
 
@@ -674,11 +679,10 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
 
         upon event of type [CreateBlock] from [_consensus_module] {
             upon [CreateBlock { round, timestamp_usecs, reason, exclude }] {
-                assert!(!self.my_bundles.is_empty());
-
-                if self.config.push_bundle_when_proposing {
-                    self.create_bundle(ctx).await;
-                }
+                // TODO: broken by moving to async `prepare_payload`.
+                // if self.config.push_bundle_when_proposing {
+                //     self.create_bundle(ctx).await;
+                // }
 
                 ctx.notify(
                     self.dissemination.module_id(),

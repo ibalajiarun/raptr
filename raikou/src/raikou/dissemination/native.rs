@@ -18,7 +18,8 @@ use crate::{
             penalty_tracker,
             penalty_tracker::{PenaltyTracker, PenaltyTrackerReports},
             BlockPrepareTime, DisseminationLayer, FullBlockAvailable, Kill, Metrics,
-            NewQCWithPayload, NotifyCommit, ProposalReceived, SetLoggingBaseTimestamp,
+            NewQCWithPayload, NotifyCommit, PayloadReady, PreparePayload, ProposalReceived,
+            SetLoggingBaseTimestamp,
         },
         types::*,
     },
@@ -360,63 +361,6 @@ where
 {
     fn module_id(&self) -> ModuleId {
         self.config.module_id
-    }
-
-    async fn prepare_payload(
-        &self,
-        round: Option<Round>,
-        exclude_everywhere: HashSet<BatchInfo>,
-        exclude_optimistic: HashSet<BatchInfo>,
-        _missing_authors: Option<BitVec>,
-    ) -> Payload {
-        let mut inner = self.inner.lock().await;
-
-        let mut poas: Vec<PoA> = inner
-            .uncommitted_poas
-            .iter()
-            .filter(|&(_batch_digest, poa)| !exclude_everywhere.contains(poa.info()))
-            .map(|(_batch_digest, poa)| poa.clone())
-            .collect();
-
-        let limit = inner.config.block_size_limit.poa_limit();
-        if poas.len() > limit {
-            aptos_logger::warn!(
-                "Block size limit reached: {} PoAs, {} allowed",
-                poas.len(),
-                limit
-            );
-            poas.truncate(limit);
-        }
-
-        let batches = if inner.config.enable_optimistic_dissemination && poas.len() < limit {
-            let mut batches: Vec<BatchInfo> = inner
-                .uncommitted_uncertified_batches
-                .iter()
-                .map(|batch_hash| inner.batches[batch_hash].get_info())
-                .filter(|batch_info| {
-                    !exclude_everywhere.contains(batch_info)
-                        && !exclude_optimistic.contains(batch_info)
-                })
-                .collect();
-
-            let limit = inner.config.block_size_limit.batch_limit(poas.len());
-            if batches.len() > limit {
-                aptos_logger::warn!(
-                    "Block size limit reached: {} batches, {} allowed",
-                    batches.len(),
-                    limit
-                );
-                batches.truncate(limit);
-            }
-
-            // If the penalty tracker is disabled, this will sort the batches
-            // by the order they were received.
-            inner.penalty_tracker.prepare_payload(round, batches)
-        } else {
-            Default::default()
-        };
-
-        Payload::new(round, inner.node_id, poas, batches)
     }
 
     async fn available_prefix(&self, payload: &Payload, _cached_value: usize) -> (Prefix, BitVec) {
@@ -831,6 +775,64 @@ where
 
         upon receive [Message::ProofOfAvailability(poa)] from [_any_node] {
             self.on_new_poa(poa, ctx).await;
+        };
+
+        upon event of type [PreparePayload] from [module] {
+            upon [PreparePayload { request_uid, round, exclude_everywhere, exclude_optimistic, exclude_authors}] {
+                let mut poas: Vec<PoA> = self
+                    .uncommitted_poas
+                    .iter()
+                    .filter(|&(_batch_digest, poa)| !exclude_everywhere.contains(poa.info()))
+                    .map(|(_batch_digest, poa)| poa.clone())
+                    .collect();
+
+                let limit = self.config.block_size_limit.poa_limit();
+                if poas.len() > limit {
+                    aptos_logger::warn!(
+                        "Block size limit reached: {} PoAs, {} allowed",
+                        poas.len(),
+                        limit
+                    );
+                    poas.truncate(limit);
+                }
+
+                let batches = if self.config.enable_optimistic_dissemination && poas.len() < limit {
+                    let mut batches: Vec<BatchInfo> = self
+                        .uncommitted_uncertified_batches
+                        .iter()
+                        .map(|batch_hash| self.batches[batch_hash].get_info())
+                        .filter(|batch_info| {
+                            !exclude_everywhere.contains(batch_info)
+                                && !exclude_optimistic.contains(batch_info)
+                        })
+                        .collect();
+
+                    let limit = self.config.block_size_limit.batch_limit(poas.len());
+                    if batches.len() > limit {
+                        aptos_logger::warn!(
+                            "Block size limit reached: {} batches, {} allowed",
+                            batches.len(),
+                            limit
+                        );
+                        batches.truncate(limit);
+                    }
+
+                    // If the penalty tracker is disabled, this will sort the batches
+                    // by the order they were received.
+                    self.penalty_tracker.prepare_payload(round, batches)
+                } else {
+                    Default::default()
+                };
+
+                ctx.notify(
+                    module,
+                    PayloadReady {
+                        request_uid,
+                        payload: Payload::new(round, self.node_id, poas, batches),
+                    }
+                )
+                .await;
+            };
         };
 
         upon event of type [BlockPrepareTime] from [_any_module] {

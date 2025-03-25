@@ -745,11 +745,18 @@ pub fn setup_environment_and_start_node(
             Arc::new(DbConfigStorageProvider::new(db_rw.reader.clone())),
         );
 
+    let (mut event_subscription_service4, _, _, _, _, _) =
+        state_sync::create_event_subscription_service(
+            &node_config,
+            Arc::new(DbConfigStorageProvider::new(db_rw.reader.clone())),
+        );
+
     // Set up the networks and gather the application network handles
     let peers_and_metadata = network::create_peers_and_metadata(&node_config);
     let (
         network_runtimes,
         consensus_network_interfaces,
+        _,
         _,
         _,
         consensus_observer_network_interfaces,
@@ -765,6 +772,7 @@ pub fn setup_environment_and_start_node(
         &mut event_subscription_service,
         &mut event_subscription_service2,
         &mut event_subscription_service3,
+        &mut event_subscription_service4,
     );
 
     // Start the peer monitoring service
@@ -859,6 +867,7 @@ pub fn setup_environment_and_start_node(
         db_rw.clone(),
         consensus_reconfig_subscription,
         consensus_network_interfaces,
+        None,
         None,
         None,
         consensus_notifier.clone(),
@@ -1044,6 +1053,49 @@ pub fn consensus_only_setup_environment_and_start_node(
         read_config_bytes::<ConfigurationResource>(genesis_write_set),
     );
 
+    let mut configs4 = HashMap::new();
+    let valset = read_config::<ValidatorSet>(genesis_write_set);
+    let valset = ValidatorSet {
+        active_validators: valset
+            .active_validators
+            .into_iter()
+            .map(|mut info| {
+                let addr = info.config().validator_network_addresses().unwrap();
+                let addr: Vec<NetworkAddress> = addr
+                    .into_iter()
+                    .map(|addr| {
+                        NetworkAddress::from_protocols(
+                            addr.into_iter()
+                                .map(|part| {
+                                    if let Protocol::Tcp(port) = part {
+                                        Protocol::Tcp(port + 8)
+                                    } else {
+                                        part
+                                    }
+                                })
+                                .collect(),
+                        )
+                        .unwrap()
+                    })
+                    .collect();
+                let addr = bcs::to_bytes(&addr).unwrap();
+                info.config_mut().validator_network_addresses = addr;
+                info
+            })
+            .collect(),
+        ..valset
+    };
+    let valset = bcs::to_bytes(&valset).unwrap();
+    configs4.insert(StateKey::on_chain_config::<ValidatorSet>().unwrap(), valset);
+    configs4.insert(
+        StateKey::on_chain_config::<ChainId>().unwrap(),
+        read_config_bytes::<ChainId>(genesis_write_set),
+    );
+    configs4.insert(
+        StateKey::on_chain_config::<ConfigurationResource>().unwrap(),
+        read_config_bytes::<ConfigurationResource>(genesis_write_set),
+    );
+
     // admin_service.set_aptos_db(db_rw.clone().into());
 
     // Set the Aptos VM configurations
@@ -1082,6 +1134,8 @@ pub fn consensus_only_setup_environment_and_start_node(
         EventSubscriptionService::new(Arc::new(InMemConfigStorageProvider::new(configs2)));
     let mut event_subscription_service3 =
         EventSubscriptionService::new(Arc::new(InMemConfigStorageProvider::new(configs3)));
+    let mut event_subscription_service4 =
+        EventSubscriptionService::new(Arc::new(InMemConfigStorageProvider::new(configs4)));
 
     // Set up the networks and gather the application network handles
     let peers_and_metadata = network::create_peers_and_metadata(&node_config);
@@ -1090,6 +1144,7 @@ pub fn consensus_only_setup_environment_and_start_node(
         consensus_network_interfaces,
         qs_network_interfaces,
         qs2_network_interfaces,
+        raikou_interfaces,
         _consensus_observer_network_interfaces,
         _dkg_network_interfaces,
         _jwk_consensus_network_interfaces,
@@ -1103,6 +1158,7 @@ pub fn consensus_only_setup_environment_and_start_node(
         &mut event_subscription_service,
         &mut event_subscription_service2,
         &mut event_subscription_service3,
+        &mut event_subscription_service4,
     );
 
     // Start the peer monitoring service
@@ -1208,6 +1264,9 @@ pub fn consensus_only_setup_environment_and_start_node(
     event_subscription_service3
         .notify_initial_configs(0)
         .unwrap();
+    event_subscription_service4
+        .notify_initial_configs(0)
+        .unwrap();
 
     info!("sleeping for some time hoping trusted peers is updated");
     thread::sleep(Duration::from_secs(5));
@@ -1240,6 +1299,7 @@ pub fn consensus_only_setup_environment_and_start_node(
         consensus_network_interfaces,
         qs_network_interfaces,
         qs2_network_interfaces,
+        raikou_interfaces,
         consensus_notifier.clone(),
         consensus_to_mempool_sender.clone(),
         vtxn_pool,

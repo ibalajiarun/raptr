@@ -11,9 +11,12 @@ use crate::{
     },
     logging::{LogEvent, LogSchema},
     monitor,
-    network_interface::{ConsensusMsg, ConsensusNetworkClient, RPC},
+    network_interface::{
+        ConsensusMsg, ConsensusMsg::RaikouDissMessage, ConsensusNetworkClient, RPC,
+    },
     pipeline::commit_reliable_broadcast::CommitMessage,
     quorum_store::types::{Batch, BatchMsg, BatchRequest, BatchResponse},
+    raikou_manager::{RaikouBundleNetworkSender, TRaikouNetworkSender},
     rand::rand_gen::{
         network_messages::{RandGenMessage, RandMessage},
         types::{AugmentedData, FastShare, Share},
@@ -198,6 +201,7 @@ pub struct NetworkSender {
     pub(crate) consensus_network_client: ConsensusNetworkClient<NetworkClient<ConsensusMsg>>,
     pub(crate) qs_network_client: ConsensusNetworkClient<NetworkClient<ConsensusMsg>>,
     pub(crate) qs2_network_client: ConsensusNetworkClient<NetworkClient<ConsensusMsg>>,
+    pub(crate) raikou_bundle_network_client: ConsensusNetworkClient<NetworkClient<ConsensusMsg>>,
     // Self sender and self receivers provide a shortcut for sending the messages to itself.
     // (self sending is not supported by the networking API).
     self_sender: aptos_channels::UnboundedSender<Event<ConsensusMsg>>,
@@ -211,6 +215,7 @@ impl NetworkSender {
         consensus_network_client: ConsensusNetworkClient<NetworkClient<ConsensusMsg>>,
         qs_network_client: ConsensusNetworkClient<NetworkClient<ConsensusMsg>>,
         qs2_network_client: ConsensusNetworkClient<NetworkClient<ConsensusMsg>>,
+        raikou_bundle_network_client: ConsensusNetworkClient<NetworkClient<ConsensusMsg>>,
         self_sender: aptos_channels::UnboundedSender<Event<ConsensusMsg>>,
         validators: Arc<ValidatorVerifier>,
     ) -> Self {
@@ -219,6 +224,7 @@ impl NetworkSender {
             consensus_network_client,
             qs_network_client,
             qs2_network_client,
+            raikou_bundle_network_client,
             self_sender,
             validators,
             time_service: aptos_time_service::TimeService::real(),
@@ -372,6 +378,85 @@ impl NetworkSender {
 
     /// Tries to send msg to given recipients.
     pub async fn send(&self, msg: ConsensusMsg, recipients: Vec<Author>) {
+        fail_point!("consensus::send::any", |_| ());
+        let network_sender = self.consensus_network_client.clone();
+        let mut self_sender = self.self_sender.clone();
+        for peer in recipients {
+            if self.author == peer {
+                let self_msg = Event::Message(self.author, msg.clone());
+                if let Err(err) = self_sender.send(self_msg).await {
+                    warn!(error = ?err, "Error delivering a self msg");
+                }
+                continue;
+            }
+            counters::CONSENSUS_SENT_MSGS
+                .with_label_values(&[msg.name()])
+                .inc();
+            if let Err(e) = network_sender.send_to(peer, msg.clone()) {
+                warn!(
+                    remote_peer = peer,
+                    error = ?e, "Failed to send a msg {:?} to peer", msg
+                );
+            }
+        }
+    }
+
+    pub async fn broadcast_bundle(&self, msg: ConsensusMsg) {
+        fail_point!("consensus::send::any", |_| ());
+
+        let msg = match msg {
+            ConsensusMsg::RaikouDissMessage(msg) => RaikouDissMessage(msg),
+            msg @ ConsensusMsg::RaikouDissMessage(_) => msg,
+            _ => unreachable!(),
+        };
+
+        // Directly send the message to ourself without going through network.
+        let self_msg = Event::Message(self.author, msg.clone());
+        let mut self_sender = self.self_sender.clone();
+        if let Err(err) = self_sender.send(self_msg).await {
+            error!("Error broadcasting to self: {:?}", err);
+        }
+
+        self.broadcast_bundle_without_self(msg);
+    }
+
+    pub fn broadcast_bundle_without_self(&self, msg: ConsensusMsg) {
+        fail_point!("consensus::send::any", |_| ());
+
+        let msg = match msg {
+            ConsensusMsg::RaikouDissMessage(msg) => RaikouDissMessage(msg),
+            msg @ ConsensusMsg::RaikouDissMessage(_) => msg,
+            _ => unreachable!(),
+        };
+
+        let self_author = self.author;
+        let mut other_validators: Vec<_> = self
+            .validators
+            .get_ordered_account_addresses_iter()
+            .filter(|author| author != &self_author)
+            .collect();
+        self.sort_peers_by_latency(&mut other_validators);
+
+        counters::CONSENSUS_SENT_MSGS
+            .with_label_values(&[msg.name()])
+            .inc_by(other_validators.len() as u64);
+        // Broadcast message over direct-send to all other validators.
+        if let Err(err) = self
+            .consensus_network_client
+            .send_to_many(other_validators, msg)
+        {
+            warn!(error = ?err, "Error broadcasting message");
+        }
+    }
+
+    /// Tries to send msg to given recipients.
+    pub async fn send_bundle(&self, msg: ConsensusMsg, recipients: Vec<Author>) {
+        let msg = match msg {
+            ConsensusMsg::RaikouDissMessage(msg) => RaikouDissMessage(msg),
+            msg @ ConsensusMsg::RaikouDissMessage(_) => msg,
+            _ => unreachable!(),
+        };
+
         fail_point!("consensus::send::any", |_| ());
         let network_sender = self.consensus_network_client.clone();
         let mut self_sender = self.self_sender.clone();
@@ -794,6 +879,7 @@ impl NetworkTask {
         network_service_events: NetworkServiceEvents<ConsensusMsg>,
         qs_network_service_events: NetworkServiceEvents<ConsensusMsg>,
         qs2_network_service_events: NetworkServiceEvents<ConsensusMsg>,
+        raikou_network_service_events: NetworkServiceEvents<ConsensusMsg>,
         self_receiver: aptos_channels::UnboundedReceiver<Event<ConsensusMsg>>,
     ) -> (NetworkTask, NetworkReceivers) {
         let (consensus_messages_tx, consensus_messages) = aptos_channel::new(
@@ -829,12 +915,19 @@ impl NetworkTask {
         {
             panic!("The network has not been setup correctly for consensus!");
         }
+        let raikou_network_and_events = raikou_network_service_events.into_network_and_events();
+        if (raikou_network_and_events.values().len() != 1
+            || !raikou_network_and_events.contains_key(&NetworkId::Validator))
+        {
+            panic!("The network has not been setup correctly for consensus!");
+        }
 
         // Collect all the network events into a single stream
         let network_events: Vec<_> = network_and_events
             .into_values()
             .chain(qs_network_and_events.into_values())
             .chain(qs2_network_and_events.into_values())
+            .chain(raikou_network_and_events.into_values())
             .collect();
         let network_events = select_all(network_events).fuse();
         let all_events = Box::new(select(network_events, self_receiver));

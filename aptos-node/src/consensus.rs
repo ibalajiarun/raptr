@@ -43,6 +43,7 @@ pub fn create_consensus_runtime(
     consensus_network_interfaces: Option<ApplicationNetworkInterfaces<ConsensusMsg>>,
     qs_network_interfaces: Option<ApplicationNetworkInterfaces<ConsensusMsg>>,
     qs2_network_interfaces: Option<ApplicationNetworkInterfaces<ConsensusMsg>>,
+    raikou_interfaces: Option<ApplicationNetworkInterfaces<ConsensusMsg>>,
     consensus_notifier: ConsensusNotifier,
     consensus_to_mempool_sender: Sender<QuorumStoreRequest>,
     vtxn_pool: VTxnPoolState,
@@ -51,6 +52,7 @@ pub fn create_consensus_runtime(
 ) -> Option<Runtime> {
     let qs_network_interfaces = qs_network_interfaces.unwrap();
     let qs2_network_interfaces = qs2_network_interfaces.unwrap();
+    let raikou_interfaces = raikou_interfaces.unwrap();
     consensus_network_interfaces.map(|consensus_network_interfaces| {
         let (consensus_runtime, consensus_db, quorum_store_db) = services::start_consensus_runtime(
             node_config,
@@ -59,6 +61,7 @@ pub fn create_consensus_runtime(
             consensus_network_interfaces,
             qs_network_interfaces,
             qs2_network_interfaces,
+            raikou_interfaces,
             consensus_notifier.clone(),
             consensus_to_mempool_sender.clone(),
             vtxn_pool,

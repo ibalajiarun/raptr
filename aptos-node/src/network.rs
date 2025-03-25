@@ -241,6 +241,13 @@ fn extract_network_configs(node_config: &NodeConfig) -> Vec<NetworkConfig> {
         }
         network_configs.push(network_config.clone());
     }
+    if let Some(network_config) = node_config.validator_network4.as_ref() {
+        // Ensure that mutual authentication is enabled by default!
+        if !network_config.mutual_authentication {
+            panic!("Validator networks must always have mutual_authentication enabled!");
+        }
+        network_configs.push(network_config.clone());
+    }
     network_configs
 }
 
@@ -266,8 +273,10 @@ pub fn setup_networks_and_get_interfaces(
     event_subscription_service: &mut EventSubscriptionService,
     event_subscription_service2: &mut EventSubscriptionService,
     event_subscription_service3: &mut EventSubscriptionService,
+    event_subscription_service4: &mut EventSubscriptionService,
 ) -> (
     Vec<Runtime>,
+    Option<ApplicationNetworkInterfaces<ConsensusMsg>>,
     Option<ApplicationNetworkInterfaces<ConsensusMsg>>,
     Option<ApplicationNetworkInterfaces<ConsensusMsg>>,
     Option<ApplicationNetworkInterfaces<ConsensusMsg>>,
@@ -286,6 +295,7 @@ pub fn setup_networks_and_get_interfaces(
     let mut consensus_network_handle = None;
     let mut consensus_network_handle2 = None;
     let mut consensus_network_handle3 = None;
+    let mut consensus_network_handle4 = None;
     let mut consensus_observer_network_handles: Option<
         Vec<ApplicationNetworkHandle<ConsensusObserverMessage>>,
     > = None;
@@ -306,8 +316,10 @@ pub fn setup_networks_and_get_interfaces(
             &mut *event_subscription_service
         } else if consensus_network_handle2.is_none() {
             &mut *event_subscription_service2
-        } else {
+        } else if consensus_network_handle3.is_none() {
             &mut *event_subscription_service3
+        } else {
+            &mut *event_subscription_service4
         };
 
         let peers_and_metadata = if consensus_network_handle.is_none() {
@@ -347,8 +359,10 @@ pub fn setup_networks_and_get_interfaces(
                     consensus_network_handle = Some(network_handle);
                 } else if consensus_network_handle2.is_none() {
                     consensus_network_handle2 = Some(network_handle);
-                } else {
+                } else if consensus_network_handle3.is_none() {
                     consensus_network_handle3 = Some(network_handle);
+                } else {
+                    consensus_network_handle4 = Some(network_handle);
                 }
             }
 
@@ -460,6 +474,7 @@ pub fn setup_networks_and_get_interfaces(
         consensus_interfaces,
         qs_interfaces,
         qs2_interfaces,
+        raikou_interfaces,
         consensus_observer_interfaces,
         dkg_interfaces,
         jwk_consensus_interfaces,
@@ -471,6 +486,7 @@ pub fn setup_networks_and_get_interfaces(
         consensus_network_handle,
         consensus_network_handle2,
         consensus_network_handle3,
+        consensus_network_handle4,
         consensus_observer_network_handles,
         dkg_network_handle,
         jwk_consensus_network_handle,
@@ -498,6 +514,7 @@ pub fn setup_networks_and_get_interfaces(
         consensus_interfaces,
         qs_interfaces,
         qs2_interfaces,
+        raikou_interfaces,
         consensus_observer_interfaces,
         dkg_interfaces,
         jwk_consensus_interfaces,
@@ -549,6 +566,7 @@ fn transform_network_handles_into_interfaces(
     consensus_network_handle: Option<ApplicationNetworkHandle<ConsensusMsg>>,
     consensus_network_handle2: Option<ApplicationNetworkHandle<ConsensusMsg>>,
     consensus_network_handle3: Option<ApplicationNetworkHandle<ConsensusMsg>>,
+    consensus_network_handle4: Option<ApplicationNetworkHandle<ConsensusMsg>>,
     consensus_observer_network_handles: Option<
         Vec<ApplicationNetworkHandle<ConsensusObserverMessage>>,
     >,
@@ -561,6 +579,7 @@ fn transform_network_handles_into_interfaces(
     storage_service_network_handles: Vec<ApplicationNetworkHandle<StorageServiceMessage>>,
     peers_and_metadata: Arc<PeersAndMetadata>,
 ) -> (
+    Option<ApplicationNetworkInterfaces<ConsensusMsg>>,
     Option<ApplicationNetworkInterfaces<ConsensusMsg>>,
     Option<ApplicationNetworkInterfaces<ConsensusMsg>>,
     Option<ApplicationNetworkInterfaces<ConsensusMsg>>,
@@ -588,6 +607,14 @@ fn transform_network_handles_into_interfaces(
     });
 
     let consensus_interfaces3 = consensus_network_handle3.map(|consensus_network_handle| {
+        create_network_interfaces(
+            vec![consensus_network_handle],
+            consensus_network_configuration(node_config),
+            peers_and_metadata.clone(),
+        )
+    });
+
+    let consensus_interfaces4 = consensus_network_handle4.map(|consensus_network_handle| {
         create_network_interfaces(
             vec![consensus_network_handle],
             consensus_network_configuration(node_config),
@@ -642,6 +669,7 @@ fn transform_network_handles_into_interfaces(
         consensus_interfaces,
         consensus_interfaces2,
         consensus_interfaces3,
+        consensus_interfaces4,
         consensus_observer_interfaces,
         dkg_interfaces,
         jwk_consensus_interfaces,

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{
+    counters,
     counters::RAIKOU_COMMIT_NOTIFY_TO_MEMPOOL_NOTIFY,
     liveness::proposal_status_tracker::{
         ExponentialWindowFailureTracker, LockedExponentialWindowFailureTracker,
@@ -14,6 +15,7 @@ use crate::{
     payload_manager::{QuorumStorePayloadManager, TPayloadManager},
     pipeline::buffer_manager::OrderedBlocks,
     quorum_store,
+    quorum_store::types::{Batch, BatchMsg},
 };
 use anyhow::Context;
 use aptos_bitvec::BitVec;
@@ -31,7 +33,8 @@ use aptos_consensus_types::{
 };
 use aptos_crypto::HashValue;
 use aptos_infallible::Mutex;
-use aptos_logger::{error, info};
+use aptos_logger::{error, info, warn};
+use aptos_network::protocols::network::Event;
 use aptos_types::{
     chain_id::ChainId,
     epoch_state::EpochState,
@@ -46,6 +49,8 @@ use aptos_types::{
     PeerId,
 };
 use aptos_validator_transaction_pool::TransactionFilter;
+use async_trait::async_trait;
+use fail::fail_point;
 use futures::{executor::block_on, future::BoxFuture, FutureExt, StreamExt};
 use futures_channel::{mpsc::UnboundedSender, oneshot};
 use itertools::Itertools;
@@ -307,8 +312,10 @@ impl RaikouManager {
             bundler_module_network,
             epoch_state.clone(),
             n_nodes,
-            todo!(), // bundler_network_sender,
-            todo!(), // bundler_messages_rx,
+            Arc::new(RaikouBundleNetworkSender {
+                network_sender: network_sender.clone(),
+            }), // bundler_network_sender,
+            diss_rx, // bundler_messages_rx,
             cons_module_id,
             delta,
             signer.clone(),
@@ -339,7 +346,7 @@ impl RaikouManager {
         let network_service = RaikouNetworkService::new(
             epoch_state.clone(),
             messages_rx,
-            network_sender,
+            Arc::new(RaikouConsensusNetworkSender { network_sender }),
             Arc::new(raikou::raikou::protocol::Certifier::new()),
             Arc::new(verifier),
         )
@@ -496,7 +503,7 @@ impl RaikouManager {
         bundler_module_network: ModuleNetworkService,
         epoch_state: Arc<EpochState>,
         n_nodes: usize,
-        bundler_network_sender: Arc<NetworkSender>,
+        bundler_network_sender: Arc<dyn TRaikouNetworkSender>,
         bundler_messages_rx: aptos_channels::aptos_channel::Receiver<
             PeerId,
             (Author, RaikouNetworkMessage),
@@ -925,7 +932,7 @@ pub struct RaikouNetworkSenderInner<M, C> {
     epoch: u64,
     n_nodes: usize,
     index_to_address: HashMap<usize, Author>,
-    network_sender: Arc<NetworkSender>,
+    network_sender: Arc<dyn TRaikouNetworkSender>,
     certifier: Arc<C>,
     _phantom: PhantomData<M>,
 }
@@ -1012,6 +1019,43 @@ where
     }
 }
 
+#[async_trait]
+pub trait TRaikouNetworkSender: Send + Sync {
+    async fn broadcast(&self, msg: ConsensusMsg);
+
+    async fn send(&self, msg: ConsensusMsg, recipients: Vec<Author>);
+}
+
+pub struct RaikouBundleNetworkSender {
+    pub network_sender: Arc<NetworkSender>,
+}
+
+#[async_trait]
+impl TRaikouNetworkSender for RaikouBundleNetworkSender {
+    async fn broadcast(&self, msg: ConsensusMsg) {
+        self.network_sender.broadcast_bundle(msg).await;
+    }
+
+    async fn send(&self, msg: ConsensusMsg, recipients: Vec<Author>) {
+        self.network_sender.send_bundle(msg, recipients).await;
+    }
+}
+
+pub struct RaikouConsensusNetworkSender {
+    pub network_sender: Arc<NetworkSender>,
+}
+
+#[async_trait]
+impl TRaikouNetworkSender for RaikouConsensusNetworkSender {
+    async fn broadcast(&self, msg: ConsensusMsg) {
+        self.network_sender.broadcast(msg).await;
+    }
+
+    async fn send(&self, msg: ConsensusMsg, recipients: Vec<Author>) {
+        self.network_sender.send(msg, recipients).await;
+    }
+}
+
 pub struct RaikouNetworkService<M, C, V> {
     sender: RaikouNetworkSender<M, C>,
     deserialized_messages_rx: tokio::sync::mpsc::Receiver<(NodeId, M)>,
@@ -1030,7 +1074,7 @@ where
             PeerId,
             (Author, RaikouNetworkMessage),
         >,
-        network_sender: Arc<NetworkSender>,
+        network_sender: Arc<dyn TRaikouNetworkSender>,
         certifier: Arc<C>,
         verifier: Arc<V>,
     ) -> Self {

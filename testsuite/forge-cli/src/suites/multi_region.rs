@@ -77,6 +77,15 @@ pub(crate) fn multiregion_benchmark_test(duration: Duration, num_fullnodes: usiz
             net3config.network_id = NetworkId::Validator;
             config.validator_network3 = Some(net3config);
 
+            let mut net4config = NetworkConfig::default();
+            net4config.listen_address = "/ip4/0.0.0.0/tcp/12002".parse().unwrap();
+            net4config.mutual_authentication = true;
+            net4config.identity =
+                Identity::from_file("/opt/aptos/genesis/validator-identity.yaml".into());
+            net4config.discovery_method = DiscoveryMethod::Onchain;
+            net4config.network_id = NetworkId::Validator;
+            config.validator_network4 = Some(net4config);
+
             config.consensus.quorum_store.sender_max_batch_txns = 300;
             config.consensus.quorum_store.sender_max_total_txns = 300;
             config.consensus.quorum_store.memory_quota = 300_000_000;

@@ -142,6 +142,7 @@ pub struct EpochManager<P: OnChainConfigProvider> {
     network_sender: ConsensusNetworkClient<NetworkClient<ConsensusMsg>>,
     qs_network_sender: ConsensusNetworkClient<NetworkClient<ConsensusMsg>>,
     qs2_network_sender: ConsensusNetworkClient<NetworkClient<ConsensusMsg>>,
+    raikou_network_sender: ConsensusNetworkClient<NetworkClient<ConsensusMsg>>,
     timeout_sender: aptos_channels::Sender<Round>,
     quorum_store_enabled: bool,
     quorum_store_to_mempool_sender: Sender<QuorumStoreRequest>,
@@ -196,6 +197,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
         network_sender: ConsensusNetworkClient<NetworkClient<ConsensusMsg>>,
         qs_network_sender: ConsensusNetworkClient<NetworkClient<ConsensusMsg>>,
         qs2_network_sender: ConsensusNetworkClient<NetworkClient<ConsensusMsg>>,
+        raikou_network_sender: ConsensusNetworkClient<NetworkClient<ConsensusMsg>>,
         timeout_sender: aptos_channels::Sender<Round>,
         quorum_store_to_mempool_sender: Sender<QuorumStoreRequest>,
         execution_client: Arc<dyn TExecutionClient>,
@@ -226,6 +228,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             network_sender,
             qs_network_sender,
             qs2_network_sender,
+            raikou_network_sender,
             timeout_sender,
             // This default value is updated at epoch start
             quorum_store_enabled: false,
@@ -972,6 +975,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             self.network_sender.clone(),
             self.qs_network_sender.clone(),
             self.qs2_network_sender.clone(),
+            self.raikou_network_sender.clone(),
             self.self_sender.clone(),
             epoch_state.verifier.clone(),
         )

@@ -215,6 +215,7 @@ impl ExecutionProxyClient {
             self.network_sender.clone(),
             self.network_sender.clone(),
             self.network_sender.clone(),
+            self.network_sender.clone(),
             self.self_sender.clone(),
             epoch_state.verifier.clone(),
         );

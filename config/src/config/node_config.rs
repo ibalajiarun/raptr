@@ -89,6 +89,8 @@ pub struct NodeConfig {
     #[serde(default)]
     pub validator_network3: Option<NetworkConfig>,
     #[serde(default)]
+    pub validator_network4: Option<NetworkConfig>,
+    #[serde(default)]
     pub indexer_db_config: InternalIndexerDBConfig,
 }
 

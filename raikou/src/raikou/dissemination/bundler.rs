@@ -815,8 +815,20 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
         upon timer [TimerEvent::Status] {
             self.log_detail(format!(
                 "STATUS:\n\
-                \tlast produced bundle index: {:?}\n",
+                \tlast produced bundle index: {:?}\n\
+                \tongoing payload request index: {:?}\n\
+                \tongoing payload request elapsed: {:?}\n\
+                \tpending reconstruction requests: {:?}\n\
+                \tnumber of included PoAs: {}\n\
+                \tnumber of included opt. batches: {}\n\
+                \tnumber of committed batches: {}",
                 self.my_bundles.back().map(|bundle| bundle.data.index),
+                self.ongoing_payload_request.map(|(index, _)| index),
+                self.ongoing_payload_request.map(|(_, ts)| ts.elapsed()),
+                self.reconstruction_requests.iter().map(|m| m.len()).sum::<usize>(),
+                self.included_poas.len(),
+                self.included_batches.len(),
+                self.committed_batches.len(),
             ));
             ctx.set_timer(self.config.status_interval, TimerEvent::Status);
         };

@@ -632,6 +632,16 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
                     bundle.payload().num_opt_batches(),
                     digest,
                 ));
+
+                OP_COUNTERS.observe(
+                    "bundle_poas",
+                    bundle.payload().poas().len() as f64,
+                );
+                OP_COUNTERS.observe(
+                    "bundle_batches",
+                    bundle.payload().poas().len() as f64,
+                );
+
                 self.my_bundles.push_back(bundle.clone());
                 self.on_new_bundle(self.node_id, bundle.clone(), ctx).await;
 

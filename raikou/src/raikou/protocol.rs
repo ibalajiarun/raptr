@@ -13,7 +13,7 @@ use crate::{
     monitor, protocol,
     raikou::{
         counters::{
-            BLOCK_TRACING, PREFIX_VOTED_PREVIOUSLY_COUNTER, QC_PREFIX_HISTOGRAM,
+            BLOCK_TRACING, OP_COUNTERS, PREFIX_VOTED_PREVIOUSLY_COUNTER, QC_PREFIX_HISTOGRAM,
             QC_TIMER_VOTE_FULLBLOCK_COUNTER, QC_VOTING_PREFIX_HISTOGRAM,
             RAIKOU_BATCH_CONSENSUS_LATENCY, RAIKOU_BLOCK_COMMIT_RATE,
             RAIKOU_BLOCK_CONSENSUS_LATENCY, ROUND_ENTER_REASON,
@@ -64,7 +64,7 @@ use tokio::time::Instant;
 pub enum Message {
     // Consensus
     Propose(BlockHeader),
-    QcVote(Round, Prefix, BlockHash, Signature, BitVec),
+    QcVote(Round, Prefix, BlockHash, Signature, BitVec, u64),
     CcVote(QC, Signature),
     TcVote(Round, QC, Signature, RoundTimeoutReason),
     AdvanceRound(Round, RoundEntryReason),
@@ -76,7 +76,7 @@ impl Debug for Message {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Message::Propose(block_header) => write!(f, "Propose({})", block_header.round()),
-            Message::QcVote(round, _, _, _, _) => write!(f, "QcVote({})", round),
+            Message::QcVote(round, _, _, _, _, _) => write!(f, "QcVote({})", round),
             Message::CcVote(qc, _) => {
                 write!(f, "CcVote({})", qc.round())
             },
@@ -140,7 +140,7 @@ impl MessageVerifier<Message> for Verifier {
 
                 block_header.reason().verify(block_header.round(), self)
             }),
-            Message::QcVote(round, prefix, block_digest, signature, _) => {
+            Message::QcVote(round, prefix, block_digest, signature, _, _) => {
                 monitor!("verify_qcvote", {
                     ensure!(*prefix <= N_SUB_BLOCKS, "Invalid prefix in QcVote message");
 
@@ -647,6 +647,7 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
                 block_digest,
                 signature,
                 missing_authors,
+                duration_since_epoch().as_micros() as u64,
             ))
             .await;
         }
@@ -1201,7 +1202,12 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
         // 1. the node has not yet formed or received any QC for this round or higher; or
         // 2. the node can form the full-prefix QC.
         // Upon forming a QC, execute on_new_qc.
-        upon receive [Message::QcVote(round, prefix, block_digest, signature, missing_authors)] from node [p] {
+        upon receive [Message::QcVote(round, prefix, block_digest, signature, missing_authors, ts)] from node [p] {
+            OP_COUNTERS.observe_duration(
+                "qcvote_message_delay",
+                duration_since_epoch().saturating_sub(Duration::from_micros(ts)),
+            );
+
             let vote_is_non_decreasing = self.qc_votes[round][block_digest].get(&p)
                 .map(|(old_prefix, _, _)| *old_prefix < prefix)
                 .unwrap_or(true);

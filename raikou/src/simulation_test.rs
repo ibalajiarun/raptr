@@ -848,11 +848,11 @@ async fn test_raikou(
                     // push_bundle_when_proposing: false,
                 },
                 cons_module_id,
+                diss_module_id,
                 true,
                 // metrics,
                 signer.clone(),
                 // sig_verifier,
-                dissemination.clone(),
             );
 
             // println!("Spawning node {node_id}");

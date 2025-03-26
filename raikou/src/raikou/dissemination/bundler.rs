@@ -259,21 +259,21 @@ pub struct Config {
 }
 
 #[derive(Clone)]
-pub struct Bundler<DL> {
+pub struct Bundler {
     config: Config,
-    inner: Arc<tokio::sync::Mutex<BundlerProtocol<DL>>>,
+    inner: Arc<tokio::sync::Mutex<BundlerProtocol>>,
 }
 
-impl<DL: DisseminationLayer> Bundler<DL> {
+impl Bundler {
     pub fn new(
         node_id: NodeId,
         config: Config,
         consensus_module_id: ModuleId,
+        dissemination_module_id: ModuleId,
         detailed_logging: bool,
         // metrics: Metrics,
         signer: Signer,
         // sig_verifier: SignatureVerifier,
-        dissemination: Arc<DL>,
     ) -> Self {
         Self {
             config: config.clone(),
@@ -281,11 +281,11 @@ impl<DL: DisseminationLayer> Bundler<DL> {
                 node_id,
                 config,
                 consensus_module_id,
+                dissemination_module_id,
                 detailed_logging,
                 // metrics,
                 signer,
                 // sig_verifier,
-                dissemination,
             ))),
         }
     }
@@ -297,10 +297,10 @@ impl<DL: DisseminationLayer> Bundler<DL> {
     }
 }
 
-pub struct BundlerProtocol<DL> {
+pub struct BundlerProtocol {
     node_id: NodeId,
     config: Config,
-    dissemination: Arc<DL>,
+    dissemination_module_id: ModuleId,
     consensus_module_id: ModuleId,
 
     ongoing_payload_request: Option<(BundleIndex, Instant)>,
@@ -324,7 +324,7 @@ pub struct BundlerProtocol<DL> {
     // metrics: Metrics,
 }
 
-impl<DL> BundlerProtocol<DL> {
+impl BundlerProtocol {
     fn to_deltas(&self, duration: Duration) -> f64 {
         duration.as_secs_f64() / self.config.delta.as_secs_f64()
     }
@@ -355,16 +355,16 @@ impl<DL> BundlerProtocol<DL> {
     }
 }
 
-impl<DL: DisseminationLayer> BundlerProtocol<DL> {
+impl BundlerProtocol {
     pub fn new(
         node_id: NodeId,
         config: Config,
         consensus_module_id: ModuleId,
+        dissemination_module_id: ModuleId,
         detailed_logging: bool,
         // metrics: Metrics,
         signer: Signer,
         // sig_verifier: SignatureVerifier,
-        dissemination: Arc<DL>,
     ) -> Self {
         let n_nodes = config.n_nodes;
 
@@ -372,6 +372,7 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
             config,
             node_id,
             consensus_module_id,
+            dissemination_module_id,
             ongoing_payload_request: None,
             my_bundles: Default::default(),
             included_poas: Default::default(),
@@ -384,7 +385,6 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
             detailed_logging,
             logging_base_timestamp: None,
             // metrics,
-            dissemination,
         }
     }
 
@@ -547,7 +547,7 @@ impl<DL: DisseminationLayer> BundlerProtocol<DL> {
     }
 }
 
-impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
+impl Protocol for BundlerProtocol {
     type Message = Message;
     type TimerEvent = TimerEvent;
 
@@ -571,7 +571,7 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
             self.ongoing_payload_request = Some((index, Instant::now()));
 
             ctx.notify(
-                self.dissemination.module_id(),
+                self.dissemination_module_id,
                 PreparePayload {
                     request_uid: index as u64,
                     round: None,
@@ -699,7 +699,7 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
                 // }
 
                 ctx.notify(
-                    self.dissemination.module_id(),
+                    self.dissemination_module_id,
                     BlockPrepareTime {
                         round,
                         time: Instant::now(),
@@ -858,7 +858,7 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
     }
 }
 
-impl<DL> Drop for BundlerProtocol<DL> {
+impl Drop for BundlerProtocol {
     fn drop(&mut self) {
         self.log_detail("Halting by Drop".to_string());
     }

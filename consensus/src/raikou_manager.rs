@@ -317,10 +317,10 @@ impl RaikouManager {
             }), // bundler_network_sender,
             diss_rx, // bundler_messages_rx,
             cons_module_id,
+            diss_module_id,
             delta,
             signer.clone(),
             verifier.clone(),
-            dissemination.clone(),
         )
         .await;
 
@@ -509,10 +509,10 @@ impl RaikouManager {
             (Author, RaikouNetworkMessage),
         >,
         cons_module_id: ModuleId,
+        diss_module_id: ModuleId,
         delta: f64,
         signer: Signer,
         verifier: protocol::Verifier,
-        dissemination: Arc<impl DisseminationLayer>,
     ) {
         let bundler_network_service = RaikouNetworkService::new(
             epoch_state.clone(),
@@ -538,11 +538,11 @@ impl RaikouManager {
                 // push_bundle_when_proposing: false,
             },
             cons_module_id,
+            diss_module_id,
             true,
             // metrics,
             signer,
             // sig_verifier,
-            dissemination,
         );
 
         tokio::spawn(Protocol::run(

@@ -628,41 +628,47 @@ impl RaikouManager {
                     let module_network_sender = module_network.new_sender();
 
                     tokio::spawn(async move {
+                        let _timer = OP_COUNTERS.timer("qs_prepare_payload");
+
                         let optqs_params = optqs_payload_param_provider.get_params();
-                        let (_, payload) = payload_client
-                            .pull_payload(
-                                PayloadPullParameters {
-                                    max_poll_time: Duration::from_millis(
-                                        config.quorum_store_poll_time_ms,
-                                    ),
-                                    max_txns: PayloadTxnsSize::new(
-                                        config.max_sending_block_txns,
-                                        config.max_sending_block_bytes,
-                                    ),
-                                    max_txns_after_filtering: config.max_sending_block_txns,
-                                    soft_max_txns_after_filtering: config.max_sending_block_txns,
-                                    max_inline_txns: PayloadTxnsSize::new(
-                                        config.max_sending_inline_txns,
-                                        config.max_sending_inline_bytes,
-                                    ),
-                                    user_txn_filter: PayloadFilter::Raptr(
-                                        exclude_everywhere,
-                                        exclude_optimistic,
-                                    ),
-                                    pending_ordering: true,
-                                    pending_uncommitted_blocks: 0,
-                                    recent_max_fill_fraction: 0.0,
-                                    block_timestamp: aptos_infallible::duration_since_epoch(),
-                                    maybe_optqs_payload_pull_params: optqs_params,
-                                },
-                                TransactionFilter::no_op(),
-                                async {}.boxed(),
-                            )
-                            .await
-                            .unwrap_or_else(|e| {
-                                error!("pull failed {:?}", e);
-                                (Vec::new(), Payload::Raikou(RaikouPayload::new_empty()))
-                            });
+                        let (_, payload) = monitor!(
+                            "pc_prepare_payload",
+                            payload_client
+                                .pull_payload(
+                                    PayloadPullParameters {
+                                        max_poll_time: Duration::from_millis(
+                                            config.quorum_store_poll_time_ms,
+                                        ),
+                                        max_txns: PayloadTxnsSize::new(
+                                            config.max_sending_block_txns,
+                                            config.max_sending_block_bytes,
+                                        ),
+                                        max_txns_after_filtering: config.max_sending_block_txns,
+                                        soft_max_txns_after_filtering: config
+                                            .max_sending_block_txns,
+                                        max_inline_txns: PayloadTxnsSize::new(
+                                            config.max_sending_inline_txns,
+                                            config.max_sending_inline_bytes,
+                                        ),
+                                        user_txn_filter: PayloadFilter::Raptr(
+                                            exclude_everywhere,
+                                            exclude_optimistic,
+                                        ),
+                                        pending_ordering: true,
+                                        pending_uncommitted_blocks: 0,
+                                        recent_max_fill_fraction: 0.0,
+                                        block_timestamp: aptos_infallible::duration_since_epoch(),
+                                        maybe_optqs_payload_pull_params: optqs_params,
+                                    },
+                                    TransactionFilter::no_op(),
+                                    async {}.boxed(),
+                                )
+                                .await
+                                .unwrap_or_else(|e| {
+                                    error!("pull failed {:?}", e);
+                                    (Vec::new(), Payload::Raikou(RaikouPayload::new_empty()))
+                                })
+                        );
 
                         module_network_sender
                             .notify(module, dissemination::PayloadReady {

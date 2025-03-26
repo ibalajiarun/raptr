@@ -83,7 +83,7 @@ impl ModuleNetwork {
         match self.send.write().await.entry(module) {
             Entry::Occupied(_) => panic!("Module id {:?} already registered", module),
             Entry::Vacant(entry) => {
-                let (send, recv) = mpsc::channel(100);
+                let (send, recv) = mpsc::channel(10_000);
                 entry.insert(send);
 
                 ModuleNetworkService {

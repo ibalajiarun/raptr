@@ -8,7 +8,9 @@ use crate::{
     framework::{
         crypto::{SignatureVerifier, Signer},
         module_network::ModuleNetwork,
-        network::{InjectedLocalNetwork, Network, NetworkInjection, NetworkService},
+        network::{
+            shard_network_service, InjectedLocalNetwork, Network, NetworkInjection, NetworkService,
+        },
         timer::{clock_skew_injection, InjectedTimerService},
         NodeId, Protocol,
     },
@@ -30,6 +32,7 @@ use aptos_types::{
     account_address::AccountAddress, validator_signer::ValidatorSigner,
     validator_verifier::ValidatorVerifier,
 };
+use itertools::Itertools;
 use rand::{thread_rng, Rng};
 use std::{
     collections::BTreeMap,
@@ -724,8 +727,12 @@ async fn test_raikou(
             node_id,
             Arc::new(dissemination::native::Certifier::new(signer.clone())),
         );
-        let mut bundler_network_service =
-            bundler_network.service(node_id, Arc::new(bundler::Certifier::new()));
+        let mut bundler_network_services = shard_network_service(
+            bundler_network.service(node_id, Arc::new(bundler::Certifier::new())),
+            n_nodes,
+        )
+        .await;
+
         let mut network_service =
             network.service(node_id, Arc::new(raikou::protocol::Certifier::new()));
 
@@ -733,7 +740,6 @@ async fn test_raikou(
 
         // introduce artificial clock skew.
         let diss_timer = InjectedTimerService::local(clock_skew_injection(clock_speed));
-        let bundler_timer = InjectedTimerService::local(clock_skew_injection(clock_speed));
         let timer = InjectedTimerService::local(clock_skew_injection(clock_speed));
 
         // let propose_time_sender = Some(propose_time.new_sender());
@@ -768,17 +774,22 @@ async fn test_raikou(
             // Before starting the node, "drop" all messages sent to it during the spawn delay.
             network_service.clear_inbox().await;
             diss_network_service.clear_inbox().await;
-            bundler_network_service.clear_inbox().await;
+            for bundler_network_service in &mut bundler_network_services {
+                bundler_network_service.clear_inbox().await;
+            }
 
             let txns_iter = iter::repeat_with(|| vec![]);
 
             let mut module_network = ModuleNetwork::new();
 
             let diss_module_network = module_network.register().await;
-            let bundler_module_network = module_network.register().await;
+            let bundler_module_networks = module_network.register_many(n_nodes).await;
             let cons_module_network = module_network.register().await;
 
-            let bundler_module_id = bundler_module_network.module_id();
+            let bundler_module_ids = bundler_module_networks
+                .iter()
+                .map(|net| net.module_id())
+                .collect_vec();
             let diss_module_id = diss_module_network.module_id();
             let cons_module_id = cons_module_network.module_id();
 
@@ -833,34 +844,39 @@ async fn test_raikou(
                 execute_tx,
             ));
 
-            let bundler = bundler::Bundler::new(
-                node_id,
-                bundler::Config {
-                    module_id: bundler_module_id,
-                    n_nodes,
-                    delta: Duration::from_secs_f64(delta),
-                    bundle_window: 10,
-                    bundle_store_window: 40,
-                    bundle_interval: Duration::from_secs_f64(delta * 0.5),
-                    min_bundle_interval: Duration::from_secs_f64(delta * 0.2),
-                    max_pending_requests_per_node: 3,
-                    status_interval: Duration::from_secs_f64(delta) * 10,
-                    // push_bundle_when_proposing: false,
-                },
-                cons_module_id,
-                diss_module_id,
-                true,
-                // metrics,
-                signer.clone(),
-                // sig_verifier,
-            );
+            let bundlers = (0..n_nodes)
+                .map(|shard_id| {
+                    bundler::Bundler::new(
+                        node_id,
+                        shard_id,
+                        bundler::Config {
+                            module_id: bundler_module_ids[shard_id],
+                            n_nodes,
+                            delta: Duration::from_secs_f64(delta),
+                            bundle_window: 10,
+                            bundle_store_window: 40,
+                            bundle_interval: Duration::from_secs_f64(delta * 0.5),
+                            min_bundle_interval: Duration::from_secs_f64(delta * 0.2),
+                            max_pending_requests_per_node: 3,
+                            status_interval: Duration::from_secs_f64(delta) * 10,
+                            // push_bundle_when_proposing: false,
+                        },
+                        cons_module_id,
+                        diss_module_id,
+                        true,
+                        // metrics,
+                        signer.clone(),
+                        // sig_verifier,
+                    )
+                })
+                .collect_vec();
 
             // println!("Spawning node {node_id}");
             let node = Arc::new(tokio::sync::Mutex::new(RaikouNode::new(
                 node_id,
                 config,
                 dissemination.clone(),
-                bundler_module_id,
+                bundler_module_ids,
                 node_id == monitored_node,
                 raikou::Metrics {
                     block_consensus_latency: block_consensus_latency_sender,
@@ -884,13 +900,19 @@ async fn test_raikou(
                 diss_timer,
             ));
 
-            tokio::spawn(Protocol::run(
-                bundler.protocol(),
-                node_id,
-                bundler_network_service,
-                bundler_module_network,
-                bundler_timer,
-            ));
+            for ((bundler, network_service), module_network) in bundlers
+                .into_iter()
+                .zip(bundler_network_services)
+                .zip(bundler_module_networks)
+            {
+                tokio::spawn(Protocol::run(
+                    bundler.protocol(),
+                    node_id,
+                    network_service,
+                    module_network,
+                    InjectedTimerService::local(clock_skew_injection(clock_speed)),
+                ));
+            }
 
             Protocol::run(node, node_id, network_service, cons_module_network, timer).await;
             println!("Node {} finished", node_id);

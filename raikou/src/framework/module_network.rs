@@ -79,6 +79,14 @@ impl ModuleNetwork {
         self.register_with_id(module).await
     }
 
+    pub async fn register_many(&mut self, n: usize) -> Vec<ModuleNetworkService> {
+        let mut res = Vec::with_capacity(n);
+        for _ in 0..n {
+            res.push(self.register().await);
+        }
+        res
+    }
+
     pub async fn register_with_id(&mut self, module: ModuleId) -> ModuleNetworkService {
         match self.send.write().await.entry(module) {
             Entry::Occupied(_) => panic!("Module id {:?} already registered", module),

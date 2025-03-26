@@ -9,7 +9,7 @@ use crate::{
         module_network::{ModuleEventTrait, ModuleId},
         network::{
             MessageCertifier, MessageVerifier, NetworkSender, NetworkService, NoopCertifier,
-            NoopVerifier,
+            NoopVerifier, ShardMessage,
         },
         timer::TimerService,
         ContextFor, NodeId, Protocol,
@@ -33,6 +33,7 @@ use aptos_bitvec::BitVec;
 use aptos_crypto::{bls12381::Signature, hash::CryptoHash, Genesis};
 use aptos_crypto_derive::{BCSCryptoHash, CryptoHasher};
 use aptos_logger::warn;
+use aptos_types::block_executor::partitioner::ShardId;
 use defaultmap::DefaultBTreeMap;
 use itertools::{traits::IteratorIndex, Itertools};
 use rand::seq::SliceRandom;
@@ -218,12 +219,19 @@ impl std::fmt::Debug for Message {
 
 pub type Certifier = NoopCertifier;
 
-impl MessageVerifier<Message> for protocol::Verifier {
-    async fn verify(&self, sender: NodeId, message: &Message) -> anyhow::Result<()> {
+impl MessageVerifier<ShardMessage<Message>> for protocol::Verifier {
+    async fn verify(&self, sender: NodeId, message: &ShardMessage<Message>) -> anyhow::Result<()> {
+        let (shard_id, message) = message;
+
         match message {
             Message::Bundle(bundle, _ts) => monitor!("verify_bundle", {
                 // TODO: verify payload size.
 
+                ensure!(bundle.data.payload.author() == *shard_id, "Invalid author");
+                ensure!(
+                    bundle.data.payload.author() == sender,
+                    "Author is not sender"
+                );
                 bundle.data.payload.verify(self, None, sender)
             }),
         }
@@ -267,6 +275,7 @@ pub struct Bundler {
 impl Bundler {
     pub fn new(
         node_id: NodeId,
+        shard_author: NodeId,
         config: Config,
         consensus_module_id: ModuleId,
         dissemination_module_id: ModuleId,
@@ -279,6 +288,7 @@ impl Bundler {
             config: config.clone(),
             inner: Arc::new(tokio::sync::Mutex::new(BundlerProtocol::new(
                 node_id,
+                shard_author,
                 config,
                 consensus_module_id,
                 dissemination_module_id,
@@ -297,34 +307,23 @@ impl Bundler {
     }
 }
 
-pub struct BundlerProtocol {
-    node_id: NodeId,
-    config: Config,
-    dissemination_module_id: ModuleId,
-    consensus_module_id: ModuleId,
-
+struct ProducerData {
     ongoing_payload_request: Option<(BundleIndex, Instant)>,
     my_bundles: VecDeque<Bundle>,
     included_poas: HashSet<BatchInfo>,
     included_batches: HashSet<BatchInfo>,
-
-    reconstruction_requests: Vec<BTreeMap<Round, (BlockHeader, Instant)>>,
-
-    bundles: Vec<BTreeMap<BundleIndex, Bundle>>,
-
     committed_batches: HashSet<BatchInfo>,
-
-    // Crypto
-    signer: Signer,
-    // sig_verifier: SignatureVerifier,
-
-    // Logging and metrics
-    detailed_logging: bool,
-    logging_base_timestamp: Option<SystemTime>,
-    // metrics: Metrics,
 }
 
-impl BundlerProtocol {
+struct Logger {
+    node_id: NodeId,
+    config: Config,
+    shard_author: NodeId,
+    detailed_logging: bool,
+    logging_base_timestamp: Option<SystemTime>,
+}
+
+impl Logger {
     fn to_deltas(&self, duration: Duration) -> f64 {
         duration.as_secs_f64() / self.config.delta.as_secs_f64()
     }
@@ -345,7 +344,13 @@ impl BundlerProtocol {
             .map(|t| format!("{:.2}Δ", t))
             .unwrap_or_else(|| "???Δ".to_string());
 
-        aptos_logger::info!("Node {} at {}: Bundler: {}", self.node_id, time_str, msg);
+        aptos_logger::info!(
+            "Node {} at {}: Bundler shard {}: {}",
+            self.node_id,
+            self.shard_author,
+            time_str,
+            msg
+        );
     }
 
     fn log_detail(&self, msg: String) {
@@ -355,9 +360,27 @@ impl BundlerProtocol {
     }
 }
 
+pub struct BundlerProtocol {
+    node_id: NodeId,
+    shard_author: NodeId,
+
+    config: Config,
+    dissemination_module_id: ModuleId,
+    consensus_module_id: ModuleId,
+
+    producer_data: Option<ProducerData>,
+
+    reconstruction_requests: BTreeMap<Round, (BlockHeader, Instant)>,
+    bundles: BTreeMap<BundleIndex, Bundle>,
+
+    signer: Signer,
+    logger: Logger,
+}
+
 impl BundlerProtocol {
     pub fn new(
         node_id: NodeId,
+        shard_author: NodeId,
         config: Config,
         consensus_module_id: ModuleId,
         dissemination_module_id: ModuleId,
@@ -368,23 +391,35 @@ impl BundlerProtocol {
     ) -> Self {
         let n_nodes = config.n_nodes;
 
+        let producer_data = if node_id == shard_author {
+            Some(ProducerData {
+                ongoing_payload_request: None,
+                my_bundles: Default::default(),
+                included_poas: Default::default(),
+                included_batches: Default::default(),
+                committed_batches: Default::default(),
+            })
+        } else {
+            None
+        };
+
         Self {
-            config,
+            config: config.clone(),
             node_id,
+            shard_author,
             consensus_module_id,
             dissemination_module_id,
-            ongoing_payload_request: None,
-            my_bundles: Default::default(),
-            included_poas: Default::default(),
-            included_batches: Default::default(),
-            reconstruction_requests: vec![BTreeMap::new(); n_nodes],
-            bundles: vec![BTreeMap::new(); n_nodes],
-            committed_batches: Default::default(),
+            producer_data,
+            reconstruction_requests: BTreeMap::new(),
+            bundles: BTreeMap::new(),
             signer,
-            // sig_verifier,
-            detailed_logging,
-            logging_base_timestamp: None,
-            // metrics,
+            logger: Logger {
+                node_id,
+                config,
+                shard_author,
+                detailed_logging,
+                logging_base_timestamp: None,
+            },
         }
     }
 
@@ -398,48 +433,49 @@ impl BundlerProtocol {
 
         // Remove old bundles from this author.
         loop {
-            let Some((&first_index, _)) = self.bundles[author].first_key_value() else {
+            let Some((&first_index, _)) = self.bundles.first_key_value() else {
                 break;
             };
 
             if first_index + self.config.bundle_store_window < index {
-                self.bundles[author].pop_first();
+                self.bundles.pop_first();
             } else {
                 break;
             }
         }
 
-        self.bundles[author].insert(index, bundle);
+        self.bundles.insert(index, bundle);
 
         let mut satisfied_requests = vec![];
-        for (&req_id, (block_header, ts)) in &self.reconstruction_requests[author] {
+        for (&req_id, (block_header, ts)) in &self.reconstruction_requests {
             if self.try_reconstruct(block_header, ts, ctx).await {
                 satisfied_requests.push(req_id);
             }
         }
 
         for req_id in satisfied_requests {
-            self.reconstruction_requests[author].remove(&req_id);
+            self.reconstruction_requests.remove(&req_id);
         }
     }
 
     fn select_bundles(&self, exclude: HashSet<BatchInfo>) -> Vec<(BundleIndex, (BitVec, BitVec))> {
+        let prod = self.producer_data.as_ref().unwrap();
         let mut masked_bundles = vec![];
 
-        for bundle in &self.my_bundles {
+        for bundle in &prod.my_bundles {
             let payload = &bundle.data.payload;
 
             let mut proof_mask = BitVec::with_num_bits(payload.poas().len() as u16);
             let mut batch_mask = BitVec::with_num_bits(payload.num_opt_batches() as u16);
 
             for (i, poa) in payload.poas().iter().enumerate() {
-                if !exclude.contains(poa.info()) && !self.committed_batches.contains(poa.info()) {
+                if !exclude.contains(poa.info()) && !prod.committed_batches.contains(poa.info()) {
                     proof_mask.set(i as u16);
                 }
             }
 
             for (i, batch) in payload.sub_blocks().flatten().enumerate() {
-                if !exclude.contains(batch) && !self.committed_batches.contains(batch) {
+                if !exclude.contains(batch) && !prod.committed_batches.contains(batch) {
                     batch_mask.set(i as u16);
                 }
             }
@@ -466,7 +502,7 @@ impl BundlerProtocol {
                 .into_iter()
                 .map(|(index, (proof_mask, batch_mask))| {
                     (
-                        self.bundles[author][&index].data.payload.clone(),
+                        self.bundles[&index].data.payload.clone(),
                         proof_mask,
                         batch_mask,
                     )
@@ -489,11 +525,11 @@ impl BundlerProtocol {
     ) -> bool {
         let bundles_available = block_header
             .bundle_indices()
-            .filter(|index| self.bundles[block_header.author()].contains_key(&index))
+            .filter(|index| self.bundles.contains_key(&index))
             .count();
 
         if bundles_available != block_header.n_bundles() {
-            self.log_detail(format!(
+            self.logger.log_detail(format!(
                 "Missing bundles for block {} proposed by node: {:?}: {}/{}",
                 block_header.round(),
                 block_header.author(),
@@ -506,7 +542,7 @@ impl BundlerProtocol {
 
         OP_COUNTERS.observe_duration("bundler_wait", request_timestamp.elapsed());
 
-        self.log_detail(format!(
+        self.logger.log_detail(format!(
             "Reconstructing block {} proposed by node: {:?}",
             block_header.round(),
             block_header.author(),
@@ -557,26 +593,30 @@ impl Protocol for BundlerProtocol {
 
         upon start {
             // The first bundle is created immediately.
-            ctx.set_timer(Duration::ZERO, TimerEvent::NewBundle(1));
+            if self.producer_data.is_some() {
+                ctx.set_timer(Duration::ZERO, TimerEvent::NewBundle(1));
+            }
         };
 
         // Creating and certifying batches
 
         upon timer [TimerEvent::NewBundle(index)] {
-            assert!(self.my_bundles.is_empty() || index == self.my_bundles.back().unwrap().data.index + 1);
-            assert!(self.ongoing_payload_request.is_none());
+            let prod = self.producer_data.as_mut().unwrap();
 
-            self.log_detail(format!("Preparing payload for bundle #{} ...", index));
+            assert!(prod.my_bundles.is_empty() || index == prod.my_bundles.back().unwrap().data.index + 1);
+            assert!(prod.ongoing_payload_request.is_none());
 
-            self.ongoing_payload_request = Some((index, Instant::now()));
+            self.logger.log_detail(format!("Preparing payload for bundle #{} ...", index));
+
+            prod.ongoing_payload_request = Some((index, Instant::now()));
 
             ctx.notify(
                 self.dissemination_module_id,
                 PreparePayload {
                     request_uid: index as u64,
                     round: None,
-                    exclude_everywhere: self.included_poas.clone(),
-                    exclude_optimistic: self.included_batches.clone(),
+                    exclude_everywhere: prod.included_poas.clone(),
+                    exclude_optimistic: prod.included_batches.clone(),
                     exclude_authors: None,
                 }
             )
@@ -585,35 +625,37 @@ impl Protocol for BundlerProtocol {
 
         upon event of type [PayloadReady] from [_] {
             upon [PayloadReady { request_uid, payload } ] {
-                let (index, ts) = self.ongoing_payload_request.take().unwrap();
+                let prod = self.producer_data.as_mut().unwrap();
+
+                let (index, ts) = prod.ongoing_payload_request.take().unwrap();
                 assert_eq!(request_uid, index as u64);
 
                 OP_COUNTERS.observe_duration("prepare_bundle", ts.elapsed());
 
-                self.log_detail(format!("Creating bundle #{} ...", index));
+                self.logger.log_detail(format!("Creating bundle #{} ...", index));
 
-                if self.my_bundles.len() >= self.config.bundle_window {
-                    let preempted = self.my_bundles.pop_front().unwrap();
-                    self.log_detail(format!(
+                if prod.my_bundles.len() >= self.config.bundle_window {
+                    let preempted = prod.my_bundles.pop_front().unwrap();
+                    self.logger.log_detail(format!(
                         "Preempting bundle #{} with digest {:#x}",
                         preempted.data.index, preempted.digest,
                     ));
 
                     for poa in preempted.data.payload.poas() {
-                        self.included_poas.remove(poa.info());
+                        prod.included_poas.remove(poa.info());
                     }
                     for batch in preempted.data.payload.sub_blocks().flatten() {
-                        self.included_batches.remove(batch);
+                        prod.included_batches.remove(batch);
                     }
                 }
 
                 for poa in payload.poas() {
-                    let inserted = self.included_poas.insert(poa.info().clone());
+                    let inserted = prod.included_poas.insert(poa.info().clone());
                     assert!(inserted);
                 }
 
                 for batch_info in payload.sub_blocks().flatten() {
-                    let inserted = self.included_batches.insert(batch_info.clone());
+                    let inserted = prod.included_batches.insert(batch_info.clone());
                     assert!(inserted);
                 }
 
@@ -625,7 +667,7 @@ impl Protocol for BundlerProtocol {
                     digest,
                 };
 
-                self.log_detail(format!(
+                self.logger.log_detail(format!(
                     "Created bundle #{} with {} PoAs, {} batches, digest {:#x}",
                     index,
                     bundle.payload().poas().len(),
@@ -642,7 +684,7 @@ impl Protocol for BundlerProtocol {
                     bundle.payload().poas().len() as f64,
                 );
 
-                self.my_bundles.push_back(bundle.clone());
+                prod.my_bundles.push_back(bundle.clone());
                 self.on_new_bundle(self.node_id, bundle.clone(), ctx).await;
 
                 ctx.multicast(Message::Bundle(bundle, duration_since_epoch().as_micros() as u64)).await;
@@ -658,6 +700,23 @@ impl Protocol for BundlerProtocol {
         };
 
         upon receive [Message::Bundle(bundle, ts)] from [author] 'handler: {
+            if author != self.shard_author {
+                warn!("Unexpected sender: {}. Expected: {}", author, self.shard_author);
+                break 'handler;
+            }
+
+            let index = bundle.data.index;
+
+            if author == self.node_id {
+                assert!(self.bundles.contains_key(&index));
+                break 'handler;
+            }
+
+            if self.bundles.contains_key(&index) {
+                warn!("Received a duplicate bundle #{} from author {}", index, author);
+                break 'handler;
+            }
+
             OP_COUNTERS.observe_duration(
                 "bundle_message_delay",
                 duration_since_epoch().saturating_sub(Duration::from_micros(ts)),
@@ -665,19 +724,7 @@ impl Protocol for BundlerProtocol {
 
             let _timer = OP_COUNTERS.timer("bundle_message_handler");
 
-            let index = bundle.data.index;
-
-            if author == self.node_id {
-                assert!(self.bundles[author].contains_key(&index));
-                break 'handler;
-            }
-
-            if self.bundles[author].contains_key(&index) {
-                warn!("Received a duplicate bundle #{} from author {}", index, author);
-                break 'handler;
-            }
-
-            self.log_detail(
+            self.logger.log_detail(
                 format!(
                     "Received bundle #{} from author {} with digest {:#x}",
                     index,
@@ -728,7 +775,7 @@ impl Protocol for BundlerProtocol {
                     digest,
                 };
 
-                self.log_detail(format!(
+                self.logger.log_detail(format!(
                     "Created block {} with {} bundles, {} PoAs, and {} opt batches",
                     round,
                     masked_bundles.len(),
@@ -762,7 +809,9 @@ impl Protocol for BundlerProtocol {
 
         upon event of type [ReconstructBlock] from [_consensus_module] {
             upon [ReconstructBlock { block_header }] {
-                self.log_detail(format!(
+                assert_eq!(block_header.author(), self.shard_author);
+
+                self.logger.log_detail(format!(
                     "Received a request to reconstruct block {} proposed by node {}",
                     block_header.round(),
                     block_header.author(),
@@ -771,20 +820,20 @@ impl Protocol for BundlerProtocol {
                 let author = block_header.author();
                 let round = block_header.round();
 
-                assert!(!self.reconstruction_requests[author].contains_key(&round));
-                if self.reconstruction_requests[author].len() >= self.config.max_pending_requests_per_node {
+                assert!(!self.reconstruction_requests.contains_key(&round));
+                if self.reconstruction_requests.len() >= self.config.max_pending_requests_per_node {
                     let (_, (old_header, old_ts)) =
-                        self.reconstruction_requests[author].first_key_value().unwrap();
+                        self.reconstruction_requests.first_key_value().unwrap();
 
                     let elapsed = old_ts.elapsed();
 
-                    self.log_detail(format!(
+                    self.logger.log_detail(format!(
                         "Preempted request to reconstruct block {} proposed by node {} \
-                        after waiting for {:.3}s ({}Δ)",
+                        after waiting for {:.3}s ({:.2}Δ)",
                         old_header.round(),
                         old_header.author(),
                         elapsed.as_secs_f64(),
-                        self.to_deltas(elapsed),
+                        self.logger.to_deltas(elapsed),
                     ));
 
                     OP_COUNTERS.inc("reconstruction_preempted");
@@ -792,19 +841,21 @@ impl Protocol for BundlerProtocol {
 
                 let ts = Instant::now();
                 if !self.try_reconstruct(&block_header, &ts, ctx).await {
-                    self.reconstruction_requests[author].insert(round, (block_header, ts));
+                    self.reconstruction_requests.insert(round, (block_header, ts));
                 }
             };
         };
 
         upon event of type [NotifyCommit] from [_any_module] {
             upon [NotifyCommit { payloads, .. }] {
+                let mut prod = self.producer_data.as_mut().unwrap();
+
                 for payload in payloads {
                     for poa in payload.poas() {
-                        self.committed_batches.insert(poa.info().clone());
+                        prod.committed_batches.insert(poa.info().clone());
                     }
                     for batch in payload.sub_blocks().flatten() {
-                        self.committed_batches.insert(batch.clone());
+                        prod.committed_batches.insert(batch.clone());
                     }
                 }
             };
@@ -813,42 +864,49 @@ impl Protocol for BundlerProtocol {
         // Logging and halting
 
         upon start {
-            self.log_detail("Started".to_string());
+            self.logger.log_detail("Started".to_string());
             ctx.set_timer(self.config.status_interval, TimerEvent::Status);
         };
 
         upon event of type [SetLoggingBaseTimestamp] from [_any_module] {
             upon [SetLoggingBaseTimestamp(base_timestamp)] {
-                self.log_detail(format!("Setting logging base timestamp to {:?}", base_timestamp));
-                self.logging_base_timestamp = Some(base_timestamp);
+                self.logger.log_detail(format!("Setting logging base timestamp to {:?}", base_timestamp));
+                self.logger.logging_base_timestamp = Some(base_timestamp);
             };
         };
 
         upon event of type [Kill] from [_any_module] {
             upon [Kill()] {
-                self.log_detail("Halting by Kill event".to_string());
+                self.logger.log_detail("Halting by Kill event".to_string());
                 ctx.halt();
             };
         };
 
         upon timer [TimerEvent::Status] {
-            self.log_detail(format!(
-                "STATUS:\n\
-                \tlast produced bundle index: {:?}\n\
-                \tongoing payload request index: {:?}\n\
-                \tongoing payload request elapsed: {:?}\n\
-                \tpending reconstruction requests: {:?}\n\
-                \tnumber of included PoAs: {}\n\
-                \tnumber of included opt. batches: {}\n\
-                \tnumber of committed batches: {}",
-                self.my_bundles.back().map(|bundle| bundle.data.index),
-                self.ongoing_payload_request.map(|(index, _)| index),
-                self.ongoing_payload_request.map(|(_, ts)| ts.elapsed()),
-                self.reconstruction_requests.iter().map(|m| m.len()).sum::<usize>(),
-                self.included_poas.len(),
-                self.included_batches.len(),
-                self.committed_batches.len(),
+            self.logger.log_detail(format!(
+                "STATUS (shard):\n\
+                \tpending reconstruction requests: {:?}",
+                self.reconstruction_requests.len(),
             ));
+
+            if let Some(prod) = &self.producer_data {
+                self.logger.log_detail(format!(
+                    "STATUS (producer):\n\
+                    \tlast produced bundle index: {:?}\n\
+                    \tongoing payload request index: {:?}\n\
+                    \tongoing payload request elapsed: {:?}\n\
+                    \tnumber of included PoAs: {}\n\
+                    \tnumber of included opt. batches: {}\n\
+                    \tnumber of committed batches: {}",
+                    prod.my_bundles.back().map(|bundle| bundle.data.index),
+                    prod.ongoing_payload_request.map(|(index, _)| index),
+                    prod.ongoing_payload_request.map(|(_, ts)| ts.elapsed()),
+                    prod.included_poas.len(),
+                    prod.included_batches.len(),
+                    prod.committed_batches.len(),
+                ));
+            }
+
             ctx.set_timer(self.config.status_interval, TimerEvent::Status);
         };
     }
@@ -860,6 +918,6 @@ impl Protocol for BundlerProtocol {
 
 impl Drop for BundlerProtocol {
     fn drop(&mut self) {
-        self.log_detail("Halting by Drop".to_string());
+        self.logger.log_detail("Halting by Drop".to_string());
     }
 }

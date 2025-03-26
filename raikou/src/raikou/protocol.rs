@@ -280,7 +280,7 @@ pub struct RaikouNode<DL> {
     node_id: NodeId,
     config: Config,
     dissemination: Arc<DL>,
-    bundler_module_id: ModuleId,
+    bundler_module_ids: Vec<ModuleId>,
 
     // Logging and metrics
     logging_base_timestamp: Option<SystemTime>,
@@ -344,7 +344,7 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
         id: NodeId,
         config: Config,
         dissemination: Arc<DL>,
-        bundler_module_id: ModuleId,
+        bundler_module_ids: Vec<ModuleId>,
         detailed_logging: bool,
         metrics: Metrics,
         signer: Signer,
@@ -359,7 +359,7 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
             node_id: id,
             config: config.clone(),
             dissemination,
-            bundler_module_id,
+            bundler_module_ids,
             logging_base_timestamp: None,
             detailed_logging,
             metrics,
@@ -717,8 +717,13 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
                 // Used as the common base timestamp by all nodes for logging.
                 ctx.notify(self.dissemination.module_id(), SetLoggingBaseTimestamp(ts))
                     .await;
-                ctx.notify(self.bundler_module_id, SetLoggingBaseTimestamp(ts))
+                for bundler_id in 0..self.config.n_nodes {
+                    ctx.notify(
+                        self.bundler_module_ids[bundler_id],
+                        SetLoggingBaseTimestamp(ts),
+                    )
                     .await;
+                }
             }
         }
 
@@ -732,11 +737,14 @@ impl<DL: DisseminationLayer> RaikouNode<DL> {
         )
         .await;
 
-        ctx.notify(self.bundler_module_id, dissemination::NotifyCommit {
-            payloads,
-            block_timestamp_usecs: ts,
-            voters: Some(voters),
-        })
+        ctx.notify(
+            self.bundler_module_ids[self.node_id],
+            dissemination::NotifyCommit {
+                payloads,
+                block_timestamp_usecs: ts,
+                voters: Some(voters),
+            },
+        )
         .await;
     }
 
@@ -1071,7 +1079,7 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
                 let reason = self.entry_reason.clone();
 
                 ctx.notify(
-                    self.bundler_module_id,
+                    self.bundler_module_ids[self.node_id],
                     CreateBlock {
                         round,
                         timestamp_usecs,
@@ -1108,7 +1116,7 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
 
             // TODO: add a check for repeated proposals.
             ctx.notify(
-                self.bundler_module_id,
+                self.bundler_module_ids[block_header.author()],
                 ReconstructBlock { block_header },
             )
             .await;
@@ -1528,7 +1536,9 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
         upon timer [TimerEvent::EndOfRun] {
             self.log_detail("Halting by end-of-run timer".to_string());
             ctx.notify(self.dissemination.module_id(), Kill()).await;
-            ctx.notify(self.bundler_module_id, Kill()).await;
+            for bundler_id in 0..self.config.n_nodes {
+                ctx.notify(self.bundler_module_ids[bundler_id], Kill()).await;
+            }
             ctx.halt();
         };
 
@@ -1536,7 +1546,9 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
             upon [Kill()] {
                 self.log_detail("Halting by Kill event".to_string());
                 ctx.notify(self.dissemination.module_id(), Kill()).await;
-                ctx.notify(self.bundler_module_id, Kill()).await;
+                for bundler_id in 0..self.config.n_nodes {
+                    ctx.notify(self.bundler_module_ids[bundler_id], Kill()).await;
+                }
                 ctx.halt();
             };
         };

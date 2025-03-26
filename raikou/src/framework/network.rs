@@ -1,7 +1,10 @@
 // Copyright (c) Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::framework::{timer::NeverReturn, NodeId};
+use crate::{
+    framework::{timer::NeverReturn, NodeId},
+    raikou::Message,
+};
 use futures::poll;
 use rand::{distributions::Distribution, Rng};
 use std::{future::Future, marker::PhantomData, sync::Arc, task::Poll::Ready, time::Duration};
@@ -87,6 +90,143 @@ pub trait NetworkService: NetworkSender {
     fn clear_inbox(&mut self) -> impl Future<Output = ()> + Send {
         async { while self.drop_one().await {} }
     }
+}
+
+pub type ShardMessage<M> = (usize, M);
+
+enum Targets {
+    All,
+    One(NodeId),
+    Many(Vec<NodeId>),
+}
+
+#[derive(Debug)]
+pub struct ShardNetworkSender<M> {
+    shard_id: usize,
+    n_nodes: usize,
+    dispatcher_tx: mpsc::Sender<(usize, Targets, M)>,
+}
+
+impl<M> Clone for ShardNetworkSender<M> {
+    fn clone(&self) -> Self {
+        ShardNetworkSender {
+            shard_id: self.shard_id,
+            n_nodes: self.n_nodes,
+            dispatcher_tx: self.dispatcher_tx.clone(),
+        }
+    }
+}
+
+impl<M: NetworkMessage> NetworkSender for ShardNetworkSender<M> {
+    type Message = M;
+
+    async fn send(&self, data: Self::Message, targets: Vec<NodeId>) {
+        let _ = self
+            .dispatcher_tx
+            .send((self.shard_id, Targets::Many(targets), data))
+            .await;
+    }
+
+    async fn unicast(&self, data: Self::Message, target: NodeId) {
+        let _ = self
+            .dispatcher_tx
+            .send((self.shard_id, Targets::One(target), data))
+            .await;
+    }
+
+    async fn multicast(&self, data: Self::Message) {
+        let _ = self
+            .dispatcher_tx
+            .send((self.shard_id, Targets::All, data))
+            .await;
+    }
+
+    fn n_nodes(&self) -> usize {
+        self.n_nodes
+    }
+}
+
+pub struct ShardNetworkService<M> {
+    rx: mpsc::Receiver<(NodeId, M)>,
+    sender: ShardNetworkSender<M>,
+}
+
+impl<M: NetworkMessage> NetworkSender for ShardNetworkService<M> {
+    type Message = M;
+
+    async fn send(&self, data: Self::Message, targets: Vec<NodeId>) {
+        self.sender.send(data, targets).await
+    }
+
+    async fn unicast(&self, data: Self::Message, target: NodeId) {
+        self.sender.unicast(data, target).await
+    }
+
+    async fn multicast(&self, data: Self::Message) {
+        self.sender.multicast(data).await
+    }
+
+    fn n_nodes(&self) -> usize {
+        self.sender.n_nodes()
+    }
+}
+
+impl<M: NetworkMessage> NetworkService for ShardNetworkService<M> {
+    type Sender = ShardNetworkSender<M>;
+
+    fn new_sender(&self) -> Self::Sender {
+        self.sender.clone()
+    }
+
+    async fn recv(&mut self) -> (NodeId, Self::Message) {
+        self.rx.recv().await.unwrap()
+    }
+}
+
+pub async fn shard_network_service<M: NetworkMessage>(
+    underlying: impl NetworkService<Message = ShardMessage<M>>,
+    n_shards: usize,
+) -> Vec<ShardNetworkService<M>> {
+    let (dispatcher_tx, dispatcher_rx) = mpsc::channel(1024);
+
+    let mut shards = Vec::with_capacity(n_shards);
+    let mut shard_tx = Vec::with_capacity(n_shards);
+
+    for shard_id in 0..n_shards {
+        let (tx, rx) = mpsc::channel(1024);
+        shard_tx.push(tx);
+        shards.push(ShardNetworkService {
+            rx,
+            sender: ShardNetworkSender {
+                shard_id,
+                n_nodes: underlying.n_nodes(),
+                dispatcher_tx: dispatcher_tx.clone(),
+            },
+        });
+    }
+
+    let sender = underlying.new_sender();
+    tokio::spawn(async move {
+        let mut dispatcher_rx = dispatcher_rx;
+        while let Some((shard_id, targets, message)) = dispatcher_rx.recv().await {
+            let message = (shard_id, message);
+            match targets {
+                Targets::All => sender.multicast(message).await,
+                Targets::One(target) => sender.unicast(message, target).await,
+                Targets::Many(targets) => sender.send(message, targets).await,
+            }
+        }
+    });
+
+    tokio::spawn(async move {
+        let mut underlying = underlying;
+        loop {
+            let (sender, (shard_id, message)) = underlying.recv().await;
+            let _ = shard_tx[shard_id].send((sender, message)).await;
+        }
+    });
+
+    shards
 }
 
 pub trait Network {

@@ -61,7 +61,7 @@ use raikou::{
         module_network::{
             match_event_type, ModuleId, ModuleNetwork, ModuleNetworkSender, ModuleNetworkService,
         },
-        network::{MessageCertifier, MessageVerifier, NetworkService},
+        network::{shard_network_service, MessageCertifier, MessageVerifier, NetworkService},
         tcp_network::TcpNetworkService,
         timer::LocalTimerService,
         NodeId, Protocol,
@@ -211,10 +211,13 @@ impl RaikouManager {
         };
 
         let mut module_network = ModuleNetwork::new();
-        let bundler_module_network = module_network.register().await;
+        let bundler_module_networks = module_network.register_many(n_nodes).await;
         let diss_module_network = module_network.register().await;
         let cons_module_network = module_network.register().await;
-        let bundler_module_id = bundler_module_network.module_id();
+        let bundler_module_ids = bundler_module_networks
+            .iter()
+            .map(|net| net.module_id())
+            .collect_vec();
         let diss_module_id = diss_module_network.module_id();
         let cons_module_id = cons_module_network.module_id();
 
@@ -307,9 +310,9 @@ impl RaikouManager {
 
         let verifier = protocol::Verifier::new(config.clone(), sig_verifier.clone(), proof_cache);
 
-        Self::spawn_bundler(
+        Self::spawn_bundlers(
             node_id,
-            bundler_module_network,
+            bundler_module_networks,
             epoch_state.clone(),
             n_nodes,
             Arc::new(RaikouBundleNetworkSender {
@@ -328,7 +331,7 @@ impl RaikouManager {
             node_id,
             config,
             dissemination,
-            bundler_module_id,
+            bundler_module_ids,
             true,
             raikou::raikou::Metrics {
                 // propose_time: propose_time_sender,
@@ -498,9 +501,9 @@ impl RaikouManager {
         }
     }
 
-    async fn spawn_bundler(
+    async fn spawn_bundlers(
         node_id: NodeId,
-        bundler_module_network: ModuleNetworkService,
+        module_networks: Vec<ModuleNetworkService>,
         epoch_state: Arc<EpochState>,
         n_nodes: usize,
         bundler_network_sender: Arc<dyn TRaikouNetworkSender>,
@@ -523,35 +526,42 @@ impl RaikouManager {
         )
         .await;
 
-        let bundler = bundler::Bundler::new(
-            node_id,
-            bundler::Config {
-                module_id: bundler_module_network.module_id(),
-                n_nodes,
-                delta: Duration::from_secs_f64(delta),
-                bundle_window: 10,
-                bundle_store_window: 40,
-                bundle_interval: Duration::from_millis(50),
-                min_bundle_interval: Duration::from_millis(20),
-                max_pending_requests_per_node: 3,
-                status_interval: Duration::from_secs_f64(delta) * 10,
-                // push_bundle_when_proposing: false,
-            },
-            cons_module_id,
-            diss_module_id,
-            true,
-            // metrics,
-            signer,
-            // sig_verifier,
-        );
+        let nets = shard_network_service(bundler_network_service, n_nodes).await;
 
-        tokio::spawn(Protocol::run(
-            bundler.protocol(),
-            node_id,
-            bundler_network_service,
-            bundler_module_network,
-            LocalTimerService::new(),
-        ));
+        for ((bundler_id, net), module_net) in
+            (0..n_nodes).into_iter().zip(nets).zip(module_networks)
+        {
+            let bundler = bundler::Bundler::new(
+                node_id,
+                bundler_id,
+                bundler::Config {
+                    module_id: module_net.module_id(),
+                    n_nodes,
+                    delta: Duration::from_secs_f64(delta),
+                    bundle_window: 10,
+                    bundle_store_window: 40,
+                    bundle_interval: Duration::from_millis(50),
+                    min_bundle_interval: Duration::from_millis(20),
+                    max_pending_requests_per_node: 3,
+                    status_interval: Duration::from_secs_f64(delta) * 10,
+                    // push_bundle_when_proposing: false,
+                },
+                cons_module_id,
+                diss_module_id,
+                true,
+                // metrics,
+                signer.clone(),
+                // sig_verifier,
+            );
+
+            tokio::spawn(Protocol::run(
+                bundler.protocol(),
+                node_id,
+                net,
+                module_net,
+                LocalTimerService::new(),
+            ));
+        }
     }
 
     #[cfg(any(not(feature = "sim-types"), feature = "force-aptos-types"))]

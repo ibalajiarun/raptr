@@ -6,6 +6,7 @@ use crate::{
         context::{Context, Event, SimpleContext},
         module_network::{ModuleEvent, ModuleNetworkService},
     },
+    monitor,
     raikou::counters::OP_COUNTERS,
 };
 use std::{any::Any, future::Future, sync::Arc};
@@ -83,6 +84,11 @@ pub trait Protocol: Send + Sync {
         async move {
             let protocol_name = protocol.lock().await.name().to_string();
             let protocol_main_loop_name = protocol_name.clone() + "_main_loop";
+            let protocol_lock_name = protocol_name.clone() + "_lock";
+            let protocol_msg_handle_name = protocol_name.clone() + "_msg_handle";
+            let protocol_tmr_handle_name = protocol_name.clone() + "_tmr_handle";
+            let protocol_evt_handle_name = protocol_name.clone() + "_evt_handle";
+            let protocol_cnd_handle_name = protocol_name.clone() + "_cnd_handle";
 
             {
                 // Run the start handler and then the condition handlers
@@ -93,31 +99,37 @@ pub trait Protocol: Send + Sync {
             }
 
             while !ctx.halted() {
-                let _timer = OP_COUNTERS.timer(&protocol_main_loop_name);
-
                 // Listen for incoming events.
                 // While waiting for an event, the lock is not held.
-                let mut lock = match ctx.next_event().await {
+                let next_event = ctx.next_event().await;
+
+                let _main_timer = OP_COUNTERS.timer(&protocol_main_loop_name);
+                let mut lock = {
+                    let _lock_timer = OP_COUNTERS.timer(&protocol_lock_name);
+                    protocol.lock().await
+                };
+
+                match next_event {
                     Event::Message(from, message) => {
-                        let mut lock = protocol.lock().await;
+                        let _msg_timer = OP_COUNTERS.timer(&protocol_msg_handle_name);
                         lock.message_handler(ctx, from, message).await;
-                        lock
                     },
                     Event::Timer(event) => {
-                        let mut lock = protocol.lock().await;
+                        let _tmr_timer = OP_COUNTERS.timer(&protocol_tmr_handle_name);
                         lock.timer_event_handler(ctx, event).await;
-                        lock
                     },
                     Event::ModuleEvent(module, event) => {
-                        let mut lock = protocol.lock().await;
+                        let _evt_timer = OP_COUNTERS.timer(&protocol_evt_handle_name);
                         lock.module_event_handler(ctx, module, event).await;
-                        lock
                     },
                 };
 
                 // Run the event handler and then the condition handlers
                 // under the same lock so that nothing can happen in between.
-                lock.condition_handler(ctx).await;
+                {
+                    let _cnd_timer = OP_COUNTERS.timer(&protocol_cnd_handle_name);
+                    lock.condition_handler(ctx).await;
+                }
             }
         }
     }

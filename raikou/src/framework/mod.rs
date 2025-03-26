@@ -1,9 +1,12 @@
 // Copyright (c) Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::framework::{
-    context::{Context, Event, SimpleContext},
-    module_network::{ModuleEvent, ModuleNetworkService},
+use crate::{
+    framework::{
+        context::{Context, Event, SimpleContext},
+        module_network::{ModuleEvent, ModuleNetworkService},
+    },
+    raikou::counters::OP_COUNTERS,
 };
 use std::{any::Any, future::Future, sync::Arc};
 
@@ -33,6 +36,8 @@ where
 pub trait Protocol: Send + Sync {
     type Message: Clone + Send + Sync;
     type TimerEvent: Send + Sync;
+
+    fn name(&self) -> &str;
 
     fn start_handler<Ctx>(&mut self, ctx: &mut Ctx) -> impl Future<Output = ()> + Send
     where
@@ -76,6 +81,9 @@ pub trait Protocol: Send + Sync {
         Ctx: ContextFor<Self>,
     {
         async move {
+            let protocol_name = protocol.lock().await.name().to_string();
+            let protocol_main_loop_name = protocol_name.clone() + "_main_loop";
+
             {
                 // Run the start handler and then the condition handlers
                 // under the same lock so that nothing can happen in between.
@@ -85,6 +93,8 @@ pub trait Protocol: Send + Sync {
             }
 
             while !ctx.halted() {
+                let _timer = OP_COUNTERS.timer(&protocol_main_loop_name);
+
                 // Listen for incoming events.
                 // While waiting for an event, the lock is not held.
                 let mut lock = match ctx.next_event().await {

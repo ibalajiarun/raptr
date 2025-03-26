@@ -1054,6 +1054,10 @@ where
             ctx.set_timer(self.config.status_interval, TimerEvent::Status);
         };
     }
+
+    fn name(&self) -> &str {
+        "native_qs"
+    }
 }
 
 impl<TI> Drop for NativeDisseminationLayerProtocol<TI> {

@@ -1,13 +1,17 @@
 // Copyright (c) Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::raikou::counters::OP_COUNTERS;
 use std::{
     any::{Any, TypeId},
     collections::{btree_map::Entry, BTreeMap},
     fmt::Debug,
     sync::Arc,
 };
-use tokio::sync::{mpsc, RwLock};
+use tokio::{
+    sync::{mpsc, RwLock},
+    time::Instant,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ModuleId(usize);
@@ -57,7 +61,7 @@ pub fn match_event_type<E: ModuleEventTrait>(event: &ModuleEvent) -> bool {
 pub type ModuleEvent = Box<dyn ModuleEventTrait>;
 
 pub struct ModuleNetwork {
-    send: Arc<RwLock<BTreeMap<ModuleId, mpsc::Sender<(ModuleId, ModuleEvent)>>>>,
+    send: Arc<RwLock<BTreeMap<ModuleId, mpsc::Sender<(ModuleId, ModuleEvent, Instant)>>>>,
     next_id: ModuleId,
 }
 
@@ -79,7 +83,7 @@ impl ModuleNetwork {
         match self.send.write().await.entry(module) {
             Entry::Occupied(_) => panic!("Module id {:?} already registered", module),
             Entry::Vacant(entry) => {
-                let (send, recv) = tokio::sync::mpsc::channel(100);
+                let (send, recv) = mpsc::channel(100);
                 entry.insert(send);
 
                 ModuleNetworkService {
@@ -97,12 +101,12 @@ impl ModuleNetwork {
 #[derive(Clone)]
 pub struct ModuleNetworkSender {
     module_id: ModuleId,
-    send: Arc<RwLock<BTreeMap<ModuleId, mpsc::Sender<(ModuleId, ModuleEvent)>>>>,
+    send: Arc<RwLock<BTreeMap<ModuleId, mpsc::Sender<(ModuleId, ModuleEvent, Instant)>>>>,
 }
 
 pub struct ModuleNetworkService {
     sender: ModuleNetworkSender,
-    receive: mpsc::Receiver<(ModuleId, ModuleEvent)>,
+    receive: mpsc::Receiver<(ModuleId, ModuleEvent, Instant)>,
 }
 
 impl ModuleNetworkService {
@@ -119,7 +123,9 @@ impl ModuleNetworkService {
     }
 
     pub async fn recv(&mut self) -> (ModuleId, ModuleEvent) {
-        self.receive.recv().await.unwrap()
+        let (sender, event, ts) = self.receive.recv().await.unwrap();
+        OP_COUNTERS.observe_duration("module_net_delay", ts.elapsed());
+        (sender, event)
     }
 
     pub fn new_sender(&self) -> ModuleNetworkSender {
@@ -131,7 +137,7 @@ impl ModuleNetworkSender {
     pub async fn notify_boxed(&self, module: ModuleId, event: ModuleEvent) {
         // Ignore errors if the receiver is gone.
         let _res = self.send.read().await[&module]
-            .send((self.module_id, event))
+            .send((self.module_id, event, Instant::now()))
             .await;
     }
 

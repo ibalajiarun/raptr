@@ -3,7 +3,7 @@
 
 use crate::{
     counters,
-    counters::RAIKOU_COMMIT_NOTIFY_TO_MEMPOOL_NOTIFY,
+    counters::{OP_COUNTERS, RAIKOU_COMMIT_NOTIFY_TO_MEMPOOL_NOTIFY},
     liveness::proposal_status_tracker::{
         ExponentialWindowFailureTracker, LockedExponentialWindowFailureTracker,
         OptQSPullParamsProvider, TOptQSPullParamsProvider,
@@ -580,6 +580,7 @@ impl RaikouManager {
 
         tokio::spawn(async move {
             loop {
+                let _timer = OP_COUNTERS.timer("qs_module_event_handler");
                 let (module, event) = module_network.recv().await;
 
                 if match_event_type::<dissemination::PreparePayload>(&event) {

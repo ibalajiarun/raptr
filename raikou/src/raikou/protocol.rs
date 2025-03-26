@@ -1566,4 +1566,8 @@ impl<DL: DisseminationLayer> Protocol for RaikouNode<DL> {
             ctx.set_timer(self.config.status_interval, TimerEvent::Status);
         };
     }
+
+    fn name(&self) -> &str {
+        "raptr"
+    }
 }

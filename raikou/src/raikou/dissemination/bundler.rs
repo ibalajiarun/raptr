@@ -648,6 +648,8 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
         };
 
         upon receive [Message::Bundle(bundle)] from [author] 'handler: {
+            let _timer = OP_COUNTERS.timer("bundle_message_handler");
+
             let index = bundle.data.index;
 
             if author == self.node_id {
@@ -674,6 +676,8 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
 
         upon event of type [CreateBlock] from [_consensus_module] {
             upon [CreateBlock { round, timestamp_usecs, reason, exclude }] {
+                let _timer = OP_COUNTERS.timer("create_block");
+
                 // TODO: broken by moving to async `prepare_payload`.
                 // if self.config.push_bundle_when_proposing {
                 //     self.create_bundle(ctx).await;
@@ -832,6 +836,10 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
             ));
             ctx.set_timer(self.config.status_interval, TimerEvent::Status);
         };
+    }
+
+    fn name(&self) -> &str {
+        "bundler"
     }
 }
 

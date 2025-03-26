@@ -24,7 +24,7 @@ use crate::{
             NewQCWithPayload, NotifyCommit, PayloadReady, PreparePayload, ProposalReceived,
             SetLoggingBaseTimestamp,
         },
-        protocol,
+        duration_since_epoch, protocol,
         types::*,
     },
 };
@@ -44,7 +44,7 @@ use std::{
     future::Future,
     ops::Range,
     sync::{atomic::AtomicBool, Arc},
-    time::{Duration, SystemTime},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{sync::RwLock, time::Instant};
 
@@ -198,13 +198,13 @@ struct BundleData {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Message {
-    Bundle(Bundle),
+    Bundle(Bundle, u64),
 }
 
 impl std::fmt::Debug for Message {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Message::Bundle(bundle) => {
+            Message::Bundle(bundle, _ts) => {
                 write!(
                     f,
                     "Bundle({}, {})",
@@ -221,7 +221,7 @@ pub type Certifier = NoopCertifier;
 impl MessageVerifier<Message> for protocol::Verifier {
     async fn verify(&self, sender: NodeId, message: &Message) -> anyhow::Result<()> {
         match message {
-            Message::Bundle(bundle) => monitor!("verify_bundle", {
+            Message::Bundle(bundle, _ts) => monitor!("verify_bundle", {
                 // TODO: verify payload size.
 
                 bundle.data.payload.verify(self, None, sender)
@@ -635,7 +635,7 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
                 self.my_bundles.push_back(bundle.clone());
                 self.on_new_bundle(self.node_id, bundle.clone(), ctx).await;
 
-                ctx.multicast(Message::Bundle(bundle)).await;
+                ctx.multicast(Message::Bundle(bundle, duration_since_epoch().as_micros() as u64)).await;
 
                 OP_COUNTERS.observe_duration("create_bundle", ts.elapsed());
 
@@ -647,7 +647,12 @@ impl<DL: DisseminationLayer> Protocol for BundlerProtocol<DL> {
             };
         };
 
-        upon receive [Message::Bundle(bundle)] from [author] 'handler: {
+        upon receive [Message::Bundle(bundle, ts)] from [author] 'handler: {
+            OP_COUNTERS.observe_duration(
+                "bundle_message_delay",
+                duration_since_epoch().saturating_sub(Duration::from_micros(ts)),
+            );
+
             let _timer = OP_COUNTERS.timer("bundle_message_handler");
 
             let index = bundle.data.index;

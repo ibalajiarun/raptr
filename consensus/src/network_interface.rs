@@ -134,18 +134,16 @@ pub struct ConsensusNetworkClient<NetworkClient> {
 }
 
 /// Supported protocols in preferred order (from highest priority to lowest).
-pub const RPC: &[ProtocolId] = &[
-    ProtocolId::ConsensusRpcCompressed,
-    ProtocolId::ConsensusRpcBcs,
-    ProtocolId::ConsensusRpcJson,
-];
+pub const RPC: &[ProtocolId] = &[ProtocolId::ConsensusRpcCompressed];
 
 /// Supported protocols in preferred order (from highest priority to lowest).
-pub const DIRECT_SEND: &[ProtocolId] = &[
-    ProtocolId::ConsensusDirectSendCompressed,
-    ProtocolId::ConsensusDirectSendBcs,
-    ProtocolId::ConsensusDirectSendJson,
-];
+pub const DIRECT_SEND: &[ProtocolId] = &[ProtocolId::ConsensusDirectSendCompressed];
+
+/// Supported protocols in preferred order (from highest priority to lowest).
+pub const RPC_NOCOMPRESS: &[ProtocolId] = &[ProtocolId::ConsensusRpcBcs];
+
+/// Supported protocols in preferred order (from highest priority to lowest).
+pub const DIRECT_SEND_NOCOMPRESS: &[ProtocolId] = &[ProtocolId::ConsensusDirectSendBcs];
 
 impl<NetworkClient: NetworkClientInterface<ConsensusMsg>> ConsensusNetworkClient<NetworkClient> {
     /// Returns a new consensus network client

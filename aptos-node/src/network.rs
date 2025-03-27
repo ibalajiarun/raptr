@@ -54,10 +54,20 @@ struct ApplicationNetworkHandle<T> {
 
 /// TODO: make this configurable (e.g., for compression)
 /// Returns the network application config for the consensus client and service
-pub fn consensus_network_configuration(node_config: &NodeConfig) -> NetworkApplicationConfig {
-    let direct_send_protocols: Vec<ProtocolId> =
-        aptos_consensus::network_interface::DIRECT_SEND.into();
-    let rpc_protocols: Vec<ProtocolId> = aptos_consensus::network_interface::RPC.into();
+pub fn consensus_network_configuration(
+    node_config: &NodeConfig,
+    compress: bool,
+) -> NetworkApplicationConfig {
+    let direct_send_protocols: Vec<ProtocolId> = if compress {
+        aptos_consensus::network_interface::DIRECT_SEND.into()
+    } else {
+        aptos_consensus::network_interface::DIRECT_SEND_NOCOMPRESS.into()
+    };
+    let rpc_protocols: Vec<ProtocolId> = if compress {
+        aptos_consensus::network_interface::RPC.into()
+    } else {
+        aptos_consensus::network_interface::RPC_NOCOMPRESS.into()
+    };
 
     let network_client_config =
         NetworkClientConfig::new(direct_send_protocols.clone(), rpc_protocols.clone());
@@ -336,11 +346,18 @@ pub fn setup_networks_and_get_interfaces(
             {
                 panic!("There can be at most two validator network!");
             } else {
+                let compress =
+                    if consensus_network_handle.is_some() && consensus_network_handle2.is_none() {
+                        false
+                    } else {
+                        true
+                    };
+
                 let network_handle = register_client_and_service_with_network(
                     &mut network_builder,
                     network_id,
                     &network_config,
-                    consensus_network_configuration(node_config),
+                    consensus_network_configuration(node_config, compress),
                     true,
                 );
                 if consensus_network_handle.is_none() {
@@ -574,7 +591,7 @@ fn transform_network_handles_into_interfaces(
     let consensus_interfaces = consensus_network_handle.map(|consensus_network_handle| {
         create_network_interfaces(
             vec![consensus_network_handle],
-            consensus_network_configuration(node_config),
+            consensus_network_configuration(node_config, true),
             peers_and_metadata.clone(),
         )
     });
@@ -582,7 +599,7 @@ fn transform_network_handles_into_interfaces(
     let consensus_interfaces2 = consensus_network_handle2.map(|consensus_network_handle| {
         create_network_interfaces(
             vec![consensus_network_handle],
-            consensus_network_configuration(node_config),
+            consensus_network_configuration(node_config, false),
             peers_and_metadata.clone(),
         )
     });
@@ -590,7 +607,7 @@ fn transform_network_handles_into_interfaces(
     let consensus_interfaces3 = consensus_network_handle3.map(|consensus_network_handle| {
         create_network_interfaces(
             vec![consensus_network_handle],
-            consensus_network_configuration(node_config),
+            consensus_network_configuration(node_config, true),
             peers_and_metadata.clone(),
         )
     });

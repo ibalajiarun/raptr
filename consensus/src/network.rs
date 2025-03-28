@@ -487,7 +487,6 @@ impl NetworkSender {
     /// Tries to send msg to given recipients.
     pub async fn send_qs2(&self, msg: ConsensusMsg, recipients: Vec<Author>) {
         fail_point!("consensus::send::any", |_| ());
-        let network_sender = self.qs2_network_client.clone();
         let mut self_sender = self.self_sender.clone();
         for peer in recipients {
             if self.author == peer {
@@ -500,7 +499,7 @@ impl NetworkSender {
             counters::CONSENSUS_SENT_MSGS
                 .with_label_values(&[msg.name()])
                 .inc();
-            if let Err(e) = network_sender.send_to(peer, msg.clone()) {
+            if let Err(e) = self.qs2_network_client.send_to(peer, msg.clone()) {
                 warn!(
                     remote_peer = peer,
                     error = ?e, "Failed to send a msg {:?} to peer", msg

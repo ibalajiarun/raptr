@@ -296,6 +296,9 @@ pub fn setup_networks_and_get_interfaces(
     let mut consensus_network_handle = None;
     let mut consensus_network_handle2 = None;
     let mut consensus_network_handle3 = None;
+    let mut peers_and_metadata1 = None;
+    let mut peers_and_metadata2 = None;
+    let mut peers_and_metadata3 = None;
     let mut consensus_observer_network_handles: Option<
         Vec<ApplicationNetworkHandle<ConsensusObserverMessage>>,
     > = None;
@@ -333,7 +336,7 @@ pub fn setup_networks_and_get_interfaces(
             &network_config,
             TimeService::real(),
             Some(ess),
-            peers_and_metadata,
+            peers_and_metadata.clone(),
         );
 
         // Register consensus (both client and server) with the network
@@ -346,12 +349,13 @@ pub fn setup_networks_and_get_interfaces(
             {
                 panic!("There can be at most two validator network!");
             } else {
-                let compress =
-                    if consensus_network_handle.is_some() && consensus_network_handle2.is_none() {
-                        false
-                    } else {
-                        true
-                    };
+                let compress = if consensus_network_handle.is_none() {
+                    true
+                } else if consensus_network_handle2.is_none() {
+                    false
+                } else {
+                    true
+                };
 
                 let network_handle = register_client_and_service_with_network(
                     &mut network_builder,
@@ -361,10 +365,13 @@ pub fn setup_networks_and_get_interfaces(
                     true,
                 );
                 if consensus_network_handle.is_none() {
+                    peers_and_metadata1 = Some(peers_and_metadata);
                     consensus_network_handle = Some(network_handle);
                 } else if consensus_network_handle2.is_none() {
+                    peers_and_metadata2 = Some(peers_and_metadata);
                     consensus_network_handle2 = Some(network_handle);
                 } else {
+                    peers_and_metadata3 = Some(peers_and_metadata);
                     consensus_network_handle3 = Some(network_handle);
                 }
             }
@@ -494,7 +501,9 @@ pub fn setup_networks_and_get_interfaces(
         mempool_network_handles,
         peer_monitoring_service_network_handles,
         storage_service_network_handles,
-        peers_and_metadata.clone(),
+        peers_and_metadata1.unwrap(),
+        peers_and_metadata2.unwrap(),
+        peers_and_metadata3.unwrap(),
     );
 
     if !netbench_handles.is_empty() {
@@ -577,6 +586,8 @@ fn transform_network_handles_into_interfaces(
     >,
     storage_service_network_handles: Vec<ApplicationNetworkHandle<StorageServiceMessage>>,
     peers_and_metadata: Arc<PeersAndMetadata>,
+    peers_and_metadata2: Arc<PeersAndMetadata>,
+    peers_and_metadata3: Arc<PeersAndMetadata>,
 ) -> (
     Option<ApplicationNetworkInterfaces<ConsensusMsg>>,
     Option<ApplicationNetworkInterfaces<ConsensusMsg>>,
@@ -600,7 +611,7 @@ fn transform_network_handles_into_interfaces(
         create_network_interfaces(
             vec![consensus_network_handle],
             consensus_network_configuration(node_config, false),
-            peers_and_metadata.clone(),
+            peers_and_metadata2.clone(),
         )
     });
 
@@ -608,7 +619,7 @@ fn transform_network_handles_into_interfaces(
         create_network_interfaces(
             vec![consensus_network_handle],
             consensus_network_configuration(node_config, true),
-            peers_and_metadata.clone(),
+            peers_and_metadata3.clone(),
         )
     });
 

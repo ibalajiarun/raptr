@@ -204,16 +204,16 @@ impl BatchProofQueue {
         batches_for_author.insert(batch_sort_key.clone(), proof.info().clone());
 
         // Check if a batch with a higher batch Id (reverse sorted) exists
-        if let Some((prev_batch_key, _)) = batches_for_author
-            .range((Bound::Unbounded, Bound::Excluded(batch_sort_key.clone())))
-            .next_back()
-        {
-            if prev_batch_key.gas_bucket_start() == batch_sort_key.gas_bucket_start() {
-                counters::PROOF_MANAGER_OUT_OF_ORDER_PROOF_INSERTION
-                    .with_label_values(&[author.short_str().as_str()])
-                    .inc();
-            }
-        }
+        // if let Some((prev_batch_key, _)) = batches_for_author
+        //     .range((Bound::Unbounded, Bound::Excluded(batch_sort_key.clone())))
+        //     .next_back()
+        // {
+        //     if prev_batch_key.gas_bucket_start() == batch_sort_key.gas_bucket_start() {
+        //         counters::PROOF_MANAGER_OUT_OF_ORDER_PROOF_INSERTION
+        //             .with_label_values(&[author.short_str().as_str()])
+        //             .inc();
+        //     }
+        // }
 
         self.expirations.add_item(batch_sort_key, expiration);
 
@@ -332,6 +332,7 @@ impl BatchProofQueue {
     // proof before the batch expires, the batch summary will be garbage collected.
     fn gc_expired_batch_summaries_without_proofs(&mut self) {
         let timestamp = aptos_infallible::duration_since_epoch().as_micros() as u64;
+        let mut count = 0;
         self.items.retain(|_, item| {
             if item.is_committed() || item.proof.is_some() || item.info.expiration() > timestamp {
                 true
@@ -339,12 +340,13 @@ impl BatchProofQueue {
                 self.author_to_batches
                     .get_mut(&item.info.author())
                     .map(|queue| queue.remove(&BatchSortKey::from_info(&item.info)));
-                counters::GARBAGE_COLLECTED_IN_PROOF_QUEUE_COUNTER
-                    .with_label_values(&["expired_batch_without_proof"])
-                    .inc();
+                count += 1;
                 false
             }
         });
+        counters::GARBAGE_COLLECTED_IN_PROOF_QUEUE_COUNTER
+            .with_label_values(&["expired_batch_without_proof"])
+            .inc_by(count);
     }
 
     fn log_remaining_data_after_pull(

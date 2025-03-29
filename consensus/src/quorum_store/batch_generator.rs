@@ -219,19 +219,20 @@ impl BatchGenerator {
             }
             let num_take_txns = std::cmp::min(self.config.sender_max_batch_txns, txns_remaining);
             let mut batch_bytes_remaining = self.config.sender_max_batch_bytes as u64;
-            let num_batch_txns = txns
-                .iter()
-                .take(num_take_txns)
-                .take_while(|txn| {
-                    let txn_bytes = txn.txn_bytes_len() as u64;
-                    if batch_bytes_remaining.checked_sub(txn_bytes).is_some() {
-                        batch_bytes_remaining -= txn_bytes;
-                        true
-                    } else {
-                        false
-                    }
-                })
-                .count();
+            let num_batch_txns = num_take_txns;
+            // let num_batch_txns = txns
+            //     .iter()
+            //     .take(num_take_txns)
+            //     .take_while(|txn| {
+            //         let txn_bytes = txn.txn_bytes_len() as u64;
+            //         if batch_bytes_remaining.checked_sub(txn_bytes).is_some() {
+            //             batch_bytes_remaining -= txn_bytes;
+            //             true
+            //         } else {
+            //             false
+            //         }
+            //     })
+            //     .count();
             if num_batch_txns > 0 {
                 let batch_txns: Vec<_> = txns.drain(0..num_batch_txns).collect();
                 let batch = self.create_new_batch(batch_txns, expiry_time, bucket_start);
@@ -249,45 +250,45 @@ impl BatchGenerator {
     ) -> Vec<Batch> {
         // Sort by gas, in descending order. This is a stable sort on existing mempool ordering,
         // so will not reorder accounts or their sequence numbers as long as they have the same gas.
-        pulled_txns.sort_by_key(|txn| u64::MAX - txn.gas_unit_price());
-
-        let reverse_buckets_excluding_zero: Vec<_> = self
-            .config
-            .batch_buckets
-            .iter()
-            .skip(1)
-            .rev()
-            .cloned()
-            .collect();
-
+        // pulled_txns.sort_by_key(|txn| u64::MAX - txn.gas_unit_price());
+        //
+        // let reverse_buckets_excluding_zero: Vec<_> = self
+        //     .config
+        //     .batch_buckets
+        //     .iter()
+        //     .skip(1)
+        //     .rev()
+        //     .cloned()
+        //     .collect();
+        //
         let mut max_batches_remaining = self.config.sender_max_num_batches as u64;
         let mut batches = vec![];
-        for bucket_start in &reverse_buckets_excluding_zero {
-            if pulled_txns.is_empty() || max_batches_remaining == 0 {
-                return batches;
-            }
-
-            // Search for key in descending gas order
-            let num_txns_in_bucket = match pulled_txns
-                .binary_search_by_key(&(u64::MAX - (*bucket_start - 1), PeerId::ZERO), |txn| {
-                    (u64::MAX - txn.gas_unit_price(), txn.sender())
-                }) {
-                Ok(index) => index,
-                Err(index) => index,
-            };
-            if num_txns_in_bucket == 0 {
-                continue;
-            }
-
-            self.push_bucket_to_batches(
-                &mut batches,
-                pulled_txns,
-                num_txns_in_bucket,
-                expiry_time,
-                *bucket_start,
-                &mut max_batches_remaining,
-            );
-        }
+        // for bucket_start in &reverse_buckets_excluding_zero {
+        //     if pulled_txns.is_empty() || max_batches_remaining == 0 {
+        //         return batches;
+        //     }
+        //
+        //     // Search for key in descending gas order
+        //     let num_txns_in_bucket = match pulled_txns
+        //         .binary_search_by_key(&(u64::MAX - (*bucket_start - 1), PeerId::ZERO), |txn| {
+        //             (u64::MAX - txn.gas_unit_price(), txn.sender())
+        //         }) {
+        //         Ok(index) => index,
+        //         Err(index) => index,
+        //     };
+        //     if num_txns_in_bucket == 0 {
+        //         continue;
+        //     }
+        //
+        //     self.push_bucket_to_batches(
+        //         &mut batches,
+        //         pulled_txns,
+        //         num_txns_in_bucket,
+        //         expiry_time,
+        //         *bucket_start,
+        //         &mut max_batches_remaining,
+        //     );
+        // }
         if !pulled_txns.is_empty() && max_batches_remaining > 0 {
             self.push_bucket_to_batches(
                 &mut batches,

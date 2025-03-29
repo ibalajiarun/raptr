@@ -784,6 +784,10 @@ pub struct NetworkTask {
         (AccountAddress, Discriminant<IncomingRpcRequest>),
         (AccountAddress, IncomingRpcRequest),
     >,
+    raikou_tx: aptos_channel::Sender<
+        (AccountAddress, Discriminant<ConsensusMsg>),
+        (AccountAddress, ConsensusMsg),
+    >,
     all_events: Box<dyn Stream<Item = Event<ConsensusMsg>> + Send + Unpin>,
 }
 
@@ -794,20 +798,24 @@ impl NetworkTask {
         qs_network_service_events: NetworkServiceEvents<ConsensusMsg>,
         qs2_network_service_events: NetworkServiceEvents<ConsensusMsg>,
         self_receiver: aptos_channels::UnboundedReceiver<Event<ConsensusMsg>>,
+        raikou_tx: aptos_channel::Sender<
+            (AccountAddress, Discriminant<ConsensusMsg>),
+            (AccountAddress, ConsensusMsg),
+        >,
     ) -> (NetworkTask, NetworkReceivers) {
         let (consensus_messages_tx, consensus_messages) = aptos_channel::new(
             QueueStyle::FIFO,
-            10,
+            100,
             Some(&counters::CONSENSUS_CHANNEL_MSGS),
         );
         let (quorum_store_messages_tx, quorum_store_messages) = aptos_channel::new(
             QueueStyle::FIFO,
             // TODO: tune this value based on quorum store messages with backpressure
-            50,
+            500,
             Some(&counters::QUORUM_STORE_CHANNEL_MSGS),
         );
         let (rpc_tx, rpc_rx) =
-            aptos_channel::new(QueueStyle::FIFO, 10, Some(&counters::RPC_CHANNEL_MSGS));
+            aptos_channel::new(QueueStyle::FIFO, 100, Some(&counters::RPC_CHANNEL_MSGS));
 
         // Verify the network events have been constructed correctly
         let network_and_events = network_service_events.into_network_and_events();
@@ -843,6 +851,7 @@ impl NetworkTask {
                 consensus_messages_tx,
                 quorum_store_messages_tx,
                 rpc_tx,
+                raikou_tx,
                 all_events,
             },
             NetworkReceivers {
@@ -923,8 +932,6 @@ impl NetworkTask {
                         | ConsensusMsg::OrderVoteMsg(_)
                         | ConsensusMsg::SyncInfo(_)
                         | ConsensusMsg::EpochRetrievalRequest(_)
-                        | ConsensusMsg::RaikouMessage(_)
-                        | ConsensusMsg::RaikouDissMessage(_)
                         | ConsensusMsg::EpochChangeProof(_)) => {
                             if let ConsensusMsg::ProposalMsg(proposal) = &consensus_msg {
                                 observe_block(
@@ -939,6 +946,10 @@ impl NetworkTask {
                                 );
                             }
                             Self::push_msg(peer_id, consensus_msg, &self.consensus_messages_tx);
+                        },
+                        raikou_msg @ (ConsensusMsg::RaikouMessage(_)
+                        | ConsensusMsg::RaikouDissMessage(_)) => {
+                            Self::push_msg(peer_id, raikou_msg, &self.raikou_tx);
                         },
                         // TODO: get rid of the rpc dummy value
                         ConsensusMsg::RandGenMessage(req) => {

@@ -1072,6 +1072,16 @@ pub static RPC_CHANNEL_MSGS: Lazy<IntCounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
+/// Counters(queued,dequeued,dropped) related to rpc request channel
+pub static RAIKOU_CHANNEL_MSGS: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "aptos_consensus_raikou_channel_msgs_count",
+        "Counters(queued,dequeued,dropped) related to rpc request channel",
+        &["state"]
+    )
+    .unwrap()
+});
+
 /// Counters(queued,dequeued,dropped) related to block retrieval per epoch task
 pub static BLOCK_RETRIEVAL_TASK_MSGS: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(

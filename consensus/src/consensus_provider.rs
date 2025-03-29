@@ -25,7 +25,7 @@ use crate::{
     util::time_service::ClockTimeService,
 };
 use aptos_bounded_executor::BoundedExecutor;
-use aptos_channels::aptos_channel::Receiver;
+use aptos_channels::{aptos_channel, aptos_channel::Receiver, message_queues::QueueStyle};
 use aptos_config::config::NodeConfig;
 use aptos_consensus_notifications::ConsensusNotificationSender;
 use aptos_event_notifications::{DbBackedOnChainConfig, ReconfigNotificationListener};
@@ -105,6 +105,9 @@ pub fn start_consensus(
     // ));
     let execution_client = Arc::new(DummyExecutionClient {});
 
+    let (raikou_tx, raikou_rx) =
+        aptos_channel::new(QueueStyle::FIFO, 100, Some(&counters::RAIKOU_CHANNEL_MSGS));
+
     let epoch_mgr = EpochManager::new(
         node_config,
         time_service,
@@ -124,6 +127,7 @@ pub fn start_consensus(
         rand_storage,
         consensus_publisher,
         state_sync_notifier,
+        raikou_rx,
     );
 
     let (network_task, network_receiver) = NetworkTask::new(
@@ -131,6 +135,7 @@ pub fn start_consensus(
         qs_network_service_events,
         qs2_network_service_events,
         self_receiver,
+        raikou_tx,
     );
 
     runtime.spawn(network_task.start());

@@ -17,6 +17,7 @@ use crate::{
 };
 use anyhow::Context;
 use aptos_bitvec::BitVec;
+use aptos_channels::aptos_channel;
 use aptos_config::config::ConsensusConfig;
 use aptos_consensus_notifications::ConsensusNotificationSender;
 use aptos_consensus_types::{
@@ -49,6 +50,7 @@ use aptos_validator_transaction_pool::TransactionFilter;
 use futures::{executor::block_on, future::BoxFuture, FutureExt, StreamExt};
 use futures_channel::{mpsc::UnboundedSender, oneshot};
 use itertools::Itertools;
+use move_core_types::account_address::AccountAddress;
 use raikou::{
     framework::{
         injection::{delay_injection, drop_injection},
@@ -77,6 +79,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     future::Future,
     marker::PhantomData,
+    mem::Discriminant,
     net::{IpAddr, SocketAddr},
     ops::{BitOr, Deref},
     sync::{
@@ -117,9 +120,9 @@ impl RaikouManager {
         delta: f64,
         total_duration_in_delta: u32,
         enable_optimistic_dissemination: bool,
-        messages_rx: aptos_channels::aptos_channel::Receiver<
-            PeerId,
-            (Author, RaikouNetworkMessage),
+        messages_rx: aptos_channel::Receiver<
+            (AccountAddress, Discriminant<ConsensusMsg>),
+            (AccountAddress, ConsensusMsg),
         >,
         diss_rx: aptos_channels::aptos_channel::Receiver<PeerId, (Author, RaikouNetworkMessage)>,
         mut shutdown_rx: oneshot::Receiver<oneshot::Sender<()>>,
@@ -857,9 +860,9 @@ where
 {
     pub async fn new(
         epoch_state: Arc<EpochState>,
-        mut messages_rx: aptos_channels::aptos_channel::Receiver<
-            PeerId,
-            (Author, RaikouNetworkMessage),
+        mut messages_rx: aptos_channel::Receiver<
+            (AccountAddress, Discriminant<ConsensusMsg>),
+            (AccountAddress, ConsensusMsg),
         >,
         network_sender: Arc<NetworkSender>,
         certifier: Arc<C>,
@@ -880,6 +883,9 @@ where
             loop {
                 let (sender, msg) = messages_rx.select_next_some().await;
                 let sender = *address_to_index.get(&sender).unwrap();
+                let ConsensusMsg::RaikouMessage(msg) = msg else {
+                    unreachable!()
+                };
 
                 if drop_injection() {
                     info!("APTNET: CONS: Dropping a message from {}", sender);

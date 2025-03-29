@@ -185,6 +185,12 @@ pub struct EpochManager<P: OnChainConfigProvider> {
     raikou_shutdown_tx: Option<oneshot::Sender<oneshot::Sender<()>>>,
     key_storage: PersistentSafetyStorage,
     state_sync_notifier: Arc<dyn ConsensusNotificationSender>,
+    raikou_rx: Option<
+        aptos_channel::Receiver<
+            (AccountAddress, Discriminant<ConsensusMsg>),
+            (AccountAddress, ConsensusMsg),
+        >,
+    >,
 }
 
 impl<P: OnChainConfigProvider> EpochManager<P> {
@@ -208,6 +214,10 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
         rand_storage: Arc<dyn RandStorage<AugmentedData>>,
         consensus_publisher: Option<Arc<ConsensusPublisher>>,
         state_sync_notifier: Arc<dyn ConsensusNotificationSender>,
+        raikou_rx: aptos_channel::Receiver<
+            (AccountAddress, Discriminant<ConsensusMsg>),
+            (AccountAddress, ConsensusMsg),
+        >,
     ) -> Self {
         let author = node_config.validator_network.as_ref().unwrap().peer_id();
         let config = node_config.consensus.clone();
@@ -265,6 +275,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             diss_tx: None,
             key_storage,
             state_sync_notifier,
+            raikou_rx: Some(raikou_rx),
         }
     }
 
@@ -1375,7 +1386,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
         let bootstrapper = RaikouManager::new();
 
         let (raikoux_message_tx, raikou_message_rx) =
-            aptos_channel::new(QueueStyle::FIFO, 10, None);
+            aptos_channel::new(QueueStyle::FIFO, 20, None);
         self.raikou_message_tx = Some(raikoux_message_tx);
         let (diss_tx, diss_rx) = aptos_channel::new(QueueStyle::FIFO, 10, None);
         self.diss_tx = Some(diss_tx);
@@ -1398,7 +1409,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
             delta,
             total_duration_in_delta,
             enable_optimistic_dissemination,
-            raikou_message_rx,
+            self.raikou_rx.take().unwrap(),
             diss_rx,
             raikou_shutdown_rx,
             payload_client,
@@ -1608,44 +1619,51 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
                 self.config.quorum_store.batch_expiry_gap_when_init_usecs;
             let payload_manager = self.payload_manager.clone();
             let pending_blocks = self.pending_blocks.clone();
-            self.bounded_executor
-                .spawn(async move {
-                    match monitor!(
-                        "verify_message",
-                        unverified_event.clone().verify(
-                            peer_id,
-                            &epoch_state.verifier,
-                            &proof_cache,
-                            quorum_store_enabled,
-                            peer_id == my_peer_id,
-                            max_num_batches,
-                            max_batch_expiry_gap_usecs,
-                        )
-                    ) {
-                        Ok(verified_event) => {
-                            Self::forward_event(
-                                raikou_diss_tx,
-                                raikou_tx,
-                                quorum_store_msg_tx,
-                                round_manager_tx,
-                                buffered_proposal_tx,
+            if let UnverifiedEvent::RaikouMessage(msg) = unverified_event {
+                raikou_tx
+                    .unwrap()
+                    .push(peer_id, (peer_id, msg))
+                    .expect("must push");
+            } else {
+                self.bounded_executor
+                    .spawn(async move {
+                        match monitor!(
+                            "verify_message",
+                            unverified_event.verify(
                                 peer_id,
-                                verified_event,
-                                payload_manager,
-                                pending_blocks,
-                            );
-                        },
-                        Err(e) => {
-                            error!(
-                                SecurityEvent::ConsensusInvalidMessage,
-                                remote_peer = peer_id,
-                                error = ?e,
-                                unverified_event = unverified_event
-                            );
-                        },
-                    }
-                })
-                .await;
+                                &epoch_state.verifier,
+                                &proof_cache,
+                                quorum_store_enabled,
+                                peer_id == my_peer_id,
+                                max_num_batches,
+                                max_batch_expiry_gap_usecs,
+                            )
+                        ) {
+                            Ok(verified_event) => {
+                                Self::forward_event(
+                                    raikou_diss_tx,
+                                    raikou_tx,
+                                    quorum_store_msg_tx,
+                                    round_manager_tx,
+                                    buffered_proposal_tx,
+                                    peer_id,
+                                    verified_event,
+                                    payload_manager,
+                                    pending_blocks,
+                                );
+                            },
+                            Err(e) => {
+                                error!(
+                                    SecurityEvent::ConsensusInvalidMessage,
+                                    remote_peer = peer_id,
+                                    error = ?e,
+                                    // unverified_event = unverified_event
+                                );
+                            },
+                        }
+                    })
+                    .await;
+            }
         }
         Ok(())
     }

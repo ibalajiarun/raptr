@@ -48,6 +48,8 @@ impl QuorumStoreDB {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
+        opts.set_enable_blob_files(true);
+        opts.set_blob_file_size(16 * 1024);
         let db = DB::open(path.clone(), QUORUM_STORE_DB_NAME, column_families, &opts)
             .expect("QuorumstoreDB open failed; unable to continue");
 

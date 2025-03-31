@@ -89,10 +89,10 @@ impl BatchProofQueue {
     ) -> Self {
         Self {
             my_peer_id,
-            author_to_batches: HashMap::new(),
-            items: HashMap::new(),
+            author_to_batches: HashMap::with_capacity(200),
+            items: HashMap::with_capacity(50_000),
             txn_summary_num_occurrences: HashMap::new(),
-            expirations: TimeExpirations::new(),
+            expirations: TimeExpirations::with_capacity(50_000),
             batch_store,
             latest_block_timestamp: 0,
             remaining_txns_with_duplicates: 0,
@@ -257,10 +257,10 @@ impl BatchProofQueue {
         }
         self.inc_remaining_proofs(&author, num_txns);
 
-        sample!(
-            SampleRate::Duration(Duration::from_millis(500)),
-            self.gc_expired_batch_summaries_without_proofs()
-        );
+        // sample!(
+        //     SampleRate::Duration(Duration::from_millis(500)),
+        //     self.gc_expired_batch_summaries_without_proofs()
+        // );
     }
 
     pub fn insert_batches(
@@ -272,6 +272,8 @@ impl BatchProofQueue {
         for (batch_info, txn_summaries) in batches_with_txn_summaries.into_iter() {
             let batch_sort_key = BatchSortKey::from_info(&batch_info);
             let batch_key = BatchKey::from_info(&batch_info);
+
+            assert!(txn_summaries.is_empty());
 
             // If the batch is either committed or the txn summary already exists, skip
             // inserting this batch.
@@ -321,10 +323,10 @@ impl BatchProofQueue {
             }
         }
 
-        sample!(
-            SampleRate::Duration(Duration::from_millis(500)),
-            self.gc_expired_batch_summaries_without_proofs()
-        );
+        // sample!(
+        //     SampleRate::Duration(Duration::from_millis(500)),
+        //     self.gc_expired_batch_summaries_without_proofs()
+        // );
         counters::PROOF_QUEUE_ADD_BATCH_SUMMARIES_DURATION.observe_duration(start.elapsed());
     }
 

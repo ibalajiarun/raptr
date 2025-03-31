@@ -95,7 +95,7 @@ impl BatchCoordinator {
                 })
                 .collect();
             let signed_batch_infos =
-                tokio::task::spawn_blocking(|| batch_store.persist(persist_requests))
+                tokio::task::spawn_blocking(move || batch_store.persist(persist_requests))
                     .await
                     .unwrap();
             if !signed_batch_infos.is_empty() {

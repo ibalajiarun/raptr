@@ -88,7 +88,7 @@ pub(crate) fn multiregion_benchmark_test(duration: Duration, num_fullnodes: usiz
         .with_validator_resource_override(NodeResourceOverride {
             cpu_cores: Some(62),
             memory_gib: Some(240),
-            storage_gib: Some(1000),
+            storage_gib: Some(2500),
         })
         .with_genesis_helm_config_fn(Arc::new(|helm_values| {
             // Have single epoch change in land blocking

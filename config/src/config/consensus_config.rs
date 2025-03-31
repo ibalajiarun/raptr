@@ -319,7 +319,7 @@ impl Default for ConsensusConfig {
                 backoff_policy_max_delay_ms: 10000,
                 rpc_timeout_ms: 10000,
             },
-            num_bounded_executor_tasks: 32,
+            num_bounded_executor_tasks: 64,
             enable_pre_commit: true,
             max_pending_rounds_in_commit_vote_cache: 100,
             optimistic_sig_verification: true,

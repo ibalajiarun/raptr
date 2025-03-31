@@ -117,7 +117,7 @@ impl NetworkTest for ConsensusOnlyBenchmark {
         let mut futures = Vec::new();
         let tps_per_client = (self.concurrency / clients.len()).max(1);
         let test_time = self.test_time;
-        let global_wait_until = Instant::now().add(Duration::from_secs(60));
+        let global_wait_until = Instant::now().add(Duration::from_secs(30));
         println!(
             "num_clients {}, tps_per_client {}, test_time {:?}, global_wait_till {:?}",
             clients.len(),

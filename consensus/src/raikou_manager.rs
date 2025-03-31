@@ -875,7 +875,7 @@ where
             .map(|(k, v)| (v, k))
             .collect();
 
-        let (deserialized_messages_tx, deserialized_messages_rx) = tokio::sync::mpsc::channel(1024);
+        let (deserialized_messages_tx, deserialized_messages_rx) = tokio::sync::mpsc::channel(5000);
 
         // Spawn a separate task to deserialize messages.
         // This helps to avoid blocking the main loop.

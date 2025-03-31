@@ -396,7 +396,7 @@ pub async fn handle_txn(
     mempool_tx.send((txn, tx, Instant::now())).await.ok();
 
     if let Err(_) = rx.await {
-        debug!("api: response channel dropped unexpectedly");
+        // debug!("api: response channel dropped unexpectedly");
         return Ok(reply::with_status(
             reply::reply(),
             warp::hyper::StatusCode::BAD_REQUEST,

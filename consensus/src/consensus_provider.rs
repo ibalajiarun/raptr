@@ -17,7 +17,7 @@ use crate::{
     network_interface::{ConsensusMsg, ConsensusNetworkClient},
     persistent_liveness_storage::StorageWriteProxy,
     pipeline::execution_client::{DummyExecutionClient, ExecutionProxyClient, TExecutionClient},
-    quorum_store::quorum_store_db::QuorumStoreDB,
+    quorum_store::quorum_store_db::{QuorumStoreDB, RocksdbPropertyReporter},
     rand::rand_gen::storage::db::RandDb,
     state_computer::ExecutionProxy,
     transaction_filter::TransactionFilter,
@@ -39,8 +39,11 @@ use aptos_validator_transaction_pool::VTxnPoolState;
 use aptos_vm::aptos_vm::AptosVMBlockExecutor;
 use futures::channel::mpsc;
 use move_core_types::account_address::AccountAddress;
+use once_cell::sync::{Lazy, OnceCell};
 use std::{collections::HashMap, sync::Arc};
 use tokio::runtime::Runtime;
+
+const REPORTER: OnceCell<RocksdbPropertyReporter> = OnceCell::new();
 
 /// Helper function to start consensus based on configuration and return the runtime
 #[allow(clippy::unwrap_used)]
@@ -62,6 +65,9 @@ pub fn start_consensus(
     let runtime = aptos_runtimes::spawn_named_runtime("consensus".into(), None);
     let storage = Arc::new(StorageWriteProxy::new(node_config, aptos_db.reader.clone()));
     let quorum_store_db = Arc::new(QuorumStoreDB::new(node_config.storage.dir()));
+
+    let reporter = RocksdbPropertyReporter::new(quorum_store_db.clone());
+    REPORTER.set(reporter).unwrap();
 
     let txn_notifier = Arc::new(MempoolNotifier::new(
         consensus_to_mempool_sender.clone(),

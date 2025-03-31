@@ -362,7 +362,7 @@ pub fn setup_networks_and_get_interfaces(
                     network_id,
                     &network_config,
                     consensus_network_configuration(node_config, compress),
-                    true,
+                    false,
                 );
                 if consensus_network_handle.is_none() {
                     peers_and_metadata1 = Some(peers_and_metadata);

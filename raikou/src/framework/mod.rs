@@ -1,9 +1,12 @@
 // Copyright (c) Aptos Foundation
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::framework::{
-    context::{Context, Event, SimpleContext},
-    module_network::{ModuleEvent, ModuleNetworkService},
+use crate::{
+    framework::{
+        context::{Context, Event, SimpleContext},
+        module_network::{ModuleEvent, ModuleNetworkService},
+    },
+    monitor,
 };
 use std::{any::Any, future::Future, sync::Arc};
 
@@ -88,26 +91,26 @@ pub trait Protocol: Send + Sync {
                 // Listen for incoming events.
                 // While waiting for an event, the lock is not held.
                 let mut lock = match ctx.next_event().await {
-                    Event::Message(from, message) => {
+                    Event::Message(from, message) => monitor!("poll_event", {
                         let mut lock = protocol.lock().await;
                         lock.message_handler(ctx, from, message).await;
                         lock
-                    },
-                    Event::Timer(event) => {
+                    }),
+                    Event::Timer(event) => monitor!("poll_timer", {
                         let mut lock = protocol.lock().await;
                         lock.timer_event_handler(ctx, event).await;
                         lock
-                    },
-                    Event::ModuleEvent(module, event) => {
+                    }),
+                    Event::ModuleEvent(module, event) => monitor!("poll_module_event", {
                         let mut lock = protocol.lock().await;
                         lock.module_event_handler(ctx, module, event).await;
                         lock
-                    },
+                    }),
                 };
 
                 // Run the event handler and then the condition handlers
                 // under the same lock so that nothing can happen in between.
-                lock.condition_handler(ctx).await;
+                monitor!("poll_cond_handler", lock.condition_handler(ctx).await);
             }
         }
     }

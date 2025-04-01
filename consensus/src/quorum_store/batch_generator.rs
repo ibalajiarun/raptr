@@ -135,31 +135,31 @@ impl BatchGenerator {
             return;
         }
 
-        let txns_in_progress: Vec<_> = txns
-            .par_iter()
-            .with_min_len(optimal_min_len(txns.len(), 32))
-            .map(|txn| {
-                (
-                    TransactionSummary::new(
-                        txn.sender(),
-                        txn.sequence_number(),
-                        txn.committed_hash(),
-                    ),
-                    TransactionInProgress::new(txn.gas_unit_price()),
-                )
-            })
-            .collect();
+        // let txns_in_progress: Vec<_> = txns
+        //     .par_iter()
+        //     .with_min_len(optimal_min_len(txns.len(), 32))
+        //     .map(|txn| {
+        //         (
+        //             TransactionSummary::new(
+        //                 txn.sender(),
+        //                 txn.sequence_number(),
+        //                 txn.committed_hash(),
+        //             ),
+        //             TransactionInProgress::new(txn.gas_unit_price()),
+        //         )
+        //     })
+        //     .collect();
 
         let mut txns = vec![];
-        for (summary, info) in txns_in_progress {
-            let txn_info = self
-                .txns_in_progress_sorted
-                .entry(summary)
-                .or_insert_with(|| TransactionInProgress::new(info.gas_unit_price));
-            txn_info.increment();
-            txn_info.gas_unit_price = info.gas_unit_price.max(txn_info.gas_unit_price);
-            txns.push(summary);
-        }
+        // for (summary, info) in txns_in_progress {
+        //     let txn_info = self
+        //         .txns_in_progress_sorted
+        //         .entry(summary)
+        //         .or_insert_with(|| TransactionInProgress::new(info.gas_unit_price));
+        //     txn_info.increment();
+        //     txn_info.gas_unit_price = info.gas_unit_price.max(txn_info.gas_unit_price);
+        //     txns.push(summary);
+        // }
         let updated_expiry_time_usecs = self
             .batches_in_progress
             .get(&(author, batch_id))

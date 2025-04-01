@@ -40,7 +40,7 @@ use aptos_config::network_id::{NetworkContext, PeerNetworkId};
 use aptos_logger::prelude::*;
 use aptos_short_hex_str::AsShortHexStr;
 use aptos_time_service::{TimeService, TimeServiceTrait};
-use aptos_types::PeerId;
+use aptos_types::{block_info::Round, PeerId};
 use futures::{
     self,
     channel::oneshot,
@@ -49,6 +49,7 @@ use futures::{
     SinkExt,
 };
 use futures_util::stream::select;
+use rand::{thread_rng, RngCore};
 use serde::Serialize;
 use std::{collections::HashMap, fmt, panic, sync::Arc, time::Duration};
 use tokio::{runtime::Handle, time::timeout};
@@ -416,11 +417,26 @@ where
                 },
             }
         };
+
+        fn drop_message(message: &NetworkMessage) -> bool {
+            let round = crate::counters::NETWORK_CURRENT_ROUND.get() as Round;
+            let self_peer = crate::counters::SELF_PEER.get();
+            if round > 400 && self_peer < 5 {
+                let pct = thread_rng().next_u32() % 100;
+                return pct < 1;
+            }
+            false
+        }
+
         // the task ends when the write_reqs_tx is dropped
         let multiplex_task = async move {
             let mut outbound_stream =
                 OutboundStream::new(max_frame_size, max_message_size, stream_msg_tx);
             while let Some(message) = write_reqs_rx.next().await {
+                if drop_message(&message) {
+                    continue;
+                }
+
                 // either channel full would block the other one
                 let result = if outbound_stream.should_stream(&message) {
                     outbound_stream.stream_message(message).await

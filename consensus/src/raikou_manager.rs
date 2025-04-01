@@ -150,6 +150,7 @@ impl RaikouManager {
 
         let node_id = *address_to_index.get(&self_author).unwrap();
         info!("my node id is {}", node_id);
+        aptos_network::counters::SELF_PEER.set(node_id as i64);
 
         if validator_set.active_validators[node_id]
             .config()
@@ -995,6 +996,7 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
         exclude: HashSet<raikou_types::BatchInfo>,
         exclude_authors: Option<BitVec>,
     ) -> raikou_types::Payload {
+        aptos_network::counters::NETWORK_CURRENT_ROUND.set(round as i64);
         let mut optqs_params = self.optqs_payload_param_provider.get_params();
         if let Some(param) = optqs_params.as_mut() {
             if let Some(additional_exclude) = exclude_authors {

@@ -681,3 +681,20 @@ pub fn inbound_queue_delay_observe(protocol_id: ProtocolId, seconds: f64) {
         .with_label_values(&[protocol_id.as_str()])
         .observe(seconds)
 }
+
+/// This counter is set to the last round reported by the local round_state.
+pub static NETWORK_CURRENT_ROUND: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "aptos_network_dag_current_round",
+        "This counter is set to the last round reported by the dag driver.",
+    )
+    .unwrap()
+});
+
+pub static SELF_PEER: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "aptos_network_dag_self_peer",
+        "This counter is set to the last round reported by the dag driver.",
+    )
+    .unwrap()
+});

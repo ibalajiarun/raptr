@@ -995,22 +995,22 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
         exclude: HashSet<raikou_types::BatchInfo>,
         exclude_authors: Option<BitVec>,
     ) -> raikou_types::Payload {
-        // let mut optqs_params = self.optqs_payload_param_provider.get_params();
-        // if let Some(param) = optqs_params.as_mut() {
-        //     if let Some(additional_exclude) = exclude_authors {
-        //         for idx in additional_exclude.iter_ones() {
-        //             let author = *self.index_to_address.get(&idx).unwrap();
-        //             param.exclude_authors.insert(author);
-        //         }
-        //     }
-        // }
+        let mut optqs_params = self.optqs_payload_param_provider.get_params();
+        if let Some(param) = optqs_params.as_mut() {
+            if let Some(additional_exclude) = exclude_authors {
+                for idx in additional_exclude.iter_ones() {
+                    let author = *self.index_to_address.get(&idx).unwrap();
+                    param.exclude_authors.insert(author);
+                }
+            }
+        }
 
         // let optqs_params = Some(OptQSPayloadPullParams {
         //     exclude_authors: HashSet::new(),
         //     minimum_batch_age_usecs: Duration::from_millis(30).as_micros() as u64,
         // });
 
-        let optqs_params = self.optqs_payload_param_provider.get_params();
+        // let optqs_params = self.optqs_payload_param_provider.get_params();
         let (_, payload) = self
             .payload_client
             .pull_payload(

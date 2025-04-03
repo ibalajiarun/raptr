@@ -318,7 +318,7 @@ impl UniformPerValidatorRateClient {
             let client = self.client.clone();
             let client_id = self.client_id;
             let wait_until_multiplier = slot % 10;
-            let wait_until = wait_until + (Duration::from_secs(20) * wait_until_multiplier as u32);
+            let wait_until = wait_until + (Duration::from_secs(10) * wait_until_multiplier as u32);
             let slow_requests = slow_requests.clone();
 
             let handle = tokio::spawn(async move {

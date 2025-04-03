@@ -193,10 +193,10 @@ impl RaikouManager {
             n_nodes,
             f,
             storage_requirement: f + 1, // f + (f / 2 + 1),
-            leader_timeout: Duration::from_secs_f64(delta * 5.0),
+            leader_timeout: Duration::from_secs_f64(delta * 4.0),
             delta: Duration::from_secs_f64(delta),
             end_of_run: Instant::now() + Duration::from_secs_f64(delta) * total_duration_in_delta,
-            extra_wait_before_qc_vote: Duration::from_secs_f64(delta * 0.2),
+            extra_wait_before_qc_vote: Duration::from_secs_f64(delta * 0.1),
             enable_partial_qc_votes: true,
             enable_commit_votes: true,
             status_interval: Duration::from_secs_f64(delta) * 10,
@@ -517,6 +517,7 @@ impl RaikouManager {
                     let module_network_sender = module_network.new_sender();
                     let payload_manager = payload_manager.clone();
                     tokio::spawn(async move {
+                        aptos_network::counters::NETWORK_CURRENT_ROUND.set(payload.round() as i64);
                         let (prefix, _) = monitor!(
                             "payload_manager_available",
                             payload_manager.available_prefix(&payload.inner.as_raikou_payload(), 0)
@@ -996,7 +997,6 @@ impl DisseminationLayer for RaikouQSDisseminationLayer {
         exclude: HashSet<raikou_types::BatchInfo>,
         exclude_authors: Option<BitVec>,
     ) -> raikou_types::Payload {
-        aptos_network::counters::NETWORK_CURRENT_ROUND.set(round as i64);
         let mut optqs_params = self.optqs_payload_param_provider.get_params();
         if let Some(param) = optqs_params.as_mut() {
             if let Some(additional_exclude) = exclude_authors {

@@ -1393,7 +1393,7 @@ impl<P: OnChainConfigProvider> EpochManager<P> {
         let (raikou_shutdown_tx, raikou_shutdown_rx) = oneshot::channel();
         self.raikou_shutdown_tx = Some(raikou_shutdown_tx);
 
-        let delta = 0.4;
+        let delta = 0.2;
 
         #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
         let total_duration_in_delta = 200;

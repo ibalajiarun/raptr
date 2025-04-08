@@ -191,7 +191,7 @@ impl ProofManager {
             / (txns_with_proof_size.count() as f64 + opt_batch_txns_size.count() as f64);
         counters::BATCH_PROOF_RATIO.observe(proof_ratio);
 
-        let response = if request.maybe_optqs_payload_pull_params.is_some() {
+        let response = if true {
             let mut sub_blocks = SubBlocks::default();
 
             fn div_ceil(dividend: usize, divisor: usize) -> usize {

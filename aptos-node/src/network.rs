@@ -350,11 +350,11 @@ pub fn setup_networks_and_get_interfaces(
                 panic!("There can be at most two validator network!");
             } else {
                 let compress = if consensus_network_handle.is_none() {
-                    true
+                    false
                 } else if consensus_network_handle2.is_none() {
                     false
                 } else {
-                    true
+                    false
                 };
 
                 let network_handle = register_client_and_service_with_network(
@@ -602,7 +602,7 @@ fn transform_network_handles_into_interfaces(
     let consensus_interfaces = consensus_network_handle.map(|consensus_network_handle| {
         create_network_interfaces(
             vec![consensus_network_handle],
-            consensus_network_configuration(node_config, true),
+            consensus_network_configuration(node_config, false),
             peers_and_metadata.clone(),
         )
     });
@@ -618,7 +618,7 @@ fn transform_network_handles_into_interfaces(
     let consensus_interfaces3 = consensus_network_handle3.map(|consensus_network_handle| {
         create_network_interfaces(
             vec![consensus_network_handle],
-            consensus_network_configuration(node_config, true),
+            consensus_network_configuration(node_config, false),
             peers_and_metadata3.clone(),
         )
     });

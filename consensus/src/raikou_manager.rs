@@ -1,6 +1,3 @@
-// Copyright (c) Aptos Foundation
-// SPDX-License-Identifier: Apache-2.0
-
 use crate::{
     counters::RAIKOU_COMMIT_NOTIFY_TO_MEMPOOL_NOTIFY,
     liveness::proposal_status_tracker::{
@@ -56,7 +53,6 @@ use raikou::{
         injection::{delay_injection, drop_injection},
         module_network::{match_event_type, ModuleId, ModuleNetwork, ModuleNetworkService},
         network::{MessageCertifier, MessageVerifier, NetworkService},
-        tcp_network::TcpNetworkService,
         timer::LocalTimerService,
         NodeId, Protocol,
     },
@@ -260,32 +256,6 @@ impl RaikouManager {
             })
             .collect_vec();
 
-        #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
-        let dissemination = Self::spawn_fake_dissemination_layer(
-            node_id,
-            n_nodes,
-            f,
-            poa_quorum,
-            diss_module_network,
-            delta,
-            cons_module_id,
-            start_time,
-            &ip_addresses,
-            signer.clone(),
-            sig_verifier.clone(),
-            enable_optimistic_dissemination,
-            dissemination::Metrics {
-                batch_commit_time: Some(batch_commit_time.new_sender()),
-                batch_execute_time: Some(batch_execute_time.new_sender()),
-                queueing_time: Some(queueing_time.new_sender()),
-                penalty_wait_time: Some(penalty_wait_time.new_sender()),
-                fetch_wait_time_after_commit: Some(fetch_wait_time_after_commit.new_sender()),
-            },
-            executed_txns_counter.clone(),
-        )
-        .await;
-
-        #[cfg(any(not(feature = "sim-types"), feature = "force-aptos-types"))]
         let dissemination = Self::spawn_qs_dissemination_layer(
             node_id,
             payload_client,
@@ -474,7 +444,6 @@ impl RaikouManager {
         }
     }
 
-    #[cfg(any(not(feature = "sim-types"), feature = "force-aptos-types"))]
     async fn spawn_qs_dissemination_layer(
         node_id: NodeId,
         payload_client: Arc<dyn PayloadClient>,
@@ -570,7 +539,6 @@ impl RaikouManager {
                     let dissemination::NewQCWithPayload { payload, qc } = *event;
                     let block_author = index_to_address[&payload.author()];
                     let block_voters: BitVec = qc.signer_ids().map(|id| id as u8).collect();
-                    // TODO: recheck fetching
                     monitor!(
                         "raikouman_newqc_fetch",
                         payload_manager.prefetch_payload_data(
@@ -587,112 +555,6 @@ impl RaikouManager {
                 }
             }
         });
-
-        dissemination
-    }
-
-    #[cfg(all(feature = "sim-types", not(feature = "force-aptos-types")))]
-    async fn spawn_fake_dissemination_layer(
-        node_id: NodeId,
-        n_nodes: usize,
-        f: usize,
-        poa_quorum: usize,
-        diss_module_network: ModuleNetworkService,
-        delta: f64,
-        consensus_module_id: ModuleId,
-        start_time: Instant,
-        ip_addresses: &Vec<IpAddr>,
-        signer: raikou::framework::crypto::Signer,
-        sig_verifier: raikou::framework::crypto::SignatureVerifier,
-        enable_optimistic_dissemination: bool,
-        metrics: dissemination::Metrics,
-        executed_txns_counter: Arc<AtomicUsize>,
-    ) -> impl DisseminationLayer {
-        let batch_interval_secs = delta;
-        let expected_load = f64::ceil(n_nodes as f64 * (3. * delta) / batch_interval_secs) as usize;
-
-        let config = dissemination::native::Config {
-            module_id: diss_module_network.module_id(),
-            n_nodes,
-            f,
-            poa_quorum,
-            delta: Duration::from_secs_f64(delta),
-            batch_interval: Duration::from_secs_f64(batch_interval_secs),
-            enable_optimistic_dissemination,
-            // penalty tracker doesn't work with 0 delays
-            enable_penalty_tracker: false,
-            penalty_tracker_report_delay: Duration::from_secs_f64(delta * 5.),
-            batch_fetch_multiplicity: std::cmp::min(2, n_nodes),
-            batch_fetch_interval: Duration::from_secs_f64(delta) * 2,
-            status_interval: Duration::from_secs_f64(delta) * 10,
-            block_size_limit: dissemination::native::BlockSizeLimit::from_max_number_of_poas(
-                f64::ceil(expected_load as f64 * 1.5) as usize,
-                n_nodes,
-            ),
-        };
-
-        let diss_timer = LocalTimerService::new();
-
-        // TODO: make these into parameters.
-        let target_tps = 100;
-        let n_client_workers = 5;
-
-        let batch_size =
-            f64::ceil(target_tps as f64 * batch_interval_secs / n_nodes as f64) as usize;
-
-        let txns_iter = run_fake_client(batch_size, n_client_workers).await;
-
-        let (execute_tx, mut execute_rx) =
-            tokio::sync::mpsc::channel::<dissemination::native::Batch>(1024);
-
-        tokio::spawn(async move {
-            while let Some(batch) = execute_rx.recv().await {
-                executed_txns_counter.fetch_add(batch.txns().len(), Ordering::SeqCst);
-            }
-        });
-
-        let dissemination = dissemination::native::NativeDisseminationLayer::new(
-            node_id,
-            config,
-            txns_iter,
-            consensus_module_id,
-            true,
-            metrics,
-            signer.clone(),
-            sig_verifier,
-            execute_tx,
-        );
-
-        let diss_network_service = TcpNetworkService::new(
-            node_id,
-            format!("0.0.0.0:{}", DISS_BASE_PORT + node_id as u16)
-                .parse()
-                .unwrap(),
-            raikou::framework::tcp_network::Config {
-                peers: ip_addresses
-                    .iter()
-                    .enumerate()
-                    .map(|(peer_id, addr)| {
-                        format!("{}:{}", addr, DISS_BASE_PORT + peer_id as u16)
-                            .parse()
-                            .unwrap()
-                    })
-                    .collect(),
-                streams_per_peer: 4,
-            },
-            Arc::new(dissemination::native::Certifier::new(signer)),
-            Arc::new(dissemination::native::Verifier::new(&dissemination).await),
-            1 * 1024 * 1024,
-        )
-        .await;
-
-        tokio::spawn(Protocol::run(
-            dissemination.protocol(),
-            node_id,
-            diss_network_service,
-            diss_module_network,
-            diss_timer,
-        ));
 
         dissemination
     }
@@ -968,7 +830,6 @@ where
     }
 }
 
-#[cfg(any(feature = "force-aptos-types", not(feature = "sim-types")))]
 struct RaikouQSDisseminationLayer {
     node_id: usize,
     payload_client: Arc<dyn PayloadClient>,
@@ -980,10 +841,8 @@ struct RaikouQSDisseminationLayer {
     index_to_address: HashMap<usize, Author>,
 }
 
-#[cfg(any(feature = "force-aptos-types", not(feature = "sim-types")))]
 impl RaikouQSDisseminationLayer {}
 
-#[cfg(any(feature = "force-aptos-types", not(feature = "sim-types")))]
 impl DisseminationLayer for RaikouQSDisseminationLayer {
     fn module_id(&self) -> ModuleId {
         self.module_id

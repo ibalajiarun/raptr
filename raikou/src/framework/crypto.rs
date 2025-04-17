@@ -1,6 +1,3 @@
-// Copyright (c) Aptos Foundation
-// SPDX-License-Identifier: Apache-2.0
-
 use crate::framework::NodeId;
 use aptos_crypto::{
     bls12381::{self, PublicKey},
@@ -13,7 +10,7 @@ use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-// FIXME: for testing and prototyping only, obviously not safe in prod.
+// Note: For testing and prototyping only, obviously not secure in practice.
 fn deterministic_tag_private_keys(node_id: usize, n_tags: usize) -> Vec<bls12381::PrivateKey> {
     let mut rng = rand::rngs::StdRng::seed_from_u64(node_id as u64);
     (0..n_tags)

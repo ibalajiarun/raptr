@@ -2609,8 +2609,6 @@ pub fn coin_migrate_to_fungible_store(coin_type: TypeTag) -> TransactionPayload 
 
 /// Transfers `amount` of coins `CoinType` from `from` to `to`.
 pub fn coin_transfer(coin_type: TypeTag, to: AccountAddress, amount: u64) -> TransactionPayload {
-    // 98 Bytes of zeros
-    let padding = Vec::from(&[1; 97]);
     TransactionPayload::EntryFunction(EntryFunction::new(
         ModuleId::new(
             AccountAddress::new([
@@ -2621,11 +2619,7 @@ pub fn coin_transfer(coin_type: TypeTag, to: AccountAddress, amount: u64) -> Tra
         ),
         ident_str!("transfer").to_owned(),
         vec![coin_type],
-        vec![
-            bcs::to_bytes(&to).unwrap(),
-            bcs::to_bytes(&amount).unwrap(),
-            padding,
-        ],
+        vec![bcs::to_bytes(&to).unwrap(), bcs::to_bytes(&amount).unwrap()],
     ))
 }
 

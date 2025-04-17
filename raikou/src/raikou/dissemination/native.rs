@@ -1,6 +1,3 @@
-// Copyright (c) Aptos Foundation
-// SPDX-License-Identifier: Apache-2.0
-
 use crate::{
     framework::{
         crypto,
@@ -437,7 +434,12 @@ where
         (prefix, missing_authors)
     }
 
-    async fn notify_commit(&self, payloads: Vec<Payload>, _block_timestamp: u64) {
+    async fn notify_commit(
+        &self,
+        payloads: Vec<Payload>,
+        _block_timestamp: u64,
+        _voters: Option<BitVec>,
+    ) {
         let mut inner = self.inner.lock().await;
         let now = Instant::now();
 

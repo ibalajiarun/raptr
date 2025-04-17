@@ -1,6 +1,3 @@
-// Copyright (c) Aptos Foundation
-// SPDX-License-Identifier: Apache-2.0
-
 use crate::framework::{timer::NeverReturn, NodeId};
 use futures::poll;
 use rand::{distributions::Distribution, Rng};
@@ -151,7 +148,6 @@ where
     /// Since the injection happens in a new task, `send` always returns immediately, not
     /// affected by any injected delay.
     async fn send(&self, mut msg: M, targets: Vec<NodeId>) {
-        // TODO: consider spawning a co-routine to certify off the critical path.
         self.certifier.certify(&mut msg).await.unwrap();
 
         for target in targets {
@@ -212,7 +208,6 @@ where
     }
 
     async fn recv(&mut self) -> (NodeId, M) {
-        // TODO: add verification
         self.recv.recv().await.unwrap()
     }
 }

@@ -1,6 +1,3 @@
-// Copyright (c) Aptos Foundation
-// SPDX-License-Identifier: Apache-2.0
-
 use crate::{
     framework::NodeId,
     raikou::types::{Round, *},
@@ -279,12 +276,6 @@ impl PenaltyTracker {
                         );
                 }
             } else {
-                // TODO: What to do with nodes that have no optimistically proposed batches?
-                //       Most likely, it happens because they already have too large penalty
-                //       and their transactions go through the slow path.
-                //       At some point we should give them a chance to rehabilitate themselves.
-                // TODO: Idea: include their batch hashes in the block, but do not actually
-                //       commit them, just to collect reports.
                 updated_penalties[node_id] = self.penalties[node_id];
             }
         }
@@ -336,7 +327,6 @@ impl PenaltyTracker {
         if self.reports.len() < self.config.n_nodes - self.config.f {
             // If there are not enough reports, the network must be in an asynchronous period.
             // Do not change the penalties.
-            // TODO: What's the best strategy fo this case?
             aptos_logger::warn!(
                 "Not enough reports to compute new penalties after round {} ({} / {}). \
                    Either the network is asynchronous or the penalty tracker is misconfigured.",

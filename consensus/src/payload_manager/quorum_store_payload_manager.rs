@@ -182,7 +182,6 @@ impl TPayloadManager for QuorumStorePayloadManager {
         block_voters: Option<BitVec>,
     ) {
         // This is deprecated.
-        // TODO(ibalajiarun): Remove this after migrating to OptQuorumStore type
         let request_txns_and_update_status =
             move |proof_with_status: &ProofWithData, batch_reader: Arc<dyn BatchReader>| {
                 Self::request_transactions(

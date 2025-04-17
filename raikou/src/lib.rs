@@ -1,9 +1,5 @@
-// Copyright (c) Aptos Foundation
-// SPDX-License-Identifier: Apache-2.0
-
 pub mod delays;
 pub mod framework;
-pub mod leader_schedule;
 pub mod metrics;
 pub mod raikou;
 

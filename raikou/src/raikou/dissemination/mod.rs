@@ -1,6 +1,3 @@
-// Copyright (c) Aptos Foundation
-// SPDX-License-Identifier: Apache-2.0
-
 use crate::{
     framework::{
         module_network::{ModuleEventTrait, ModuleId},
@@ -108,10 +105,4 @@ pub struct Metrics {
     pub queueing_time: Option<metrics::UnorderedSender<(Instant, f64)>>,
     pub penalty_wait_time: Option<metrics::UnorderedSender<(Instant, f64)>>,
     pub fetch_wait_time_after_commit: Option<metrics::UnorderedSender<(Instant, f64)>>,
-    // pub average_penalty: Option<metrics::UnorderedSender<(Instant, f64)>>,
-    // pub total_committed_batches: Option<metrics::UnorderedSender<(Instant, usize)>>,
-    // pub two_chain_commit_batches: Option<metrics::UnorderedSender<(Instant, usize)>>,
-    // pub order_vote_committed_batches: Option<metrics::UnorderedSender<(Instant, usize)>>,
-    // pub committed_acs: Option<metrics::UnorderedSender<(Instant, usize)>>,
-    // pub optimistically_committed_batches: Option<metrics::UnorderedSender<(Instant, usize)>>,
 }

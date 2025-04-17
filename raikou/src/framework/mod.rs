@@ -1,6 +1,3 @@
-// Copyright (c) Aptos Foundation
-// SPDX-License-Identifier: Apache-2.0
-
 use crate::{
     framework::{
         context::{Context, Event, SimpleContext},
@@ -15,7 +12,6 @@ pub mod crypto;
 pub mod injection;
 pub mod module_network;
 pub mod network;
-pub mod tcp_network;
 pub mod timer;
 
 pub type NodeId = usize;

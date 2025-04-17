@@ -1,6 +1,3 @@
-// Copyright (c) Aptos Foundation
-// SPDX-License-Identifier: Apache-2.0
-
 use crate::framework::{
     module_network::{ModuleEvent, ModuleEventTrait, ModuleId, ModuleNetworkService},
     network::{NetworkSender, NetworkService},

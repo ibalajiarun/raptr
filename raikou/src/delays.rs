@@ -39,7 +39,6 @@ pub fn heterogeneous_symmetric_delay(
 ) -> impl DelayFunction {
     move |from: NodeId, to: NodeId| {
         if from == to {
-            // TODO: check if 0 delays actually break anything.
             return 0.00001;
         }
 

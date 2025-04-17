@@ -1,6 +1,3 @@
-// Copyright (c) Aptos Foundation
-// SPDX-License-Identifier: Apache-2.0
-
 use std::{
     any::{Any, TypeId},
     collections::{btree_map::Entry, BTreeMap},
@@ -33,7 +30,6 @@ pub trait ModuleEventTrait: Any + Debug + Send + 'static {
         self.type_id()
     }
 
-    // TODO: figure out if it's possible to add a default implementation for this method.
     fn as_any(self: Box<Self>) -> Box<dyn Any>;
 }
 

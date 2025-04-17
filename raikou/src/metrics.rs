@@ -1,6 +1,3 @@
-// Copyright (c) Aptos Foundation
-// SPDX-License-Identifier: Apache-2.0
-
 use crate::metrics;
 use std::{cmp, cmp::min, io, ops, sync::Arc, time::Duration};
 use tokio::{
